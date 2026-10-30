@@ -10,6 +10,7 @@ use super::{
 use crate::mesher::Vertex;
 use horizon_core::geometry::trig::Mth;
 use std::f32::consts::PI;
+use std::sync::Arc;
 
 /// A texture lookup into the shared atlas (name without namespace -> uv rect).
 pub type Atlas<'a> = &'a dyn Fn(&str) -> Option<[f32; 4]>;
@@ -41,8 +42,8 @@ fn scroll_u(u: f32, scroll: f32) -> f32 {
 
 /// One draw of a model with a texture.
 pub struct Layer {
-    pub model: String,
-    pub texture: String,
+    pub model: Arc<str>,
+    pub texture: Arc<str>,
     pub color: u32,
     pub full_bright: bool,
     /// `RenderTypes.breezeWind`: the texture scrolls with the entity's age.
@@ -829,58 +830,102 @@ fn humanoid_armor(m: &Mob, v: &mut Vec<Layer>) {
     if super::equine::is_equine(m.species()) || avatar(m) {
         return;
     }
+    let slots = [
+        (&m.extra.head, &m.extra.armor[0]),
+        (&m.extra.chest, &m.extra.armor[1]),
+        (&m.extra.legs, &m.extra.armor[2]),
+        (&m.extra.feet, &m.extra.armor[3]),
+    ];
+    if slots.iter().all(|(item, _)| item.is_none()) {
+        return;
+    }
     let (model, _) = body(m);
     let Some(base) = model.strip_suffix("#main") else {
         return;
     };
-    let slots = [
-        (&m.extra.head, &m.extra.armor[0], "helmet"),
-        (&m.extra.chest, &m.extra.armor[1], "chestplate"),
-        (&m.extra.legs, &m.extra.armor[2], "leggings"),
-        (&m.extra.feet, &m.extra.armor[3], "boots"),
-    ];
-    for (item, stack, layer) in slots {
-        let Some(name) = item.as_deref().and_then(|i| i.strip_prefix("minecraft:")) else {
+    for (slot, (item, stack)) in slots.into_iter().enumerate() {
+        let Some(item) = item.as_deref() else {
             continue;
         };
-        let Some(material) = name.strip_suffix(&format!("_{layer}")) else {
+        let Some(names) = armor_names(item, slot, base) else {
             continue;
         };
-        let asset = match material {
-            "golden" => "gold",
-            "turtle" => "turtle_scute",
-            other => other,
-        };
-        let folder = if layer == "leggings" {
-            "humanoid_leggings"
-        } else {
-            "humanoid"
-        };
-        let model = format!("{base}#{layer}");
         // EquipmentLayerRenderer.getColorForLayer: the leather layer takes
         // the stack's dye colour, the colour it has when undyed otherwise.
-        let tint = if asset == "leather" {
+        let tint = if names.leather_overlay.is_some() {
             armor_tint(Some(0xA06540), stack.as_ref())
         } else {
             0xFFFF_FFFF
         };
         v.push(Layer {
-            model: model.clone(),
-            texture: format!("entity/equipment/{folder}/{asset}"),
+            model: names.model.clone(),
+            texture: names.texture,
             color: tint,
             full_bright: false,
             scroll: 0.0,
         });
-        if asset == "leather" {
+        if let Some(texture) = names.leather_overlay {
             v.push(Layer {
-                model,
-                texture: format!("entity/equipment/{folder}/leather_overlay"),
+                model: names.model,
+                texture,
                 color: 0xFFFF_FFFF,
                 full_bright: false,
                 scroll: 0.0,
             });
         }
     }
+}
+/// The model and textures of one worn armour piece (`zombie#helmet`,
+/// `entity/equipment/humanoid/iron`, and leather's overlay).
+#[derive(Clone)]
+struct ArmorNames {
+    model: Arc<str>,
+    texture: Arc<str>,
+    leather_overlay: Option<Arc<str>>,
+}
+/// Item -> (slot, base model, names) seen so far: the names are built once
+/// instead of formatted for every armoured mob in every frame.
+type ArmorNameCache = rustc_hash::FxHashMap<Box<str>, Vec<(usize, Box<str>, Option<ArmorNames>)>>;
+thread_local! {
+    static ARMOR_NAMES: std::cell::RefCell<ArmorNameCache> = std::cell::RefCell::default();
+}
+/// `armor_layer_names` through the cache.
+fn armor_names(item: &str, slot: usize, base: &str) -> Option<ArmorNames> {
+    ARMOR_NAMES.with_borrow_mut(|cache| {
+        let seen = match cache.get_mut(item) {
+            Some(seen) => seen,
+            None => cache.entry(item.into()).or_default(),
+        };
+        if let Some((_, _, names)) = seen.iter().find(|(s, b, _)| *s == slot && **b == *base) {
+            return names.clone();
+        }
+        let names = armor_layer_names(item, slot, base);
+        seen.push((slot, base.into(), names.clone()));
+        names
+    })
+}
+/// The names `HumanoidArmorLayer` draws `item` in `slot` (0 head .. 3 feet)
+/// with, on the `base` model (`zombie`), or `None` when it is no armour piece.
+fn armor_layer_names(item: &str, slot: usize, base: &str) -> Option<ArmorNames> {
+    let layer = ["helmet", "chestplate", "leggings", "boots"][slot];
+    let name = item.strip_prefix("minecraft:")?;
+    let material = name.strip_suffix(&format!("_{layer}"))?;
+    let asset = match material {
+        "golden" => "gold",
+        "turtle" => "turtle_scute",
+        other => other,
+    };
+    let folder = if layer == "leggings" {
+        "humanoid_leggings"
+    } else {
+        "humanoid"
+    };
+    Some(ArmorNames {
+        model: format!("{base}#{layer}").into(),
+        texture: format!("entity/equipment/{folder}/{asset}").into(),
+        leather_overlay: (asset == "leather")
+            .then(|| format!("entity/equipment/{folder}/leather_overlay").into()),
+    })
 }
 impl super::MobType {
     /// The main model layer key without the namespace.
@@ -1225,6 +1270,7 @@ pub fn render_with(
     extra: &[(&Part, [f32; 4], u32, u32)],
     out: &mut Vec<Vertex>,
 ) {
+    LAST_BODY.with_borrow_mut(|last| *last = None);
     // The invisibility effect hides the model (a drinking wandering trader);
     // an illusioner shows its four mirror images instead.
     if super::trader::is_invisible(m) {
@@ -1341,11 +1387,7 @@ fn render_visible(
     let overlay = u32::from(red_overlay(m));
     let s = anim::state(m, alpha);
     let (model_key, texture) = body(m);
-    let model = m
-        .kind
-        .layer(&model_key)
-        .cloned()
-        .unwrap_or_else(|| m.kind.model.clone());
+    let model = body_model(m, &model_key);
     let mut poses = Poses::new(&model);
     anim::setup(m, &s, &mut poses, &data.animations);
     let draw_body = |out: &mut Vec<Vertex>| {
@@ -1467,6 +1509,76 @@ fn render_visible(
     if shell_last {
         draw_body(out);
     }
+    LAST_BODY.with_borrow_mut(|last| {
+        *last = Some(BodyPoses {
+            key: BodyKey::of(m, alpha, data),
+            model,
+            poses,
+        });
+    });
+}
+/// The main model a mob draws with (`body`'s model key, else the type's model).
+fn body_model(m: &Mob, model_key: &str) -> std::sync::Arc<Part> {
+    m.kind
+        .layer(model_key)
+        .cloned()
+        .unwrap_or_else(|| m.kind.model.clone())
+}
+/// Which mob, partial tick and data a set of body poses belongs to.
+#[derive(PartialEq)]
+struct BodyKey {
+    mob: *const Mob,
+    id: u32,
+    age: u32,
+    alpha: u32,
+    data: *const MobData,
+}
+impl BodyKey {
+    fn of(m: &Mob, alpha: f32, data: &MobData) -> Self {
+        Self {
+            mob: m,
+            id: m.id,
+            age: m.age,
+            alpha: alpha.to_bits(),
+            data,
+        }
+    }
+}
+/// The body poses `render_visible` drew last. `ItemInHandLayer` and the
+/// other layers that follow read the same posed model, so `setupAnim` runs
+/// once per mob instead of once more for each hand.
+struct BodyPoses {
+    key: BodyKey,
+    model: std::sync::Arc<Part>,
+    poses: Poses,
+}
+thread_local! {
+    static LAST_BODY: std::cell::RefCell<Option<BodyPoses>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// `f` with the mob's posed main model: the poses just drawn when they are
+/// this mob's at this partial tick, else posed afresh.
+fn with_body_poses<R>(
+    m: &Mob,
+    alpha: f32,
+    data: &MobData,
+    f: impl FnOnce(&Part, &Poses) -> R,
+) -> R {
+    let mut f = Some(f);
+    let key = BodyKey::of(m, alpha, data);
+    let cached = LAST_BODY.with_borrow(|last| {
+        let body = last.as_ref().filter(|b| b.key == key)?;
+        f.take().map(|f| f(&body.model, &body.poses))
+    });
+    if let Some(r) = cached {
+        return r;
+    }
+    let (model_key, _) = body(m);
+    let model = body_model(m, &model_key);
+    let mut poses = Poses::new(&model);
+    anim::setup(m, &anim::state(m, alpha), &mut poses, &data.animations);
+    let f = f.take().expect("the cached path only takes f when it returns");
+    f(&model, &poses)
 }
 /// `EnergySwirlLayer`'s model, texture and `xOffset(t)` for a charged creeper
 /// (`CreeperPowerLayer`) or a powered wither (`WitherArmorLayer`); `t` is `ageInTicks`.
@@ -1599,16 +1711,9 @@ pub fn part_transform(
     part: &str,
 ) -> Option<glam::Mat4> {
     let base = base_transform(m, alpha, camera);
-    let s = anim::state(m, alpha);
-    let (model_key, _) = body(m);
-    let model = m
-        .kind
-        .layer(&model_key)
-        .cloned()
-        .unwrap_or_else(|| m.kind.model.clone());
-    let mut poses = Poses::new(&model);
-    anim::setup(m, &s, &mut poses, &data.animations);
-    part_matrix(&model, base, &poses, part, 0.0)
+    with_body_poses(m, alpha, data, |model, poses| {
+        part_matrix(model, base, poses, part, 0.0)
+    })
 }
 /// `FoxHeldItemLayer`: the item sits at the head's position under the render
 /// state's head roll, yaw and pitch (not the posed head's, which differ while
@@ -1616,15 +1721,7 @@ pub fn part_transform(
 fn fox_item_transform(m: &Mob, alpha: f32, camera: glam::DVec3, data: &MobData) -> glam::Mat4 {
     use glam::{Mat4, Vec3};
     let s = anim::state(m, alpha);
-    let (model_key, _) = body(m);
-    let model = m
-        .kind
-        .layer(&model_key)
-        .cloned()
-        .unwrap_or_else(|| m.kind.model.clone());
-    let mut poses = Poses::new(&model);
-    anim::setup(m, &s, &mut poses, &data.animations);
-    let head = *poses.get("head");
+    let head = with_body_poses(m, alpha, data, |_, poses| poses.read("head"));
     let fox = super::fox::pose(m, alpha);
     let baby = m.is_baby();
     let mut t = base_transform(m, alpha, camera)
@@ -1672,15 +1769,9 @@ pub fn held_item_transform(
     }
     let base = base_transform(m, alpha, camera);
     let s = anim::state(m, alpha);
-    let (model_key, _) = body(m);
-    let model = m
-        .kind
-        .layer(&model_key)
-        .cloned()
-        .unwrap_or_else(|| m.kind.model.clone());
-    let mut poses = Poses::new(&model);
-    anim::setup(m, &s, &mut poses, &data.animations);
-    let mut t = hand_base(m, &model, base, &poses, left)?;
+    let mut t = with_body_poses(m, alpha, data, |model, poses| {
+        hand_base(m, model, base, poses, left)
+    })?;
     // ItemInHandLayer: a STAB swing of this arm thrusts its item out
     // (SpearAnimations.thirdPersonAttackItem, the main hand's forward
     // movement), and a spear in use moves with it (ArmPose.SPEAR's

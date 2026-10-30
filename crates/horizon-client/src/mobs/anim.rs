@@ -216,6 +216,12 @@ impl Poses {
             _ => &mut self.dummy,
         }
     }
+    /// `get` without the write access.
+    pub fn read(&self, name: &str) -> [f32; 9] {
+        self.entry(name)
+            .filter(|e| e.present)
+            .map_or(self.dummy, |e| e.pose)
+    }
     pub fn pose(&self, part: &Part) -> [f32; 9] {
         self.entry(&part.name)
             .filter(|e| e.present)

@@ -1577,7 +1577,9 @@ fn with_body_poses<R>(
     let model = body_model(m, &model_key);
     let mut poses = Poses::new(&model);
     anim::setup(m, &anim::state(m, alpha), &mut poses, &data.animations);
-    let f = f.take().expect("the cached path only takes f when it returns");
+    let f = f
+        .take()
+        .expect("the cached path only takes f when it returns");
     f(&model, &poses)
 }
 /// `EnergySwirlLayer`'s model, texture and `xOffset(t)` for a charged creeper

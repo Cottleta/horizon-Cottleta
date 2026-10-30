@@ -1092,7 +1092,16 @@ mod flight_pose_tests {
             baby: false,
             partial: 0.0,
         };
-        let make = || Poses::with_names(&["head", "right_arm", "left_arm", "right_leg", "left_leg", "body"]);
+        let make = || {
+            Poses::with_names(&[
+                "head",
+                "right_arm",
+                "left_arm",
+                "right_leg",
+                "left_leg",
+                "body",
+            ])
+        };
         let mut ground = make();
         let mut flight = make();
         let mut h = Hum::new(ArmPose::Empty, ArmPose::Empty);
@@ -1125,7 +1134,8 @@ mod flight_pose_tests {
             baby: false,
             partial: 0.0,
         };
-        let make = || Poses::with_names(&["head", "right_arm", "left_arm", "right_leg", "left_leg"]);
+        let make =
+            || Poses::with_names(&["head", "right_arm", "left_arm", "right_leg", "left_leg"]);
         let same_angle = |a: f32, b: f32| ((a - b + PI).rem_euclid(PI * 2.0) - PI).abs() < 1e-5;
         let mut h = Hum::new(ArmPose::Empty, ArmPose::Empty);
         h.swim = 1.0;

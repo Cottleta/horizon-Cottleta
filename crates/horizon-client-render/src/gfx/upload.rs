@@ -84,6 +84,24 @@ impl Uploads {
             .write_buffer(encoder, target, offset, size)
             .copy_from_slice(bytes);
     }
+    /// Copy `size` bytes into `target` at `offset`, which `fill` writes piece
+    /// by piece (byte offset in the copy, bytes) straight into staging memory.
+    pub fn buffer_pieces(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::Buffer,
+        offset: u64,
+        size: usize,
+        fill: impl FnOnce(&mut dyn FnMut(usize, &[u8])),
+    ) {
+        let Some(size) = NonZeroU64::new(size as u64) else {
+            return;
+        };
+        let mut view = self.belt.write_buffer(encoder, target, offset, size);
+        fill(&mut |at, bytes| {
+            view.slice(at..at + bytes.len()).copy_from_slice(bytes);
+        });
+    }
     /// Close this frame's staging buffers: they come back for reuse once the
     /// encoder's submission finishes on the GPU.
     pub fn finish(&mut self, encoder: &wgpu::CommandEncoder) {

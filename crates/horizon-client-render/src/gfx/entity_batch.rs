@@ -50,17 +50,12 @@ pub(super) struct EntityBatch {
     // model's quads share one, so whole runs are copied at once. Cleared each
     // frame, keeping their storage.
     runs: [Vec<(usize, usize)>; MATERIALS],
-    pub(super) combined: Vec<Vertex>,
 }
 
 impl EntityBatch {
-    pub(super) fn update(
-        &mut self,
-        entities: &[Vertex],
-        additive: &[Vertex],
-        hand: &[Vertex],
-        see_through: &[Vertex],
-    ) -> [u32; MATERIALS] {
+    /// Group `entities`' quads by material; `write` then lays them out in
+    /// material order, followed by `additive`, `hand` and `see_through`.
+    pub(super) fn update(&mut self, entities: &[Vertex]) -> [u32; MATERIALS] {
         let quads = entities.as_chunks::<4>().0;
         for runs in &mut self.runs {
             runs.clear();
@@ -77,20 +72,61 @@ impl EntityBatch {
             counts[kind] += end - start;
             start = end;
         }
-        let entity_vertices = quads.len() * 4;
-        self.combined.clear();
-        self.combined
-            .reserve(entity_vertices + additive.len() + hand.len() + see_through.len());
+        counts.map(|count| count as u32)
+    }
+
+    /// The vertex count `write` lays out for the same slices `update` saw.
+    pub(super) fn len(
+        entities: &[Vertex],
+        additive: &[Vertex],
+        hand: &[Vertex],
+        see_through: &[Vertex],
+    ) -> usize {
+        entities.len() / 4 * 4 + additive.len() + hand.len() + see_through.len()
+    }
+
+    /// Hand `put` each piece of the combined buffer with its vertex offset:
+    /// the material runs, then `additive`, `hand` and `see_through`. Copying
+    /// straight into the upload's staging memory spares a combined copy.
+    pub(super) fn write(
+        &self,
+        entities: &[Vertex],
+        additive: &[Vertex],
+        hand: &[Vertex],
+        see_through: &[Vertex],
+        mut put: impl FnMut(usize, &[Vertex]),
+    ) {
+        let mut at = 0;
+        let mut piece = |vertices: &[Vertex]| {
+            if !vertices.is_empty() {
+                put(at, vertices);
+                at += vertices.len();
+            }
+        };
         for runs in &self.runs {
             for &(first, count) in runs {
-                self.combined
-                    .extend_from_slice(&entities[first * 4..(first + count) * 4]);
+                piece(&entities[first * 4..(first + count) * 4]);
             }
         }
-        self.combined.extend_from_slice(additive);
-        self.combined.extend_from_slice(hand);
-        self.combined.extend_from_slice(see_through);
-        counts.map(|count| count as u32)
+        piece(additive);
+        piece(hand);
+        piece(see_through);
+    }
+
+    #[cfg(test)]
+    pub(super) fn combined(
+        &self,
+        entities: &[Vertex],
+        additive: &[Vertex],
+        hand: &[Vertex],
+        see_through: &[Vertex],
+    ) -> Vec<Vertex> {
+        let mut out =
+            vec![bytemuck::Zeroable::zeroed(); Self::len(entities, additive, hand, see_through)];
+        self.write(entities, additive, hand, see_through, |at, src| {
+            out[at..at + src.len()].copy_from_slice(src);
+        });
+        out
     }
 }
 
@@ -156,9 +192,14 @@ mod tests {
         hand: &[Vertex],
     ) {
         let (expected, counts) = baseline(entities, additive, hand);
-        assert_eq!(batch.update(entities, additive, hand, &[]), counts);
+        assert_eq!(batch.update(entities), counts);
+        let combined = batch.combined(entities, additive, hand, &[]);
         assert_eq!(
-            bytemuck::cast_slice::<_, u8>(&batch.combined),
+            combined.len(),
+            EntityBatch::len(entities, additive, hand, &[])
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&combined),
             bytemuck::cast_slice::<_, u8>(&expected)
         );
     }
@@ -171,28 +212,22 @@ mod tests {
         entities[1].layer = 12;
         let additive = geometry(3, true);
         let hand = geometry(2, false);
-        // Warm every bucket and the combined buffer to their maximum sizes.
+        // Warm every bucket to its maximum size.
         equivalent(&mut batch, &entities, &additive, &hand);
         let capacities = batch.runs.each_ref().map(|b| b.capacity());
-        let capacity = batch.combined.capacity();
-        let pointer = batch.combined.as_ptr();
         for length in [0, 1, 3, 4, 511, entities.len(), 17, 0, entities.len()] {
             equivalent(&mut batch, &entities[..length], &additive[..5], &hand[..3]);
             assert_eq!(batch.runs.each_ref().map(|b| b.capacity()), capacities);
-            assert_eq!(batch.combined.capacity(), capacity);
-            assert_eq!(batch.combined.as_ptr(), pointer);
         }
         equivalent(&mut batch, &[], &[], &[]);
-        assert!(batch.combined.is_empty());
+        assert!(batch.combined(&[], &[], &[], &[]).is_empty());
         // Grow again, then confirm empty/small frames retain the new storage.
         let larger = geometry(8192, true);
         equivalent(&mut batch, &larger, &additive, &hand);
         let capacities = batch.runs.each_ref().map(|b| b.capacity());
-        let capacity = batch.combined.capacity();
         for entities in [&larger[..7], &larger[..], &[]] {
             equivalent(&mut batch, entities, &[], &[]);
             assert_eq!(batch.runs.each_ref().map(|b| b.capacity()), capacities);
-            assert_eq!(batch.combined.capacity(), capacity);
         }
     }
 
@@ -227,8 +262,8 @@ mod tests {
             equivalent(&mut batch, &entities, &additive, &hand);
             for _ in 0..50 {
                 black_box(baseline(black_box(&entities), &additive, &hand));
-                black_box(batch.update(black_box(&entities), &additive, &hand, &[]));
-                black_box(&batch.combined);
+                black_box(batch.update(black_box(&entities)));
+                black_box(batch.combined(&entities, &additive, &hand, &[]));
             }
             let mut before = Vec::new();
             let mut after = Vec::new();
@@ -240,8 +275,8 @@ mod tests {
                 before.push(start.elapsed().as_nanos() / 100);
                 let start = Instant::now();
                 for _ in 0..100 {
-                    black_box(batch.update(black_box(&entities), &additive, &hand, &[]));
-                    black_box(&batch.combined);
+                    black_box(batch.update(black_box(&entities)));
+                    black_box(batch.combined(&entities, &additive, &hand, &[]));
                 }
                 after.push(start.elapsed().as_nanos() / 100);
             }
@@ -252,12 +287,11 @@ mod tests {
                 before[7],
                 after[7],
                 before[7] as f64 / after[7] as f64,
-                batch.combined.capacity() * std::mem::size_of::<Vertex>()
-                    + batch
-                        .runs
-                        .iter()
-                        .map(|b| b.capacity() * std::mem::size_of::<(usize, usize)>())
-                        .sum::<usize>()
+                batch
+                    .runs
+                    .iter()
+                    .map(|b| b.capacity() * std::mem::size_of::<(usize, usize)>())
+                    .sum::<usize>()
             );
         }
     }

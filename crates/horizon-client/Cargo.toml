@@ -27,6 +27,8 @@ horizon-shaders = { path = "../horizon-shaders" }
 # Horizon's own shader packs: the format, the stages and the check (docs/shaders.md).
 horizon-shader-api = { path = "../horizon-shader-api" }
 horizon-friends = { path = "../horizon-friends" }
+# A fast hash for maps keyed by short names hit every frame (model part poses).
+rustc-hash = "1.1"
 # Horizon mods: sandboxed WebAssembly components, off unless installed and turned on (docs/mods.md).
 # Their runtime is the `mods` feature.
 horizon-mods = { path = "../horizon-mods", default-features = false, features = ["index"] }

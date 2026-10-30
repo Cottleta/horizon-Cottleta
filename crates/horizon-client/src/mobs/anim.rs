@@ -101,15 +101,61 @@ impl AnimState {
     }
     pub fn end_tick(&mut self, _swinging: bool) {}
 }
-/// Part poses for one draw, keyed by part name.
+/// One name's pose and draw flags, current while `generation` is its table's.
+#[derive(Clone, Copy)]
+struct PoseEntry {
+    generation: u32,
+    /// Whether the model last reset holds a part of this name (`skip_draw`
+    /// also marks names it does not hold).
+    present: bool,
+    pose: [f32; 9],
+    /// `skipDraw`: its own cubes are not drawn, its children are.
+    skipped: bool,
+    /// `visible` cleared: neither it nor its children draw.
+    hidden: bool,
+}
+/// Every part name a `Poses` has seen. A reset bumps `generation` instead of
+/// clearing, so names are allocated once and not on every draw.
 #[derive(Clone, Default)]
+struct PoseTable {
+    map: rustc_hash::FxHashMap<Box<str>, PoseEntry>,
+    generation: u32,
+}
+thread_local! {
+    /// The tables of dropped `Poses`: mobs, layers and held items make one or
+    /// more every frame.
+    static SPARE_TABLES: std::cell::RefCell<Vec<PoseTable>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+/// Part poses for one draw, keyed by part name.
+#[derive(Clone)]
 pub struct Poses {
-    map: HashMap<String, [f32; 9]>,
+    table: PoseTable,
     dummy: [f32; 9],
-    /// Parts with `skipDraw` set: their own cubes are not drawn, children are.
-    skipped: std::collections::HashSet<String>,
-    /// Parts with `visible` cleared: neither they nor their children draw.
-    hidden: std::collections::HashSet<String>,
+}
+impl Default for Poses {
+    fn default() -> Self {
+        let table = SPARE_TABLES
+            .try_with(|s| s.borrow_mut().pop())
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        Self {
+            table,
+            dummy: [0.0; 9],
+        }
+    }
+}
+impl Drop for Poses {
+    fn drop(&mut self) {
+        let table = std::mem::take(&mut self.table);
+        let _ = SPARE_TABLES.try_with(|s| {
+            let mut spare = s.borrow_mut();
+            if spare.len() < 16 {
+                spare.push(table);
+            }
+        });
+    }
 }
 impl Poses {
     pub fn new(model: &Part) -> Self {
@@ -117,38 +163,85 @@ impl Poses {
         poses.reset(model);
         poses
     }
-    /// Refills this for another model, keeping the map and the sets' capacity:
-    /// a mob draws its body and every equipment layer each frame.
+    /// Refills this for another model, keeping the table: a mob draws its body
+    /// and every equipment layer each frame.
     pub fn reset(&mut self, model: &Part) {
-        fn walk(p: &Part, map: &mut HashMap<String, [f32; 9]>) {
-            map.insert(p.name.clone(), p.pose);
+        fn walk(p: &Part, table: &mut PoseTable) {
+            let entry = PoseEntry {
+                generation: table.generation,
+                present: true,
+                pose: p.pose,
+                skipped: false,
+                hidden: false,
+            };
+            match table.map.get_mut(p.name.as_str()) {
+                Some(slot) => *slot = entry,
+                None => {
+                    table.map.insert(p.name.as_str().into(), entry);
+                }
+            }
             for c in &p.children {
-                walk(c, map);
+                walk(c, table);
             }
         }
-        self.map.clear();
+        self.next_generation();
         self.dummy = [0.0; 9];
-        self.skipped.clear();
-        self.hidden.clear();
-        walk(model, &mut self.map);
+        walk(model, &mut self.table);
+    }
+    fn next_generation(&mut self) {
+        self.table.generation = self.table.generation.wrapping_add(1);
+        if self.table.generation == 0 {
+            // Wrapped: entries from 2^32 resets ago would look current.
+            self.table.map.clear();
+            self.table.generation = 1;
+        }
+    }
+    fn entry(&self, name: &str) -> Option<&PoseEntry> {
+        self.table
+            .map
+            .get(name)
+            .filter(|e| e.generation == self.table.generation)
+    }
+    fn entry_mut(&mut self, name: &str) -> Option<&mut PoseEntry> {
+        let generation = self.table.generation;
+        self.table
+            .map
+            .get_mut(name)
+            .filter(|e| e.generation == generation)
     }
     pub fn get(&mut self, name: &str) -> &mut [f32; 9] {
-        match self.map.get_mut(name) {
-            Some(p) => p,
-            None => &mut self.dummy,
+        let generation = self.table.generation;
+        match self.table.map.get_mut(name) {
+            Some(e) if e.generation == generation && e.present => &mut e.pose,
+            _ => &mut self.dummy,
         }
     }
     pub fn pose(&self, part: &Part) -> [f32; 9] {
-        self.map.get(&part.name).copied().unwrap_or(part.pose)
+        self.entry(&part.name)
+            .filter(|e| e.present)
+            .map_or(part.pose, |e| e.pose)
     }
     pub fn skip_draw(&mut self, name: &str) {
-        self.skipped.insert(name.to_owned());
+        if let Some(e) = self.entry_mut(name) {
+            e.skipped = true;
+            return;
+        }
+        // A name this model lacks still marks parts of that name drawn with
+        // these poses (an armour layer's).
+        let entry = PoseEntry {
+            generation: self.table.generation,
+            present: false,
+            pose: [0.0; 9],
+            skipped: true,
+            hidden: false,
+        };
+        self.table.map.insert(name.into(), entry);
     }
     pub fn skips(&self, part: &Part) -> bool {
-        self.skipped.contains(&part.name)
+        self.entry(&part.name).is_some_and(|e| e.skipped)
     }
     pub fn has(&self, name: &str) -> bool {
-        self.map.contains_key(name)
+        self.entry(name).is_some_and(|e| e.present)
     }
     pub fn xrot(&mut self, n: &str, v: f32) {
         self.get(n)[3] = v;
@@ -161,14 +254,31 @@ impl Poses {
     }
     /// `ModelPart.visible = v`; a hidden part and its children do not draw.
     pub fn visible(&mut self, n: &str, v: bool) {
-        if v {
-            self.hidden.remove(n);
-        } else if self.map.contains_key(n) {
-            self.hidden.insert(n.to_owned());
+        if let Some(e) = self.entry_mut(n)
+            && (e.present || v)
+        {
+            e.hidden = !v;
         }
     }
     pub fn is_hidden(&self, part: &Part) -> bool {
-        self.hidden.contains(&part.name)
+        self.entry(&part.name).is_some_and(|e| e.hidden)
+    }
+    /// Poses for the named parts, all zero (tests).
+    #[cfg(test)]
+    fn with_names(names: &[&str]) -> Self {
+        let mut poses = Self::default();
+        poses.next_generation();
+        for &name in names {
+            let entry = PoseEntry {
+                generation: poses.table.generation,
+                present: true,
+                pose: [0.0; 9],
+                skipped: false,
+                hidden: false,
+            };
+            poses.table.map.insert(name.into(), entry);
+        }
+        poses
     }
 }
 /// The LivingEntityRenderState values setupAnim reads.
@@ -945,15 +1055,7 @@ mod flight_pose_tests {
                 (2.0, 2.0, -0.306_145_58, FRAC_PI_6),
                 (-2.0, -2.0, -2.138_741_3, -FRAC_PI_6),
             ] {
-                let mut p = Poses {
-                    map: ["head", "right_arm", "left_arm"]
-                        .into_iter()
-                        .map(|n| (n.to_string(), [0.0; 9]))
-                        .collect(),
-                    dummy: [0.0; 9],
-                    skipped: Default::default(),
-                    hidden: Default::default(),
-                };
+                let mut p = Poses::with_names(&["head", "right_arm", "left_arm"]);
                 let arm = if right { "right_arm" } else { "left_arm" };
                 p.xrot("head", pitch);
                 p.yrot("head", yaw);
@@ -984,22 +1086,7 @@ mod flight_pose_tests {
             baby: false,
             partial: 0.0,
         };
-        let make = || Poses {
-            map: [
-                "head",
-                "right_arm",
-                "left_arm",
-                "right_leg",
-                "left_leg",
-                "body",
-            ]
-            .into_iter()
-            .map(|n| (n.to_string(), [0.0; 9]))
-            .collect(),
-            dummy: [0.0; 9],
-            skipped: Default::default(),
-            hidden: Default::default(),
-        };
+        let make = || Poses::with_names(&["head", "right_arm", "left_arm", "right_leg", "left_leg", "body"]);
         let mut ground = make();
         let mut flight = make();
         let mut h = Hum::new(ArmPose::Empty, ArmPose::Empty);
@@ -1032,15 +1119,7 @@ mod flight_pose_tests {
             baby: false,
             partial: 0.0,
         };
-        let make = || Poses {
-            map: ["head", "right_arm", "left_arm", "right_leg", "left_leg"]
-                .into_iter()
-                .map(|n| (n.to_string(), [0.0; 9]))
-                .collect(),
-            dummy: [0.0; 9],
-            skipped: Default::default(),
-            hidden: Default::default(),
-        };
+        let make = || Poses::with_names(&["head", "right_arm", "left_arm", "right_leg", "left_leg"]);
         let same_angle = |a: f32, b: f32| ((a - b + PI).rem_euclid(PI * 2.0) - PI).abs() < 1e-5;
         let mut h = Hum::new(ArmPose::Empty, ArmPose::Empty);
         h.swim = 1.0;
@@ -1125,15 +1204,7 @@ mod flight_pose_tests {
             baby: false,
             partial: 0.0,
         };
-        let mut p = Poses {
-            map: ["head", "right_arm", "left_arm"]
-                .into_iter()
-                .map(|n| (n.to_string(), [0.0; 9]))
-                .collect(),
-            dummy: [0.0; 9],
-            skipped: Default::default(),
-            hidden: Default::default(),
-        };
+        let mut p = Poses::with_names(&["head", "right_arm", "left_arm"]);
         let mut m = player();
         m.extra.main_hand = Some("minecraft:shield".into());
         m.extra.using_item = 20;
@@ -1146,15 +1217,7 @@ mod flight_pose_tests {
         let mut m = player();
         m.extra.main_hand = Some("minecraft:stick".into());
         m.extra.using_item = 20;
-        let mut p = Poses {
-            map: ["head", "right_arm", "left_arm"]
-                .into_iter()
-                .map(|n| (n.to_string(), [0.0; 9]))
-                .collect(),
-            dummy: [0.0; 9],
-            skipped: Default::default(),
-            hidden: Default::default(),
-        };
+        let mut p = Poses::with_names(&["head", "right_arm", "left_arm"]);
         setup(&m, &state, &mut p, &HashMap::new());
         assert!((p.get("right_arm")[3] + PI / 10.0).abs() < 1e-6);
     }

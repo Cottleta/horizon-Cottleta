@@ -8,8 +8,13 @@
 //! and the player's own in third person with the `ownNameTag` extra.
 use super::{Game, view_vector};
 use horizon_client::{
-    block_entity_render::vertex_light, hud::HudBatch, mesher::Vertex, mobs::Mob, save::uuid_text,
-    scoreboard as sb, text::Text,
+    block_entity_render::vertex_light,
+    hud::{HudBatch, HudVertex},
+    mesher::Vertex,
+    mobs::Mob,
+    save::uuid_text,
+    scoreboard as sb,
+    text::Text,
 };
 
 impl Game<'_> {
@@ -62,9 +67,18 @@ impl Game<'_> {
                 }
             }
         }
-        for (id, name) in self.remote_player_names() {
-            if let Some(m) = self.mobs.iter().find(|m| m.id == id) {
-                out.push((m, name));
+        let names = self.remote_player_names();
+        if names.is_empty() {
+            return out;
+        }
+        // Each id's first mob, found in one pass instead of one per player.
+        let mut by_id = rustc_hash::FxHashMap::default();
+        for m in &self.mobs {
+            by_id.entry(m.id).or_insert(m);
+        }
+        for (id, name) in names {
+            if let Some(m) = by_id.get(&id) {
+                out.push((*m, name));
             }
         }
         out
@@ -140,10 +154,12 @@ impl Game<'_> {
                 continue;
             }
             // A player's scores and team go by name, a mob's by UUID.
-            let holder = if player {
-                Some(name.clone())
-            } else {
-                self.persist.uuids.get(&m.id).map(|u| uuid_text(*u))
+            let holder = || {
+                if player {
+                    Some(name.clone())
+                } else {
+                    self.persist.uuids.get(&m.id).map(|u| uuid_text(*u))
+                }
             };
             let team = if player {
                 self.score.board.players_team(&name)
@@ -195,7 +211,7 @@ impl Game<'_> {
             // below-name distance (10), under the name.
             let mut lift = 0.0;
             if distance_sqr < 10.0 * 10.0
-                && let Some(score) = holder.and_then(|h| self.below_name_text(&h))
+                && let Some(score) = holder().and_then(|h| self.below_name_text(&h))
             {
                 lines.push((score.resolve_legacy(), 0.0));
                 lift = f64::from(9.0f32 * 1.15 * 0.025);
@@ -373,50 +389,144 @@ impl Game<'_> {
         let right = forward.cross(glam::DVec3::Y).normalize_or_zero();
         let up = right.cross(forward).normalize_or_zero();
         let away = forward.as_vec3() * 0.002;
-        let mut batch = HudBatch::new([1, 1]);
+        let mut patches = Vec::new();
         for (text, lift) in lines {
             let o = (o + glam::DVec3::new(0.0, *lift, 0.0)).as_vec3();
             let (r, u) = (right.as_vec3() * 0.025, up.as_vec3() * 0.025);
             // Text space: x right, y down (scale 0.025, -0.025).
             let at = |x: f32, y: f32| o + r * x - u * y;
-            let y0 = if text.plain() == "deadmau5" {
-                -10.0
-            } else {
-                0.0
-            };
-            batch.vertices.clear();
-            // Font.prepareText, as any text: bold, italic, fonts and each
-            // glyph's own box (accented.png's are 12 pixels tall).
-            let behind = batch.name_tag(
+            let color = text_alpha << 24 | 0xFF_FFFF;
+            let background = if background { BACKGROUND } else { 0 };
+            with_name_tag_layout(
                 &self.gui.atlas,
                 text,
-                y0,
-                text_alpha << 24 | 0xFF_FFFF,
-                if background { BACKGROUND } else { 0 },
+                color,
+                background,
+                &mut patches,
+                |vertices, behind| {
+                    for (i, quad) in vertices.as_chunks::<6>().0.iter().enumerate() {
+                        let shift = if i * 6 < behind {
+                            away
+                        } else {
+                            glam::Vec3::ZERO
+                        };
+                        // The corners from the bottom left, as the world draws quads.
+                        for v in [quad[5], quad[2], quad[1], quad[0]] {
+                            out.push(Vertex {
+                                normal: [0; 4],
+                                pos: (at(v.pos[0], v.pos[1]) + shift).to_array(),
+                                uv: v.uv,
+                                layer: text_layer,
+                                color: v.color,
+                                light,
+                                glint_uv: [0.0, 0.0],
+                            });
+                        }
+                    }
+                },
             );
-            for (i, quad) in batch.vertices.as_chunks::<6>().0.iter().enumerate() {
-                let shift = if i * 6 < behind {
-                    away
-                } else {
-                    glam::Vec3::ZERO
-                };
-                // The corners from the bottom left, as the world draws quads.
-                for v in [quad[5], quad[2], quad[1], quad[0]] {
-                    out.push(Vertex {
-                        normal: [0; 4],
-                        pos: (at(v.pos[0], v.pos[1]) + shift).to_array(),
-                        uv: v.uv,
-                        layer: text_layer,
-                        color: v.color,
-                        light,
-                        glint_uv: [0.0, 0.0],
-                    });
-                }
-            }
         }
         // Glyphs rasterized on first use (Unifont's) upload with the frame.
-        batch.patches
+        patches
     }
+}
+
+/// One name tag line laid out in text space, and how many of its vertices
+/// are the background.
+struct NameTagLayout {
+    text: Text,
+    color: u32,
+    background: u32,
+    vertices: Vec<HudVertex>,
+    behind: usize,
+}
+/// Laid-out name tag lines by a hash of their characters, for the font
+/// epoch (`Font::epoch`) they were laid out under.
+#[derive(Default)]
+struct NameTagLayouts {
+    epoch: u64,
+    lines: rustc_hash::FxHashMap<u64, Vec<NameTagLayout>>,
+    count: usize,
+}
+/// Layouts kept before the cache starts over (names with a changing score
+/// or health below them make new lines all the time).
+const NAME_TAG_LAYOUTS: usize = 4096;
+thread_local! {
+    static LAYOUTS: std::cell::RefCell<NameTagLayouts> = std::cell::RefCell::default();
+}
+/// `f` with the text-space vertices of one name tag line (`HudBatch::name_tag`)
+/// and its background count. A line looks the same every frame unless it is
+/// obfuscated, draws an inline object or rasterizes new glyphs, so any other
+/// line is laid out once and then reused.
+fn with_name_tag_layout(
+    atlas: &horizon_client::hud::HudAtlas,
+    text: &Text,
+    color: u32,
+    background: u32,
+    patches: &mut Vec<horizon_client::font::Patch>,
+    f: impl FnOnce(&[HudVertex], usize),
+) {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    for span in &text.spans {
+        span.text.hash(&mut hasher);
+    }
+    let key = hasher.finish();
+    let epoch = atlas.font.epoch();
+    let mut f = Some(f);
+    LAYOUTS.with_borrow_mut(|cache| {
+        if cache.epoch != epoch {
+            *cache = NameTagLayouts {
+                epoch,
+                ..NameTagLayouts::default()
+            };
+        }
+        if let Some(hit) = cache.lines.get(&key).and_then(|lines| {
+            lines
+                .iter()
+                .find(|l| l.color == color && l.background == background && l.text == *text)
+        }) && let Some(f) = f.take()
+        {
+            f(&hit.vertices, hit.behind);
+        }
+    });
+    let Some(f) = f else {
+        return;
+    };
+    let mut batch = HudBatch::new([1, 1]);
+    let y0 = if text.plain() == "deadmau5" {
+        -10.0
+    } else {
+        0.0
+    };
+    // Font.prepareText, as any text: bold, italic, fonts and each
+    // glyph's own box (accented.png's are 12 pixels tall).
+    let behind = batch.name_tag(atlas, text, y0, color, background);
+    f(&batch.vertices, behind);
+    let reusable = batch.patches.is_empty()
+        && text.spans.iter().all(|s| {
+            s.style.obfuscated != Some(true)
+                && s.style.inline_object.is_none()
+                && !s.text.contains('\u{a7}')
+        });
+    patches.append(&mut batch.patches);
+    if !reusable {
+        return;
+    }
+    LAYOUTS.with_borrow_mut(|cache| {
+        if cache.count >= NAME_TAG_LAYOUTS {
+            cache.lines.clear();
+            cache.count = 0;
+        }
+        cache.count += 1;
+        cache.lines.entry(key).or_default().push(NameTagLayout {
+            text: text.clone(),
+            color,
+            background,
+            vertices: batch.vertices,
+            behind,
+        });
+    });
 }
 
 /// A name tag: where it hangs, its lines (text, lift), the packed light at

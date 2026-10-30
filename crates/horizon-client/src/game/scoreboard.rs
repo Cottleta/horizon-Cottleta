@@ -474,6 +474,10 @@ impl Game<'_> {
     }
     /// `Entity.getTeam` of a mob or another player.
     pub(super) fn mob_team(&self, id: u32) -> Option<&sb::Team> {
+        // No team to find: skip formatting the scoreboard name.
+        if self.score.board.teams.is_empty() {
+            return None;
+        }
         let uuid = self.persist.uuids.get(&id)?;
         self.score
             .board

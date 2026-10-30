@@ -268,13 +268,25 @@ fn submit_quads(
     let _ = display;
     // Quads of one layer mostly share a sprite: look its translucency up once.
     let mut last: Option<(&str, bool)> = None;
+    // And its atlas rect (an extruded flat item is hundreds of quads of one sprite).
+    let mut last_rect: Option<(&str, Option<Rect>)> = None;
+    // `transform_normal` for each of the six facings: one normal matrix per layer.
+    let normal_matrix = Mat3::from_mat4(m).inverse().transpose();
+    let mut normals: [Option<Vec3>; 6] = [None; 6];
     for q in &baked.quads {
-        let Some(r) = sprites
-            .get(sprite_name(&q.material.sprite))
-            .or_else(|| sprites.get("misc/missingno"))
-            .or_else(|| sprites.get("horizon/missingno"))
-            .copied()
-        else {
+        let rect = match last_rect {
+            Some((sprite, rect)) if sprite == q.material.sprite => rect,
+            _ => {
+                let rect = sprites
+                    .get(sprite_name(&q.material.sprite))
+                    .or_else(|| sprites.get("misc/missingno"))
+                    .or_else(|| sprites.get("horizon/missingno"))
+                    .copied();
+                last_rect = Some((&q.material.sprite, rect));
+                rect
+            }
+        };
+        let Some(r) = rect else {
             continue;
         };
         // `getLayerColorSafe`: an untinted quad, or a tint index past the
@@ -301,11 +313,14 @@ fn submit_quads(
                 translucent
             }
         };
+        let normal = *normals[q.facing as usize].get_or_insert_with(|| {
+            (normal_matrix * direction_vector(q.facing)).normalize_or_zero()
+        });
         sink.quad(ItemQuad {
             pos,
             uv,
             foil_uv: q.uv,
-            normal: transform_normal(m, direction_vector(q.facing)),
+            normal,
             color: argb(color),
             foil,
             light_emission: q.light_emission,

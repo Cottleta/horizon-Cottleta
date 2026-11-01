@@ -544,7 +544,11 @@ fn with_name_tag_layout(
     let reusable = batch.patches.is_empty()
         && text.spans.iter().all(|s| {
             s.style.obfuscated != Some(true)
-                && s.style.inline_object.is_none()
+                // A player's head changes with its skin; an atlas sprite doesn't.
+                && !matches!(
+                    s.style.inline_object,
+                    Some(horizon_client::text::InlineObject::Player { .. })
+                )
                 && !s.text.contains('\u{a7}')
         });
     patches.append(&mut batch.patches);

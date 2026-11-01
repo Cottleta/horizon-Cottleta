@@ -118,6 +118,11 @@ impl Game<'_> {
         let mut tags = Vec::new();
         let players = self.other_players();
         let named = self.mobs.iter().filter_map(|m| {
+            // Player.getName is the profile's: a server's custom name on a
+            // player names nothing, and its one tag comes from `players`.
+            if &*m.kind.id == "minecraft:player" {
+                return None;
+            }
             let name = m.custom_name.as_ref()?;
             // The tag's 64 block distance is measured to the entity: copy the
             // name only for a mob the frame can show it on.

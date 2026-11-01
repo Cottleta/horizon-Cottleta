@@ -695,6 +695,20 @@ impl Game<'_> {
         if !key && self.remote.is_some() {
             self.remote_tab_hidden();
             self.tab_list.set_visible(false);
+            self.tab_frame.stamp = None;
+            return;
+        }
+        // Nothing the list shows moves faster than a tick: frames between
+        // ticks draw the last layout, and only keep its faces in their slots.
+        let stamp = (self.ticks, batch.width as i32);
+        if self.tab_frame.stamp == Some(stamp) {
+            self.remote_tab_hidden();
+            let faces = std::mem::take(&mut self.tab_frame.faces);
+            for (uuid, skin) in &faces {
+                self.face_skin(*uuid, skin);
+            }
+            self.tab_frame.faces = faces;
+            horizon_client::hud_layout::paint(batch, &self.gui.atlas, &self.tab_frame.draws);
             return;
         }
         let (mut players, online_mode, upside_down) = match self.remote_tab_players() {
@@ -727,6 +741,7 @@ impl Game<'_> {
         );
         self.tab_list.set_visible(shown);
         if !shown {
+            self.tab_frame.stamp = None;
             return;
         }
         // The faces of the players the list shows.
@@ -735,7 +750,9 @@ impl Game<'_> {
                 .iter()
                 .map(|p| p.uuid)
                 .collect();
+        self.tab_frame.faces.clear();
         for p in players.iter_mut().filter(|p| faces.contains(&p.uuid)) {
+            self.tab_frame.faces.push((p.uuid, p.skin.clone()));
             p.skin = self.face_skin(p.uuid, &p.skin);
         }
         let board = &self.score.board;
@@ -755,9 +772,19 @@ impl Game<'_> {
             ),
             upside_down: &up,
         };
-        let draws = self.tab_list.layout(&inputs, &self.gui.atlas.font);
-        horizon_client::hud_layout::paint(batch, &self.gui.atlas, &draws);
+        self.tab_frame.draws = self.tab_list.layout(&inputs, &self.gui.atlas.font);
+        self.tab_frame.stamp = Some(stamp);
+        horizon_client::hud_layout::paint(batch, &self.gui.atlas, &self.tab_frame.draws);
     }
+}
+
+/// The player list's last layout: its tick and screen width, what it draws, and
+/// the skins of its faces.
+#[derive(Default)]
+pub(super) struct TabFrame {
+    stamp: Option<(u64, i32)>,
+    draws: Vec<horizon_client::hud_layout::GuiDraw>,
+    faces: Vec<(u128, String)>,
 }
 
 /// The host and guests that have entered the world, rebuilt from live state.

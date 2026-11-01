@@ -2134,6 +2134,7 @@ struct Game<'a> {
     border_state: horizon_client::border_render::BorderRenderState,
     /// `Hud.tabList`: the player list's header, footer and heart states.
     tab_list: horizon_client::tab_list::TabList,
+    tab_frame: scoreboard::TabFrame,
     subtitles: subtitle_hud::SubtitleState,
     adv: advancements::AdvState,
     restore_player_state: bool,
@@ -14860,6 +14861,7 @@ impl<'a> Game<'a> {
             border_renderer: Default::default(),
             border_state: Default::default(),
             tab_list: Default::default(),
+            tab_frame: Default::default(),
             subtitles: Default::default(),
             adv: Default::default(),
             restore_player_state: true,

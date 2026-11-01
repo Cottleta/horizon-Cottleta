@@ -109,6 +109,18 @@ pub enum Foil {
 /// Where submitted quads go.
 pub trait ItemSink {
     fn quad(&mut self, quad: ItemQuad);
+    /// Take an unglinted layer's quads whole instead of one by one (posed on the GPU,
+    /// `mobs::gpu_parts::defer_item`); false leaves them to `quad`.
+    fn layer(
+        &mut self,
+        _baked: &BakedItemModel,
+        _layer: &LayerRender,
+        _m: Mat4,
+        _sprites: &HashMap<String, Rect>,
+        _renderer: &ItemRenderer,
+    ) -> bool {
+        false
+    }
 }
 impl ItemSink for Vec<ItemQuad> {
     fn quad(&mut self, quad: ItemQuad) {
@@ -266,6 +278,9 @@ fn submit_quads(
         FoilType::Special => Foil::Special,
     };
     let _ = display;
+    if foil == Foil::None && sink.layer(baked, layer, m, sprites, renderer) {
+        return;
+    }
     // Quads of one layer mostly share a sprite: look its translucency up once.
     let mut last: Option<(&str, bool)> = None;
     // And its atlas rect (an extruded flat item is hundreds of quads of one sprite).
@@ -789,6 +804,25 @@ pub struct WorldSink<'a> {
     pub glint: Option<Glint>,
 }
 impl ItemSink for WorldSink<'_> {
+    fn layer(
+        &mut self,
+        baked: &BakedItemModel,
+        layer: &LayerRender,
+        m: Mat4,
+        sprites: &HashMap<String, Rect>,
+        renderer: &ItemRenderer,
+    ) -> bool {
+        crate::mobs::gpu_parts::defer_item(
+            self.out,
+            baked,
+            &layer.tints,
+            m,
+            sprites,
+            |sprite| renderer.sprites.translucent(sprite),
+            self.light,
+            self.lights,
+        )
+    }
     fn quad(&mut self, q: ItemQuad) {
         let brightness = self.lights.map_or(1.0, |l| diffuse(q.normal, l));
         let [a, r, g, b] = q.color.to_be_bytes();

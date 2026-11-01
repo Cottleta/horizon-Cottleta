@@ -42,6 +42,11 @@ pub const TRUSTED: u32 = 1;
 pub const ZERO_NORMAL: u32 = 2;
 /// The glint UV is the model UV (`ARMOR_GLINT`).
 pub const GLINT_UV: u32 = 4;
+/// An item layer's quads (`item_render::WorldSink`): positions and atlas UVs as they
+/// are, `color` an ARGB tint shaded into the vertex, no normal kept.
+pub const ITEM: u32 = 8;
+/// With `ITEM`: shaded by `Frame::part_lights`.
+pub const LIT: u32 = 16;
 /// `Vertex::light` of a vertex whose job writes it; no lit vertex has it.
 pub const PLACEHOLDER_LIGHT: u32 = u32::MAX;
 
@@ -129,8 +134,8 @@ impl GpuParts {
             jobs: Self::buffer(device, "Model part jobs", 1024 * size_of::<PartJob>()),
             job_capacity: 1024,
             count: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Model part job count"),
-                size: 16,
+                label: Some("Model part parameters"),
+                size: 48,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
@@ -156,6 +161,7 @@ impl GpuParts {
         encoder: &mut wgpu::CommandEncoder,
         mesh: &[PartVertex],
         jobs: &[PartJob],
+        lights: [[f32; 3]; 2],
         place: impl Fn(u32) -> Option<u32>,
     ) {
         // A mesh list that shrank was started over (models reloaded): upload it again.
@@ -197,8 +203,22 @@ impl GpuParts {
             );
         }
         uploads.buffer(encoder, &self.jobs, 0, bytemuck::cast_slice(&self.laid_out));
-        let count = [self.laid_out.len() as u32, 0, 0, 0];
-        uploads.buffer(encoder, &self.count, 0, bytemuck::cast_slice(&count));
+        let [l0, l1] = lights;
+        let params: [u32; 12] = [
+            self.laid_out.len() as u32,
+            0,
+            0,
+            0,
+            l0[0].to_bits(),
+            l0[1].to_bits(),
+            l0[2].to_bits(),
+            0,
+            l1[0].to_bits(),
+            l1[1].to_bits(),
+            l1[2].to_bits(),
+            0,
+        ];
+        uploads.buffer(encoder, &self.count, 0, bytemuck::cast_slice(&params));
     }
 
     /// Write this frame's parts into `entities` (after its upload, before it is drawn).

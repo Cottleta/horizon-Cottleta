@@ -12507,7 +12507,7 @@ impl Game<'_> {
             });
         }
         let mut part_jobs = std::mem::take(&mut self.part_jobs);
-        horizon_client::mobs::gpu_parts::finish(&entities, &mut part_jobs);
+        let part_lights = horizon_client::mobs::gpu_parts::finish(&entities, &mut part_jobs);
         let part_mesh = horizon_client::mobs::gpu_parts::take_mesh();
         let bolts = if title {
             Vec::new()
@@ -12647,6 +12647,7 @@ impl Game<'_> {
             entity_spans: &entity_spans,
             part_mesh: &part_mesh,
             part_jobs: &part_jobs,
+            part_lights,
             glowing: &glowing,
             dynamic_lights: &self.dynamic_lights,
             lightning: horizon_client::gfx::lightning::Input {
@@ -15729,6 +15730,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         entity_spans: &[],
         part_mesh: &[],
         part_jobs: &[],
+        part_lights: [[0.0; 3]; 2],
         glowing: &[],
         dynamic_lights: &[],
         clouds: None,

@@ -292,6 +292,8 @@ pub struct Frame<'a> {
     pub part_mesh: &'a [parts::PartVertex],
     /// Parts posed on the GPU into `entities`' placeholder vertices (`parts`).
     pub part_jobs: &'a [parts::PartJob],
+    /// The diffuse lights `parts::LIT` item jobs are shaded by.
+    pub part_lights: [[f32; 3]; 2],
     pub weather: &'a [crate::weather::Vertex],
     pub weather_time: crate::weather::Time,
     /// Horizon Extras' dynamic lights, nearest first (`dynamic_light::select`); empty when off.
@@ -4550,6 +4552,7 @@ impl Renderer {
                 &mut encoder,
                 frame.part_mesh,
                 jobs,
+                frame.part_lights,
                 |vertex| EntityBatch::place(places, vertex),
             );
             gpu_parts.dispatch(&self.device, &mut encoder, &self.entity_buffer);

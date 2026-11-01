@@ -9,9 +9,12 @@
 //! dropped (`finish`); its positions are the corners of the part's box, so bounds taken
 //! from the vertices (entity culling) cover the part.
 use super::{Part, Polygon};
-use crate::gfx::parts::{GLINT_UV, PLACEHOLDER_LIGHT, PartJob, PartVertex, ZERO_NORMAL};
+use crate::gfx::parts::{GLINT_UV, ITEM, LIT, PLACEHOLDER_LIGHT, PartJob, PartVertex, ZERO_NORMAL};
+use crate::hud::Rect;
 use crate::mesher::Vertex;
+use horizon_assets::item_bake::BakedItemModel;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 /// Mesh vertices kept at most; past it the meshes start over (the renderer uploads
 /// them again).
@@ -26,11 +29,27 @@ struct Mesh {
     max: glam::Vec3,
 }
 
+/// An item layer's quads in the mesh list: runs of quads that share a material.
+struct ItemMesh {
+    first: u32,
+    /// (first vertex after `first`, vertices, translucent).
+    runs: Vec<(u32, u32, bool)>,
+    /// The quads' one tint index; `None` when they differ or one emits light (drawn
+    /// by the CPU).
+    tint: Option<i32>,
+    min: glam::Vec3,
+    max: glam::Vec3,
+}
+
 #[derive(Default)]
 struct State {
     meshes: rustc_hash::FxHashMap<*const Part, Mesh>,
+    /// By model and the sprite rects it was laid out with.
+    items: rustc_hash::FxHashMap<(*const BakedItemModel, *const HashMap<String, Rect>), ItemMesh>,
     mesh: Vec<PartVertex>,
     jobs: Vec<PartJob>,
+    /// The diffuse lights of this frame's `LIT` item jobs.
+    lights: Option<(glam::Vec3, glam::Vec3)>,
 }
 
 thread_local! {
@@ -44,6 +63,7 @@ pub fn begin(out: &Vec<Vertex>) {
         if state.mesh.len() > MESH_LIMIT {
             state.mesh.clear();
             state.meshes.clear();
+            state.items.clear();
         }
     });
     TARGET.set(out);
@@ -87,7 +107,9 @@ pub(super) fn defer(
         return true;
     }
     STATE.with_borrow_mut(|state| {
-        let State { meshes, mesh, jobs } = state;
+        let State {
+            meshes, mesh, jobs, ..
+        } = state;
         let polygons = part.polygons.as_ptr();
         let known = meshes
             .get(&std::ptr::from_ref(part))
@@ -123,26 +145,16 @@ pub(super) fn defer(
                 (first, min, max)
             }
         };
-        // The part's box in the frame (Arvo): centre moved, extents by the absolute matrix.
-        let centre = m.transform_point3((min + max) / 2.0);
-        let half = (max - min) / 2.0;
-        let a = glam::Mat3::from_mat4(m);
-        let extent = a.x_axis.abs() * half.x + a.y_axis.abs() * half.y + a.z_axis.abs() * half.z;
-        let corners = [(centre - extent).to_array(), (centre + extent).to_array()];
+        let corners = moved_box(m, min, max);
         let count = part.polygons.len() * 4;
         let id = jobs.len() as u32;
         let dest = out.len() as u32;
-        out.extend((0..count).map(|i| Vertex {
-            pos: corners[usize::from(i == 1)],
-            uv: [0.0; 2],
-            layer: overlay,
-            color: id,
-            light: PLACEHOLDER_LIGHT,
-            normal: [0; 4],
-            glint_uv: [0.0; 2],
-        }));
+        hold(out, count, id, overlay, corners);
         let axes = [m.x_axis, m.y_axis, m.z_axis, m.w_axis];
-        let n = a.inverse().transpose().to_cols_array();
+        let n = glam::Mat3::from_mat4(m)
+            .inverse()
+            .transpose()
+            .to_cols_array();
         jobs.push(PartJob {
             first,
             count: count as u32,
@@ -160,6 +172,163 @@ pub(super) fn defer(
     true
 }
 
+/// `count` placeholder vertices of job `id` at the end of `out`: the box's corners first.
+fn hold(out: &mut Vec<Vertex>, count: usize, id: u32, layer: u32, corners: [[f32; 3]; 2]) {
+    out.extend((0..count).map(|i| Vertex {
+        pos: corners[usize::from(i == 1)],
+        uv: [0.0; 2],
+        layer,
+        color: id,
+        light: PLACEHOLDER_LIGHT,
+        normal: [0; 4],
+        glint_uv: [0.0; 2],
+    }));
+}
+
+/// The corners of the box `min`..`max` moved by `m` (Arvo: the centre moved, the
+/// extents by the absolute matrix).
+fn moved_box(m: glam::Mat4, min: glam::Vec3, max: glam::Vec3) -> [[f32; 3]; 2] {
+    let centre = m.transform_point3((min + max) / 2.0);
+    let half = (max - min) / 2.0;
+    let a = glam::Mat3::from_mat4(m);
+    let extent = a.x_axis.abs() * half.x + a.y_axis.abs() * half.y + a.z_axis.abs() * half.z;
+    [(centre - extent).to_array(), (centre + extent).to_array()]
+}
+
+/// `item_render`'s quads of an unglinted item layer, the way `WorldSink` writes them,
+/// posed on the GPU when `out` is the target: false when they are drawn by the CPU
+/// (another list, tints that differ between quads, light emission, other lights).
+#[allow(clippy::too_many_arguments)]
+pub fn defer_item(
+    out: &mut Vec<Vertex>,
+    baked: &BakedItemModel,
+    tints: &[i32],
+    m: glam::Mat4,
+    sprites: &HashMap<String, Rect>,
+    translucent: impl Fn(&str) -> bool,
+    light: u32,
+    lights: Option<(glam::Vec3, glam::Vec3)>,
+) -> bool {
+    if !targets(out) {
+        return false;
+    }
+    STATE.with_borrow_mut(|state| {
+        let State {
+            items,
+            mesh,
+            jobs,
+            lights: frame_lights,
+            ..
+        } = state;
+        if let (Some(l), Some(frame)) = (lights, *frame_lights)
+            && l != frame
+        {
+            return false;
+        }
+        let item = items
+            .entry((std::ptr::from_ref(baked), std::ptr::from_ref(sprites)))
+            .or_insert_with(|| item_mesh(baked, sprites, &translucent, mesh));
+        let Some(tint) = item.tint else {
+            return false;
+        };
+        if item.runs.is_empty() {
+            return true;
+        }
+        // `getLayerColorSafe`: an untinted quad, or a tint index past the tints, is white.
+        let color = if tint >= 0 {
+            tints.get(tint as usize).copied().unwrap_or(-1)
+        } else {
+            -1
+        };
+        let corners = moved_box(m, item.min, item.max);
+        let axes = [m.x_axis, m.y_axis, m.z_axis, m.w_axis];
+        let normal = glam::Mat3::from_mat4(m)
+            .inverse()
+            .transpose()
+            .to_cols_array();
+        for &(start, count, see_through) in &item.runs {
+            let layer = if see_through {
+                crate::gfx::TRANSLUCENT_ITEM_OVERLAY
+            } else {
+                0
+            };
+            let id = jobs.len() as u32;
+            let dest = out.len() as u32;
+            hold(out, count as usize, id, layer, corners);
+            jobs.push(PartJob {
+                first: item.first + start,
+                count,
+                dest,
+                flags: ITEM | if lights.is_some() { LIT } else { 0 },
+                matrix: std::array::from_fn(|i| axes[i / 3][i % 3]),
+                normal,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                scroll: 0.0,
+                color: color as u32,
+                light,
+                layer,
+            });
+        }
+        if lights.is_some() {
+            *frame_lights = lights;
+        }
+        true
+    })
+}
+
+/// An item layer's quads into the mesh list, as `submit_quads` lays them out.
+fn item_mesh(
+    baked: &BakedItemModel,
+    sprites: &HashMap<String, Rect>,
+    translucent: &impl Fn(&str) -> bool,
+    mesh: &mut Vec<PartVertex>,
+) -> ItemMesh {
+    let first = mesh.len() as u32;
+    let mut item = ItemMesh {
+        first,
+        runs: Vec::new(),
+        tint: None,
+        min: glam::Vec3::splat(f32::INFINITY),
+        max: glam::Vec3::splat(f32::NEG_INFINITY),
+    };
+    let mut tint = None;
+    for q in &baked.quads {
+        if q.light_emission > 0 || tint.is_some_and(|t| t != q.tint_index) {
+            mesh.truncate(first as usize);
+            item.runs.clear();
+            return item;
+        }
+        tint = Some(q.tint_index);
+        let name = crate::item_render::sprite_name(&q.material.sprite);
+        let Some(r) = sprites
+            .get(name)
+            .or_else(|| sprites.get("misc/missingno"))
+            .or_else(|| sprites.get("horizon/missingno"))
+        else {
+            continue;
+        };
+        let see_through = translucent(name) || q.material.force_translucent;
+        let at = mesh.len() as u32 - first;
+        match item.runs.last_mut() {
+            Some(run) if run.2 == see_through => run.1 += 4,
+            _ => item.runs.push((at, 4, see_through)),
+        }
+        let normal = crate::item_render::direction_vector(q.facing).to_array();
+        for (p, [u, v]) in q.positions.iter().zip(q.uv) {
+            let pos = glam::Vec3::from(*p);
+            item.min = item.min.min(pos);
+            item.max = item.max.max(pos);
+            mesh.push(PartVertex {
+                pos: *p,
+                uv: [r.u0 + (r.u1 - r.u0) * u, r.v0 + (r.v1 - r.v0) * v],
+                normal,
+            });
+        }
+    }
+    item.tint = Some(tint.unwrap_or(-1));
+    item
+}
+
 /// The jobs whose placeholders start at `start` or later draw with a zero normal (the
 /// CPU path's `vertex.normal = [0; 4]` over the same vertices).
 pub fn zero_normals_from(start: usize) {
@@ -173,9 +342,9 @@ pub fn zero_normals_from(start: usize) {
     });
 }
 
-/// The frame's jobs whose placeholders are still in `entities`, into `jobs` (cleared);
-/// the next frame starts with none.
-pub fn finish(entities: &[Vertex], jobs: &mut Vec<PartJob>) {
+/// The frame's jobs whose placeholders are still in `entities`, into `jobs` (cleared),
+/// and the diffuse lights its item jobs are shaded by; the next frame starts with none.
+pub fn finish(entities: &[Vertex], jobs: &mut Vec<PartJob>) -> [[f32; 3]; 2] {
     jobs.clear();
     STATE.with_borrow_mut(|state| {
         for (id, job) in state.jobs.drain(..).enumerate() {
@@ -187,7 +356,9 @@ pub fn finish(entities: &[Vertex], jobs: &mut Vec<PartJob>) {
                 jobs.push(job);
             }
         }
-    });
+        let (l0, l1) = state.lights.take().unwrap_or_default();
+        [l0.to_array(), l1.to_array()]
+    })
 }
 
 /// Every mesh the jobs refer to, lent for the frame (`restore_mesh` gives it back).

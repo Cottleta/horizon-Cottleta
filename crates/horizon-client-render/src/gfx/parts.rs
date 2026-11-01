@@ -47,6 +47,9 @@ pub const GLINT_UV: u32 = 4;
 pub const ITEM: u32 = 8;
 /// With `ITEM`: shaded by `Frame::part_lights`.
 pub const LIT: u32 = 16;
+/// With `ITEM`: glinted. `uv` holds `Glint::uv`'s scale and two offsets, `scroll`'s bits
+/// how many vertices after each vertex its model UV is.
+pub const ITEM_GLINT: u32 = 32;
 /// `Vertex::light` of a vertex whose job writes it; no lit vertex has it.
 pub const PLACEHOLDER_LIGHT: u32 = u32::MAX;
 

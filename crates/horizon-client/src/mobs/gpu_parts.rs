@@ -9,7 +9,9 @@
 //! dropped (`finish`); its positions are the corners of the part's box, so bounds taken
 //! from the vertices (entity culling) cover the part.
 use super::{Part, Polygon};
-use crate::gfx::parts::{GLINT_UV, ITEM, LIT, PLACEHOLDER_LIGHT, PartJob, PartVertex, ZERO_NORMAL};
+use crate::gfx::parts::{
+    GLINT_UV, ITEM, ITEM_GLINT, LIT, PLACEHOLDER_LIGHT, PartJob, PartVertex, ZERO_NORMAL,
+};
 use crate::hud::Rect;
 use crate::mesher::Vertex;
 use horizon_assets::item_bake::BakedItemModel;
@@ -29,9 +31,12 @@ struct Mesh {
     max: glam::Vec3,
 }
 
-/// An item layer's quads in the mesh list: runs of quads that share a material.
+/// An item layer's quads in the mesh list: runs of quads that share a material, then
+/// the same vertices' model UVs (`pos`), which the glint scrolls.
 struct ItemMesh {
     first: u32,
+    /// Vertices before the model UVs.
+    vertices: u32,
     /// (first vertex after `first`, vertices, translucent).
     runs: Vec<(u32, u32, bool)>,
     /// The quads' one tint index; `None` when they differ or one emits light (drawn
@@ -195,9 +200,9 @@ fn moved_box(m: glam::Mat4, min: glam::Vec3, max: glam::Vec3) -> [[f32; 3]; 2] {
     [(centre - extent).to_array(), (centre + extent).to_array()]
 }
 
-/// `item_render`'s quads of an unglinted item layer, the way `WorldSink` writes them,
-/// posed on the GPU when `out` is the target: false when they are drawn by the CPU
-/// (another list, tints that differ between quads, light emission, other lights).
+/// `item_render`'s quads of an item layer, the way `WorldSink` writes them (with `glint`,
+/// glinted), posed on the GPU when `out` is the target: false when they are drawn by
+/// the CPU (another list, tints that differ between quads, light emission, other lights).
 #[allow(clippy::too_many_arguments)]
 pub fn defer_item(
     out: &mut Vec<Vertex>,
@@ -208,6 +213,7 @@ pub fn defer_item(
     translucent: impl Fn(&str) -> bool,
     light: u32,
     lights: Option<(glam::Vec3, glam::Vec3)>,
+    glint: Option<crate::item_render::Glint>,
 ) -> bool {
     if !targets(out) {
         return false;
@@ -246,11 +252,20 @@ pub fn defer_item(
             .inverse()
             .transpose()
             .to_cols_array();
+        // `Glint::uv`'s scale and offsets; the model UVs follow the vertices.
+        let (glinted, uv) = match glint {
+            Some(g) => {
+                let [o0, o1] = g.offsets();
+                (ITEM_GLINT, [g.scale, o0, o1, 0.0])
+            }
+            None => (0, [0.0; 4]),
+        };
         for &(start, count, see_through) in &item.runs {
-            let layer = if see_through {
-                crate::gfx::TRANSLUCENT_ITEM_OVERLAY
-            } else {
-                0
+            let layer = match (glint.is_some(), see_through) {
+                (false, true) => crate::gfx::TRANSLUCENT_ITEM_OVERLAY,
+                (false, false) => 0,
+                (true, true) => crate::gfx::TRANSLUCENT_GLINT_ITEM_OVERLAY,
+                (true, false) => 7,
             };
             let id = jobs.len() as u32;
             let dest = out.len() as u32;
@@ -259,11 +274,12 @@ pub fn defer_item(
                 first: item.first + start,
                 count,
                 dest,
-                flags: ITEM | if lights.is_some() { LIT } else { 0 },
+                flags: ITEM | glinted | if lights.is_some() { LIT } else { 0 },
                 matrix: std::array::from_fn(|i| axes[i / 3][i % 3]),
                 normal,
-                uv: [0.0, 0.0, 1.0, 1.0],
-                scroll: 0.0,
+                uv,
+                // ITEM: the distance from a vertex to its model UV.
+                scroll: f32::from_bits(item.vertices),
                 color: color as u32,
                 light,
                 layer,
@@ -286,12 +302,14 @@ fn item_mesh(
     let first = mesh.len() as u32;
     let mut item = ItemMesh {
         first,
+        vertices: 0,
         runs: Vec::new(),
         tint: None,
         min: glam::Vec3::splat(f32::INFINITY),
         max: glam::Vec3::splat(f32::NEG_INFINITY),
     };
     let mut tint = None;
+    let mut model_uv = Vec::new();
     for q in &baked.quads {
         if q.light_emission > 0 || tint.is_some_and(|t| t != q.tint_index) {
             mesh.truncate(first as usize);
@@ -314,6 +332,10 @@ fn item_mesh(
             _ => item.runs.push((at, 4, see_through)),
         }
         let normal = crate::item_render::direction_vector(q.facing).to_array();
+        model_uv.extend(q.uv.map(|[u, v]| PartVertex {
+            pos: [u, v, 0.0],
+            ..PartVertex::default()
+        }));
         for (p, [u, v]) in q.positions.iter().zip(q.uv) {
             let pos = glam::Vec3::from(*p);
             item.min = item.min.min(pos);
@@ -325,6 +347,8 @@ fn item_mesh(
             });
         }
     }
+    item.vertices = mesh.len() as u32 - first;
+    mesh.extend(model_uv);
     item.tint = Some(tint.unwrap_or(-1));
     item
 }

@@ -26,6 +26,12 @@ const GLINT_UV: u32 = 4u;
 const ITEM: u32 = 8u;
 // With `ITEM`, shade by the frame's two diffuse lights.
 const LIT: u32 = 16u;
+// With `ITEM`, glinted: `uv` is `Glint::uv`'s scale and offsets, `scroll`'s bits the
+// distance from a vertex to its model UV.
+const ITEM_GLINT: u32 = 32u;
+// `Glint::uv`'s rotation, PI / 18.
+const GLINT_SIN: f32 = 0.17364818;
+const GLINT_COS: f32 = 0.9848077;
 // Words of an entity `Vertex`, and floats of a `PartVertex`.
 const VERTEX_WORDS: u32 = 11u;
 const MESH_FLOATS: u32 = 8u;
@@ -154,7 +160,18 @@ fn expand_item(
         vertices[w + 6u] = (a << 24u) | (bl << 16u) | (g << 8u) | r;
         vertices[w + 7u] = job.light;
         vertices[w + 8u] = 0u;
-        vertices[w + 9u] = 0u;
-        vertices[w + 10u] = 0u;
+        var glint = vec2<f32>(0.0);
+        if (job.flags & ITEM_GLINT) != 0u {
+            let g = (job.first + bitcast<u32>(job.scroll) + i) * MESH_FLOATS;
+            let mu = mesh[g];
+            let mv = mesh[g + 1u];
+            let scale = job.uv[0];
+            glint = vec2<f32>(
+                mu * scale * GLINT_COS - mv * scale * GLINT_SIN - job.uv[1],
+                mu * scale * GLINT_SIN + mv * scale * GLINT_COS + job.uv[2],
+            );
+        }
+        vertices[w + 9u] = bitcast<u32>(glint.x);
+        vertices[w + 10u] = bitcast<u32>(glint.y);
     }
 }

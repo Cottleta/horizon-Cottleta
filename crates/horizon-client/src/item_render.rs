@@ -85,14 +85,22 @@ impl Glint {
     /// the shader samples the dedicated glint texture with vanilla's
     /// repeating `GlintSampler`, so the UVs stay unwrapped.
     pub fn uv(&self, model: [f32; 2]) -> [f32; 2] {
-        let ticks = Self::ticks(self.millis, self.speed);
-        let offset0 = (ticks % 110_000) as f32 / 110_000.0;
-        let offset1 = (ticks % 30_000) as f32 / 30_000.0;
+        let [offset0, offset1] = self.offsets();
         let angle = std::f32::consts::PI / 18.0;
         let (sin, cos) = angle.sin_cos();
         [
             model[0] * self.scale * cos - model[1] * self.scale * sin - offset0,
             model[0] * self.scale * sin + model[1] * self.scale * cos + offset1,
+        ]
+    }
+}
+impl Glint {
+    /// The transform's two scroll offsets (`uv` subtracts the first, adds the second).
+    pub fn offsets(&self) -> [f32; 2] {
+        let ticks = Self::ticks(self.millis, self.speed);
+        [
+            (ticks % 110_000) as f32 / 110_000.0,
+            (ticks % 30_000) as f32 / 30_000.0,
         ]
     }
 }
@@ -109,12 +117,13 @@ pub enum Foil {
 /// Where submitted quads go.
 pub trait ItemSink {
     fn quad(&mut self, quad: ItemQuad);
-    /// Take an unglinted layer's quads whole instead of one by one (posed on the GPU,
+    /// Take a layer's quads whole instead of one by one (posed on the GPU,
     /// `mobs::gpu_parts::defer_item`); false leaves them to `quad`.
     fn layer(
         &mut self,
         _baked: &BakedItemModel,
         _layer: &LayerRender,
+        _foil: bool,
         _m: Mat4,
         _sprites: &HashMap<String, Rect>,
         _renderer: &ItemRenderer,
@@ -278,7 +287,7 @@ fn submit_quads(
         FoilType::Special => Foil::Special,
     };
     let _ = display;
-    if foil == Foil::None && sink.layer(baked, layer, m, sprites, renderer) {
+    if sink.layer(baked, layer, foil != Foil::None, m, sprites, renderer) {
         return;
     }
     // Quads of one layer mostly share a sprite: look its translucency up once.
@@ -808,6 +817,7 @@ impl ItemSink for WorldSink<'_> {
         &mut self,
         baked: &BakedItemModel,
         layer: &LayerRender,
+        foil: bool,
         m: Mat4,
         sprites: &HashMap<String, Rect>,
         renderer: &ItemRenderer,
@@ -821,6 +831,7 @@ impl ItemSink for WorldSink<'_> {
             |sprite| renderer.sprites.translucent(sprite),
             self.light,
             self.lights,
+            self.glint.filter(|_| foil),
         )
     }
     fn quad(&mut self, q: ItemQuad) {

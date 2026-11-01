@@ -7,7 +7,7 @@
 //! client predicts its own movement; the server stays authoritative for
 //! everything else.
 use super::remote_chunks::{ChunkDecoder, ChunkFormat, Next};
-use super::{Dim, Game, Mining, Screen};
+use super::{Dim, Game, Mining, Screen, entity_log};
 use horizon_client::first_person::{Hand, SwingAnimation};
 use horizon_client::{
     Result,
@@ -1640,6 +1640,15 @@ impl Game<'_> {
                     .map(|m| [m.position.x, m.position.y, m.position.z])
             })
             .unwrap_or([0.0; 3]);
+        if entity_log::enabled()
+            && path.is_some()
+            && self
+                .remote
+                .as_ref()
+                .is_some_and(|r| r.level_players.contains_key(&id))
+        {
+            entity_log::record(if far_snaps { "sync" } else { "move" }, id, position);
+        }
         if let Some(r) = self.remote.as_mut() {
             if let Some(t) = r.entities.get_mut(&id) {
                 t.position = position;
@@ -2595,7 +2604,17 @@ impl Game<'_> {
                 }
             }
             // The same packet for another entity: Entity.lerpMotion.
-            C::SetEntityMotion(p) => self.remote_motion(p.id, p.velocity),
+            C::SetEntityMotion(p) => {
+                if entity_log::enabled()
+                    && self
+                        .remote
+                        .as_ref()
+                        .is_some_and(|r| r.level_players.contains_key(&p.id))
+                {
+                    entity_log::record("motion", p.id, p.velocity);
+                }
+                self.remote_motion(p.id, p.velocity)
+            }
             // ClientPacketListener.handleDamageEvent: LivingEntity.handleDamageEvent
             // jolts the walk animation and restarts the hurt flash. Its hurt
             // sound comes as a sound from Horizon's host, which plays it itself.
@@ -2607,6 +2626,7 @@ impl Game<'_> {
                         pl.health.animate_hurt();
                     }
                 } else if let Some(m) = self.mobs.iter_mut().find(|m| m.id == p.id as u32) {
+                    entity_log::record("hurt", p.id, [m.position.x, m.position.y, m.position.z]);
                     m.limb_speed = 1.5;
                     m.hurt_time = 10;
                 } else {
@@ -4501,6 +4521,12 @@ impl Game<'_> {
             self.tick_text_displays();
             self.tick_remote_ominous_item_spawners();
         }
+        if entity_log::enabled()
+            && let (Some(r), Some(p)) = (self.remote.as_ref(), self.player.as_ref())
+        {
+            let at = p.position;
+            entity_log::record("self", r.entity_id, [at.x, at.y, at.z]);
+        }
         // EntityFluidInteraction.update for the entities this window only displays: the
         // server never sends the fluid contact, and the renderers read it (cod, salmon and
         // tropical fish lie on their side without `in_water`, #1591).
@@ -4626,6 +4652,10 @@ impl Game<'_> {
                 .and_then(|h| h.interpolate())
             {
                 place_interpolated(m, at);
+            }
+            if player && entity_log::enabled() {
+                let at = m.position;
+                entity_log::record("tick", m.id as i32, [at.x, at.y, at.z]);
             }
             // LivingEntity.aiStep: the head's own interpolation.
             if let Some((yaw, steps)) = head_lerps.get_mut(&(m.id as i32))

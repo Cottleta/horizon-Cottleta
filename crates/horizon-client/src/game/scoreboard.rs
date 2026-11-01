@@ -796,11 +796,11 @@ pub(super) struct TickFrame {
 }
 
 impl TickFrame {
-    fn stamp(ticks: u64, batch: &HudBatch) -> (u64, i32, i32) {
+    pub(super) fn stamp(ticks: u64, batch: &HudBatch) -> (u64, i32, i32) {
         (ticks, batch.width as i32, batch.height as i32)
     }
     /// Draws what it kept, if that was laid out for `stamp`.
-    fn replay(
+    pub(super) fn replay(
         &self,
         batch: &mut HudBatch,
         atlas: &horizon_client::hud::HudAtlas,
@@ -816,7 +816,7 @@ impl TickFrame {
         true
     }
     /// Draws `draws`, a new layout for `stamp`, and keeps it.
-    fn paint(
+    pub(super) fn paint(
         &mut self,
         batch: &mut HudBatch,
         atlas: &horizon_client::hud::HudAtlas,
@@ -834,7 +834,7 @@ impl TickFrame {
         self.draws = draws;
         self.stamp = Some(stamp);
     }
-    fn forget(&mut self) {
+    pub(super) fn forget(&mut self) {
         self.stamp = None;
     }
 }

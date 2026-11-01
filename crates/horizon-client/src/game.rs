@@ -2136,6 +2136,14 @@ struct Game<'a> {
     tab_list: horizon_client::tab_list::TabList,
     tab_frame: scoreboard::TabFrame,
     sidebar_frame: scoreboard::TickFrame,
+    /// The chat's messages, and whether they were laid out for the open chat.
+    chat_frame: (bool, scoreboard::TickFrame),
+    /// `draw_item_model`'s items of this tick: the tick, then by GUI position the
+    /// stack and its vertices.
+    gui_items: std::cell::RefCell<(
+        u64,
+        rustc_hash::FxHashMap<[u32; 2], (ItemStack, Vec<horizon_client::hud::HudVertex>)>,
+    )>,
     subtitles: subtitle_hud::SubtitleState,
     adv: advancements::AdvState,
     restore_player_state: bool,
@@ -14864,6 +14872,8 @@ impl<'a> Game<'a> {
             tab_list: Default::default(),
             tab_frame: Default::default(),
             sidebar_frame: Default::default(),
+            chat_frame: Default::default(),
+            gui_items: Default::default(),
             subtitles: Default::default(),
             adv: Default::default(),
             restore_player_state: true,

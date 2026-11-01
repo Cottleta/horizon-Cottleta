@@ -299,8 +299,23 @@ impl Game<'_> {
     }
     /// `GuiGraphics.renderItem(player, level, stack, x, y, 0)`.
     pub(super) fn draw_item_model(&self, batch: &mut HudBatch, stack: &ItemStack, x: f32, y: f32) {
+        // Within a tick the same stack at the same place draws the same, unless
+        // it glints: no need to resolve its model again each frame.
+        let at = [x.to_bits(), y.to_bits()];
+        let mut kept = self.gui_items.borrow_mut();
+        if kept.0 != self.ticks {
+            kept.0 = self.ticks;
+            kept.1.clear();
+        }
+        if let Some((same, vertices)) = kept.1.get(&at)
+            && same == stack
+        {
+            batch.vertices.extend_from_slice(vertices);
+            return;
+        }
         let owner = self.player_owner(Some(stack));
         let state = self.resolve_item(stack, DisplayContext::Gui, Some(&owner), 0);
+        let (start, blends, animated) = (batch.vertices.len(), batch.blends.len(), state.animated);
         item_render::gui::draw(
             &state,
             &self.pack.item_renderer,
@@ -313,6 +328,10 @@ impl Game<'_> {
             self.settings.file.double("glintSpeed") as f32,
             self.settings.file.double("glintStrength") as f32,
         );
+        if !animated && batch.blends.len() == blends {
+            kept.1
+                .insert(at, (stack.clone(), batch.vertices[start..].to_vec()));
+        }
     }
     /// The `GLINT_TEXTURING` inputs the atlas and options provide.
     pub(super) fn glint(&self) -> Option<item_render::Glint> {

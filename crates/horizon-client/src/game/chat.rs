@@ -974,9 +974,24 @@ impl Game<'_> {
         if self.ui.hide_gui && !focused {
             return;
         }
-        self.ui
-            .chat
-            .draw(batch, &self.gui.atlas, self.ticks, focused);
+        // Its lines fade by the tick: the frames between draw the last ones.
+        if self.chat_frame.0 != focused {
+            self.chat_frame.0 = focused;
+            self.chat_frame.1.forget();
+        }
+        let stamp = super::scoreboard::TickFrame::stamp(self.ticks, batch);
+        if self.chat_frame.1.replay(batch, &self.gui.atlas, stamp) {
+            return;
+        }
+        let draws = self.ui.chat.draws(
+            batch.height as i32,
+            &self.gui.atlas.font,
+            self.ticks,
+            focused,
+        );
+        self.chat_frame
+            .1
+            .paint(batch, &self.gui.atlas, stamp, draws);
     }
     pub(super) fn draw_chat_screen(&mut self, batch: &mut HudBatch) {
         let Some(mut screen) = self.ui.chat_screen.take() else {

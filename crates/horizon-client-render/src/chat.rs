@@ -478,12 +478,23 @@ impl Chat {
     /// Draws [`Chat::layout`] into the HUD batch, and with the chat screen
     /// open the restricted prompt above the lines.
     pub fn draw(&self, batch: &mut HudBatch, atlas: &HudAtlas, ticks: u64, focused: bool) {
-        let draws = self.layout(batch.height as i32, ticks, focused);
+        let draws = self.draws(batch.height as i32, &atlas.font, ticks, focused);
         hud_layout::paint(batch, atlas, &draws);
+    }
+    /// What `draw` paints: the messages, and the restricted prompt over them.
+    /// It changes only with the tick, the messages and the scroll.
+    pub fn draws(
+        &self,
+        height: i32,
+        font: &crate::font::Font,
+        ticks: u64,
+        focused: bool,
+    ) -> Vec<GuiDraw> {
+        let mut draws = self.layout(height, ticks, focused);
         if focused && self.abilities.any_restriction() {
-            let prompt = self.restricted_prompt(&atlas.font, batch.height as i32);
-            hud_layout::paint(batch, atlas, &prompt);
+            draws.extend(self.restricted_prompt(font, height));
         }
+        draws
     }
     /// `ChatComponent.extractRenderState` for `FOREGROUND_RESTRICTED`: a
     /// background row and the red, underlined "Chat is restricted" line in

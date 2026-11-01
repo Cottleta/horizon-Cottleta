@@ -4552,9 +4552,15 @@ impl Renderer {
             });
         }
         if entity_vertices > 0 {
-            // The material-ordered runs go straight into the staging memory.
+            // The material-ordered runs go straight into the staging memory, but for the
+            // placeholders of parts posed on the GPU, which the compute pass writes over.
             let batch = &self.entity_batch;
             let stride = std::mem::size_of::<Vertex>();
+            let jobs = if self.gpu_parts.is_some() && std::ptr::eq(entities, frame.entities) {
+                frame.part_jobs
+            } else {
+                &[]
+            };
             self.uploads.buffer_pieces(
                 &mut encoder,
                 &self.entity_buffer,
@@ -4566,7 +4572,25 @@ impl Renderer {
                         frame.additive,
                         frame.hand,
                         frame.see_through,
-                        |at, vertices| put(at * stride, bytemuck::cast_slice(vertices)),
+                        |at, vertices| {
+                            let mut put = |at: usize, vertices: &[Vertex]| {
+                                if !vertices.is_empty() {
+                                    put(at * stride, bytemuck::cast_slice(vertices));
+                                }
+                            };
+                            match parts::held(entities, jobs, vertices) {
+                                Some(held) => {
+                                    // The pieces between the placeholder ranges.
+                                    let mut from = 0;
+                                    for (start, end) in held {
+                                        put(at + from, &vertices[from..start]);
+                                        from = end;
+                                    }
+                                    put(at + from, &vertices[from..]);
+                                }
+                                None => put(at, vertices),
+                            }
+                        },
                     );
                 },
             );

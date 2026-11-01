@@ -102,7 +102,7 @@ impl AnimState {
     pub fn end_tick(&mut self, _swinging: bool) {}
 }
 /// One name's pose and draw flags, current while `generation` is its table's.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct PoseEntry {
     generation: u32,
     /// Whether the model last reset holds a part of this name (`skip_draw`
@@ -114,12 +114,33 @@ struct PoseEntry {
     /// `visible` cleared: neither it nor its children draw.
     hidden: bool,
 }
-/// Every part name a `Poses` has seen. A reset bumps `generation` instead of
-/// clearing, so names are allocated once and not on every draw.
+/// The entries of every part name (by `part_id`) a `Poses` has seen. A reset
+/// bumps `generation` instead of clearing, and a drawn part finds its entry by
+/// its id, without hashing its name.
 #[derive(Clone, Default)]
 struct PoseTable {
-    map: rustc_hash::FxHashMap<Box<str>, PoseEntry>,
+    entries: Vec<PoseEntry>,
     generation: u32,
+}
+impl PoseTable {
+    fn current(&self, id: u32) -> Option<&PoseEntry> {
+        self.entries
+            .get(id as usize)
+            .filter(|e| e.generation == self.generation)
+    }
+    fn current_mut(&mut self, id: u32) -> Option<&mut PoseEntry> {
+        let generation = self.generation;
+        self.entries
+            .get_mut(id as usize)
+            .filter(|e| e.generation == generation)
+    }
+    fn set(&mut self, id: u32, entry: PoseEntry) {
+        let i = id as usize;
+        if i >= self.entries.len() {
+            self.entries.resize(i + 1, PoseEntry::default());
+        }
+        self.entries[i] = entry;
+    }
 }
 thread_local! {
     /// The tables of dropped `Poses`: mobs, layers and held items make one or
@@ -174,12 +195,7 @@ impl Poses {
                 skipped: false,
                 hidden: false,
             };
-            match table.map.get_mut(p.name.as_str()) {
-                Some(slot) => *slot = entry,
-                None => {
-                    table.map.insert(p.name.as_str().into(), entry);
-                }
-            }
+            table.set(p.id, entry);
             for c in &p.children {
                 walk(c, table);
             }
@@ -192,27 +208,21 @@ impl Poses {
         self.table.generation = self.table.generation.wrapping_add(1);
         if self.table.generation == 0 {
             // Wrapped: entries from 2^32 resets ago would look current.
-            self.table.map.clear();
+            for e in &mut self.table.entries {
+                e.generation = 0;
+            }
             self.table.generation = 1;
         }
     }
     fn entry(&self, name: &str) -> Option<&PoseEntry> {
-        self.table
-            .map
-            .get(name)
-            .filter(|e| e.generation == self.table.generation)
+        self.table.current(super::known_part_id(name)?)
     }
     fn entry_mut(&mut self, name: &str) -> Option<&mut PoseEntry> {
-        let generation = self.table.generation;
-        self.table
-            .map
-            .get_mut(name)
-            .filter(|e| e.generation == generation)
+        self.table.current_mut(super::known_part_id(name)?)
     }
     pub fn get(&mut self, name: &str) -> &mut [f32; 9] {
-        let generation = self.table.generation;
-        match self.table.map.get_mut(name) {
-            Some(e) if e.generation == generation && e.present => &mut e.pose,
+        match super::known_part_id(name).and_then(|id| self.table.current_mut(id)) {
+            Some(e) if e.present => &mut e.pose,
             _ => &mut self.dummy,
         }
     }
@@ -223,13 +233,14 @@ impl Poses {
             .map_or(self.dummy, |e| e.pose)
     }
     pub fn pose(&self, part: &Part) -> [f32; 9] {
-        self.entry(&part.name)
+        self.table
+            .current(part.id)
             .filter(|e| e.present)
             .map_or(part.pose, |e| e.pose)
     }
-    /// `pose`, `skips` and `is_hidden` of a part in one name lookup.
+    /// `pose`, `skips` and `is_hidden` of a part in one lookup.
     pub fn draw_state(&self, part: &Part) -> ([f32; 9], bool, bool) {
-        match self.entry(&part.name) {
+        match self.table.current(part.id) {
             Some(e) => (
                 if e.present { e.pose } else { part.pose },
                 e.skipped,
@@ -252,10 +263,10 @@ impl Poses {
             skipped: true,
             hidden: false,
         };
-        self.table.map.insert(name.into(), entry);
+        self.table.set(super::part_id(name), entry);
     }
     pub fn skips(&self, part: &Part) -> bool {
-        self.entry(&part.name).is_some_and(|e| e.skipped)
+        self.table.current(part.id).is_some_and(|e| e.skipped)
     }
     pub fn has(&self, name: &str) -> bool {
         self.entry(name).is_some_and(|e| e.present)
@@ -278,7 +289,7 @@ impl Poses {
         }
     }
     pub fn is_hidden(&self, part: &Part) -> bool {
-        self.entry(&part.name).is_some_and(|e| e.hidden)
+        self.table.current(part.id).is_some_and(|e| e.hidden)
     }
     /// Poses for the named parts, all zero (tests).
     #[cfg(test)]
@@ -293,7 +304,7 @@ impl Poses {
                 skipped: false,
                 hidden: false,
             };
-            poses.table.map.insert(name.into(), entry);
+            poses.table.set(super::part_id(name), entry);
         }
         poses
     }

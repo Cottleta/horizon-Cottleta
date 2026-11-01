@@ -210,6 +210,8 @@ impl ModelNormals {
 #[derive(Clone, Debug)]
 pub struct Part {
     pub name: String,
+    /// `part_id(name)`: where `anim::Poses` keeps this name's pose.
+    pub id: u32,
     /// x, y, z, xRot, yRot, zRot, xScale, yScale, zScale
     pub pose: [f32; 9],
     pub polygons: Vec<Polygon>,
@@ -282,11 +284,35 @@ impl Part {
         };
         Self {
             name: name.to_owned(),
+            id: part_id(name),
             pose: p,
             polygons,
             children,
         }
     }
+}
+
+/// Every part name a model or animation has used, numbered in order of use.
+static PART_IDS: std::sync::LazyLock<std::sync::RwLock<rustc_hash::FxHashMap<Box<str>, u32>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The number of part name `name`, given it on first use.
+pub fn part_id(name: &str) -> u32 {
+    if let Some(id) = known_part_id(name) {
+        return id;
+    }
+    let mut ids = PART_IDS.write().unwrap_or_else(|e| e.into_inner());
+    let next = ids.len() as u32;
+    *ids.entry(name.into()).or_insert(next)
+}
+
+/// The number of part name `name` if one was given.
+pub fn known_part_id(name: &str) -> Option<u32> {
+    PART_IDS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(name)
+        .copied()
 }
 /// Kept for callers of the earlier simple AI; species now select behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2854,6 +2880,7 @@ mod lighting_tests {
         child.pose[5] = std::f32::consts::FRAC_PI_4;
         let parent = Part {
             name: "parent".into(),
+            id: part_id("parent"),
             pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 1.0, 0.5],
             polygons: Vec::new(),
             children: vec![child],

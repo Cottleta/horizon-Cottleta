@@ -143,6 +143,9 @@ pub(super) struct Remote {
     /// the first teleport, which takes them then.
     abilities: Option<play::PlayerAbilities>,
     loaded_sent: bool,
+    /// `LevelLoadTracker.WaitingForServer` is over: the server has sent
+    /// `LEVEL_CHUNKS_LOAD_START` for this level.
+    level_chunks_started: bool,
     /// The ClientInformation last sent (`Options.broadcastOptions` sends it
     /// again when a view distance, Chat, skin or Main Hand option changes).
     sent_info: horizon_protocol::packets::configuration::ClientInformation,
@@ -505,6 +508,7 @@ impl Game<'_> {
             carried: None,
             abilities: None,
             loaded_sent: false,
+            level_chunks_started: false,
             sent_info: self.settings.client_information(view),
             predictions: HashMap::new(),
             menu: None,
@@ -1221,6 +1225,7 @@ impl Game<'_> {
         r.game_mode = spawn.game_type;
         r.flat = spawn.flat;
         r.loaded_sent = false;
+        r.level_chunks_started = false;
         // A replacement LocalPlayer has a fresh sendPosition baseline.
         r.position_sender = Default::default();
         r.predictions.clear();
@@ -2023,6 +2028,12 @@ impl Game<'_> {
                 self.streaming.radius =
                     self.settings.render_distance.min(p.chunk_radius + 1).max(2);
                 self.enter_remote_dimension(&p.spawn, false);
+                // handleLogin's new LocalPlayer has told this server nothing
+                // yet, whatever keys the last server's player had down.
+                if let Some(r) = self.remote.as_mut() {
+                    r.was_sprinting = false;
+                    r.last_input = 0;
+                }
                 let info = self
                     .settings
                     .client_information(client_view_distance(self.settings.render_distance));
@@ -2043,7 +2054,18 @@ impl Game<'_> {
                     self.riding = None;
                 }
                 let dimension_changed = self.dim != Dim::from_id(&p.spawn.dimension);
+                let sprinting = self.player.as_ref().is_some_and(|p| p.sprinting);
                 self.enter_remote_dimension(&p.spawn, true);
+                // handleRespawn's createPlayer: the new LocalPlayer keeps
+                // lastSentInput and wasSprinting only with KEEP_ENTITY_DATA.
+                if let Some(r) = self.remote.as_mut() {
+                    if p.keep & 2 != 0 {
+                        r.was_sprinting = sprinting;
+                    } else {
+                        r.was_sprinting = false;
+                        r.last_input = 0;
+                    }
+                }
                 if dimension_changed {
                     let (music, _) = self.situational_music();
                     self.music.stop_playing(music.as_ref(), &mut self.audio);
@@ -2911,6 +2933,12 @@ impl Game<'_> {
                 }
             }
             C::GameEvent(p) => match p.event {
+                // LEVEL_CHUNKS_LOAD_START: LevelLoadTracker.loadingPacketsReceived.
+                13 => {
+                    if let Some(r) = self.remote.as_mut() {
+                        r.level_chunks_started = true;
+                    }
+                }
                 // GUARDIAN_ELDER_EFFECT: the apparition, and the curse sound
                 // unless the elder guardian is silent.
                 10 => {
@@ -4215,6 +4243,16 @@ impl Game<'_> {
             (player.position.x.floor() as i32) >> 4,
             (player.position.z.floor() as i32) >> 4,
         );
+        // hasClientLoaded: no LocalPlayer.tick and no sendChanges until the
+        // server has said its chunks are coming; the level left behind may
+        // still be lit under this player.
+        if self
+            .remote
+            .as_ref()
+            .is_some_and(|r| !r.loaded_sent && !r.level_chunks_started)
+        {
+            return Ok(());
+        }
         if !self.streaming.is_lit(cx, cz) {
             // LocalPlayer.tick can wait for chunks, but Minecraft.tick still
             // calls sendChanges: rotations and the 20-tick position reminder

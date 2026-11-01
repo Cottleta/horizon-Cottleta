@@ -9,7 +9,7 @@ use horizon_client::{
         args::{IntRange, Selector},
     },
     hud::HudBatch,
-    hud_layout, hud_overlays,
+    hud_overlays,
     lan::guest::Guest,
     save::{self, uuid_from_text, uuid_text},
     scoreboard::{self as sb, Comp, Scoreboard, literal},
@@ -654,7 +654,11 @@ impl Game<'_> {
     }
 
     /// `Hud.extractScoreboardSidebar` / `displayScoreboardSidebar`.
-    pub(super) fn draw_scoreboard(&self, batch: &mut HudBatch) {
+    pub(super) fn draw_scoreboard(&mut self, batch: &mut HudBatch) {
+        let stamp = TickFrame::stamp(self.ticks, batch);
+        if self.sidebar_frame.replay(batch, &self.gui.atlas, stamp) {
+            return;
+        }
         let board = &self.score.board;
         let Some(objective) = self.sidebar_objective() else {
             return;
@@ -668,7 +672,8 @@ impl Game<'_> {
             self.settings.text_background(0.3),
             self.settings.text_background(0.4),
         );
-        hud_layout::paint(batch, &self.gui.atlas, &draws);
+        self.sidebar_frame
+            .paint(batch, &self.gui.atlas, stamp, draws);
     }
 }
 
@@ -695,20 +700,19 @@ impl Game<'_> {
         if !key && self.remote.is_some() {
             self.remote_tab_hidden();
             self.tab_list.set_visible(false);
-            self.tab_frame.stamp = None;
+            self.tab_frame.painted.forget();
             return;
         }
         // Nothing the list shows moves faster than a tick: frames between
         // ticks draw the last layout, and only keep its faces in their slots.
-        let stamp = (self.ticks, batch.width as i32);
-        if self.tab_frame.stamp == Some(stamp) {
+        let stamp = TickFrame::stamp(self.ticks, batch);
+        if self.tab_frame.painted.replay(batch, &self.gui.atlas, stamp) {
             self.remote_tab_hidden();
             let faces = std::mem::take(&mut self.tab_frame.faces);
             for (uuid, skin) in &faces {
                 self.face_skin(*uuid, skin);
             }
             self.tab_frame.faces = faces;
-            horizon_client::hud_layout::paint(batch, &self.gui.atlas, &self.tab_frame.draws);
             return;
         }
         let (mut players, online_mode, upside_down) = match self.remote_tab_players() {
@@ -741,7 +745,7 @@ impl Game<'_> {
         );
         self.tab_list.set_visible(shown);
         if !shown {
-            self.tab_frame.stamp = None;
+            self.tab_frame.painted.forget();
             return;
         }
         // The faces of the players the list shows.
@@ -772,18 +776,73 @@ impl Game<'_> {
             ),
             upside_down: &up,
         };
-        self.tab_frame.draws = self.tab_list.layout(&inputs, &self.gui.atlas.font);
-        self.tab_frame.stamp = Some(stamp);
-        horizon_client::hud_layout::paint(batch, &self.gui.atlas, &self.tab_frame.draws);
+        let draws = self.tab_list.layout(&inputs, &self.gui.atlas.font);
+        self.tab_frame
+            .painted
+            .paint(batch, &self.gui.atlas, stamp, draws);
     }
 }
 
-/// The player list's last layout: its tick and screen width, what it draws, and
-/// the skins of its faces.
+/// A piece of the HUD that changes at most once a tick, kept from the frame
+/// that laid it out for the frames until the next tick.
+#[derive(Default)]
+pub(super) struct TickFrame {
+    /// The tick and GUI size it was laid out for.
+    stamp: Option<(u64, i32, i32)>,
+    draws: Vec<horizon_client::hud_layout::GuiDraw>,
+    /// The vertices `draws` made, unless they also changed the blend state or
+    /// asked for player faces: then each frame paints `draws` again.
+    vertices: Option<Vec<horizon_client::hud::HudVertex>>,
+}
+
+impl TickFrame {
+    fn stamp(ticks: u64, batch: &HudBatch) -> (u64, i32, i32) {
+        (ticks, batch.width as i32, batch.height as i32)
+    }
+    /// Draws what it kept, if that was laid out for `stamp`.
+    fn replay(
+        &self,
+        batch: &mut HudBatch,
+        atlas: &horizon_client::hud::HudAtlas,
+        stamp: (u64, i32, i32),
+    ) -> bool {
+        if self.stamp != Some(stamp) {
+            return false;
+        }
+        match &self.vertices {
+            Some(vertices) => batch.vertices.extend_from_slice(vertices),
+            None => horizon_client::hud_layout::paint(batch, atlas, &self.draws),
+        }
+        true
+    }
+    /// Draws `draws`, a new layout for `stamp`, and keeps it.
+    fn paint(
+        &mut self,
+        batch: &mut HudBatch,
+        atlas: &horizon_client::hud::HudAtlas,
+        stamp: (u64, i32, i32),
+        draws: Vec<horizon_client::hud_layout::GuiDraw>,
+    ) {
+        let (start, blends, profiles) = (
+            batch.vertices.len(),
+            batch.blends.len(),
+            batch.inline_profiles.len(),
+        );
+        horizon_client::hud_layout::paint(batch, atlas, &draws);
+        let plain = batch.blends.len() == blends && batch.inline_profiles.len() == profiles;
+        self.vertices = plain.then(|| batch.vertices[start..].to_vec());
+        self.draws = draws;
+        self.stamp = Some(stamp);
+    }
+    fn forget(&mut self) {
+        self.stamp = None;
+    }
+}
+
+/// The player list's last layout and the skins of its faces.
 #[derive(Default)]
 pub(super) struct TabFrame {
-    stamp: Option<(u64, i32)>,
-    draws: Vec<horizon_client::hud_layout::GuiDraw>,
+    painted: TickFrame,
     faces: Vec<(u128, String)>,
 }
 

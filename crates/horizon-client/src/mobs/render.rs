@@ -1197,7 +1197,11 @@ fn draw_normals(
     overlay: u32,
     out: &mut Vec<Vertex>,
 ) {
-    let p = poses.pose(part);
+    // One name lookup per part for its pose, `skips` and `is_hidden`.
+    let (p, skipped, hidden) = poses.draw_state(part);
+    if hidden || p[6] == 0.0 && p[7] == 0.0 && p[8] == 0.0 {
+        return;
+    }
     let m = base
         * glam::Mat4::from_translation(glam::Vec3::new(p[0], p[1], p[2]) / 16.0)
         * glam::Mat4::from_quat(glam::Quat::from_euler(
@@ -1207,16 +1211,13 @@ fn draw_normals(
             p[3],
         ))
         * glam::Mat4::from_scale(glam::Vec3::new(p[6], p[7], p[8]));
-    if poses.is_hidden(part) || p[6] == 0.0 && p[7] == 0.0 && p[8] == 0.0 {
-        return;
-    }
     // Posed on the GPU, the normals come from `m` (`gpu_parts::defer`): the exact
     // normal stack is only kept for vertices written here.
     let deferred = super::gpu_parts::targets(out);
     let normals = if deferred { normals } else { normals.part(p) };
     // `skips` is a name lookup: ask once per part, not once per polygon. A part
     // hidden this way still draws its children, so only the polygons are gated.
-    if !poses.skips(part)
+    if !skipped
         && !(deferred
             && super::gpu_parts::defer(
                 out,

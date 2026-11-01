@@ -227,6 +227,17 @@ impl Poses {
             .filter(|e| e.present)
             .map_or(part.pose, |e| e.pose)
     }
+    /// `pose`, `skips` and `is_hidden` of a part in one name lookup.
+    pub fn draw_state(&self, part: &Part) -> ([f32; 9], bool, bool) {
+        match self.entry(&part.name) {
+            Some(e) => (
+                if e.present { e.pose } else { part.pose },
+                e.skipped,
+                e.hidden,
+            ),
+            None => (part.pose, false, false),
+        }
+    }
     pub fn skip_draw(&mut self, name: &str) {
         if let Some(e) = self.entry_mut(name) {
             e.skipped = true;

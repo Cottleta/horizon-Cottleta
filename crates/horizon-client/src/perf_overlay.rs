@@ -11,29 +11,31 @@ const HISTORY: usize = 160;
 
 #[derive(Default)]
 pub struct FrameGraph {
-    /// Frame, CPU and GPU milliseconds of recent frames, oldest first.
-    frames: VecDeque<(f32, f32, f32)>,
+    /// Frame, CPU and GPU milliseconds of recent frames, oldest first, and the
+    /// milliseconds `cpu` leaves out: acquiring the swapchain image.
+    frames: VecDeque<(f32, f32, f32, f32)>,
 }
 impl FrameGraph {
-    pub fn record(&mut self, frame_ms: f32, cpu_ms: f32, gpu_ms: Option<f32>) {
+    pub fn record(&mut self, frame_ms: f32, cpu_ms: f32, gpu_ms: Option<f32>, acquire_ms: f32) {
         let gpu = gpu_ms.unwrap_or_else(|| self.frames.back().map_or(0.0, |f| f.2));
         if self.frames.len() == HISTORY {
             self.frames.pop_front();
         }
-        self.frames.push_back((frame_ms, cpu_ms, gpu));
+        self.frames.push_back((frame_ms, cpu_ms, gpu, acquire_ms));
     }
     pub fn draw(&self, mode: Overlay, batch: &mut HudBatch, atlas: &HudAtlas) {
         if mode == Overlay::Off || self.frames.is_empty() {
             return;
         }
         let n = self.frames.len() as f32;
-        let avg = |f: fn(&(f32, f32, f32)) -> f32| self.frames.iter().map(f).sum::<f32>() / n;
-        let (frame, cpu, gpu) = (avg(|f| f.0), avg(|f| f.1), avg(|f| f.2));
+        let avg = |f: fn(&(f32, f32, f32, f32)) -> f32| self.frames.iter().map(f).sum::<f32>() / n;
+        let (frame, cpu, gpu, acquire) = (avg(|f| f.0), avg(|f| f.1), avg(|f| f.2), avg(|f| f.3));
         let worst = self.frames.iter().map(|f| f.0).fold(0.0f32, f32::max);
         let lines = [
             format!("{:.0} fps", 1000.0 / frame.max(0.001)),
-            format!("frame {frame:.1} ms  max {worst:.1}"),
-            format!("cpu {cpu:.1}  gpu {gpu:.1} ms"),
+            format!("frame {frame:.3} ms  max {worst:.3}"),
+            format!("cpu {cpu:.3}  gpu {gpu:.3} ms"),
+            format!("acquire {acquire:.3} ms"),
         ];
         let width = 120.0f32.max(
             lines
@@ -74,7 +76,7 @@ impl FrameGraph {
         let (gy, gh) = (4.0 + lines.len() as f32 * 10.0 + 2.0, 36.0);
         let scale = gh / 33.3;
         let bar = (width - 6.0) / HISTORY as f32;
-        for (i, &(ms, cpu, _)) in self.frames.iter().enumerate() {
+        for (i, &(ms, cpu, _, _)) in self.frames.iter().enumerate() {
             let height = (ms * scale).min(gh);
             let bx = x + 3.0 + i as f32 * bar;
             let color = if ms > 33.3 {

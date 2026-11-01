@@ -14249,7 +14249,12 @@ impl ApplicationHandler for Game<'_> {
                                     let encode = ms(r.last_encode);
                                     horizon_client::perf_overlay::Steps {
                                         build: ms(cpu) - encode,
-                                        record: encode - finish - submit,
+                                        // On the submitting thread they are no part of it.
+                                        record: if r.last_handed_over {
+                                            encode
+                                        } else {
+                                            encode - finish - submit
+                                        },
                                         finish,
                                         submit,
                                         acquire,

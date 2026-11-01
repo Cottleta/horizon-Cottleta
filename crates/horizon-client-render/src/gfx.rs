@@ -37,6 +37,7 @@ fn entity_shader() -> String {
 mod crumbling_tests;
 mod entity_batch;
 mod entity_outline;
+mod submitter;
 mod weather;
 use entity_batch::EntityBatch;
 pub use entity_batch::{
@@ -404,6 +405,17 @@ pub struct Renderer {
     /// Of the last frame: acquiring the image, closing the command encoder,
     /// submitting and presenting (`last_wait` is the first and last together).
     pub last_steps: [std::time::Duration; 4],
+    /// Whether the last frame's finish, submit and present ran on `submitter`:
+    /// then they are not part of `last_encode`.
+    pub last_handed_over: bool,
+    /// The thread closing, submitting and presenting frames, once it has started.
+    submitter: Option<submitter::Submitter>,
+    /// A frame handed to it that it hasn't finished yet.
+    handed_over: bool,
+    /// How long this frame has waited for it so far: no CPU time of this thread.
+    settle_wait: std::time::Duration,
+    /// Frames may go to `submitter`: not on OpenGL, whose context stays on its thread.
+    submit_thread: bool,
     /// What the system says about the window's display, watched only while HDR output
     /// is on; before `window`, so it's dropped first.
     display: DisplayWatch,
@@ -1087,6 +1099,12 @@ enum FirstFrame {
 }
 fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
+}
+impl Drop for Renderer {
+    /// A frame still on its way to the GPU finishes before the surface goes.
+    fn drop(&mut self) {
+        self.settle();
+    }
 }
 impl Renderer {
     /// Sections with GPU buffers, for soak tests watching residency.
@@ -2686,6 +2704,13 @@ impl Renderer {
             last_wait: std::time::Duration::ZERO,
             last_encode: std::time::Duration::ZERO,
             last_steps: [std::time::Duration::ZERO; 4],
+            last_handed_over: false,
+            submitter: None,
+            handed_over: false,
+            settle_wait: std::time::Duration::ZERO,
+            // HORIZON_SUBMIT_THREAD=0 keeps every frame's last steps on this thread.
+            submit_thread: !gl
+                && std::env::var_os("HORIZON_SUBMIT_THREAD").is_none_or(|v| v != "0"),
             window,
             device,
             queue,
@@ -2882,6 +2907,7 @@ impl Renderer {
     /// Hand the window surface over to the renderer that replaces this one on
     /// the same device (it takes `spare_surface`).
     pub fn release_surface(&mut self) {
+        self.settle();
         *self
             .spare_surface
             .get_mut()
@@ -2889,6 +2915,7 @@ impl Renderer {
     }
     /// Reattach a window after surface loss or a failed renderer replacement.
     pub fn recreate_surface(&mut self) -> Result<()> {
+        self.settle();
         if self.offscreen.is_some() {
             return Ok(());
         }
@@ -2946,6 +2973,7 @@ impl Renderer {
     /// window and in fullscreen alike; Horizon's present-mode setting applies
     /// only with VSync off (`window::chosen_present_mode`).
     pub fn set_present_mode(&mut self, vsync: bool, mode: crate::graphics::PresentMode) {
+        self.settle();
         use crate::graphics::PresentMode as P;
         use crate::window::{PresentMode, chosen_present_mode};
         let supported: Vec<PresentMode> = self
@@ -2984,6 +3012,7 @@ impl Renderer {
     /// Follows the window to `width` x `height`. A size the swapchain can't take
     /// ([`drawable_size`]) keeps the last one and draws nothing until the next.
     pub fn resize(&mut self, width: u32, height: u32) {
+        self.settle();
         let max = self.device.limits().max_texture_dimension_2d;
         self.suspended = !drawable_size(width, height, max);
         if self.suspended {
@@ -3009,6 +3038,7 @@ impl Renderer {
     }
     /// Switches between flat and per-section draws, for A/B checks.
     pub fn set_flat_draws(&mut self, on: bool) -> Result<()> {
+        self.settle();
         if on && self.flat.is_none() {
             return Err("flat section draws are off on this device".into());
         }
@@ -3021,6 +3051,7 @@ impl Renderer {
     }
     /// Switches leaving out solid quads facing away, for A/B checks.
     pub fn set_section_sides(&mut self, on: bool) {
+        self.settle();
         self.sides_on = on;
     }
     /// Whether solid sections are occlusion culled (`cull`).
@@ -3029,6 +3060,7 @@ impl Renderer {
     }
     /// Switches occlusion culling, for A/B checks.
     pub fn set_section_cull(&mut self, on: bool) -> Result<()> {
+        self.settle();
         if on && self.cull.is_none() {
             return Err("occlusion culling is off on this device".into());
         }
@@ -3069,6 +3101,7 @@ impl Renderer {
         self.occlusion.update(camera, (distance / 16.0) as i32 + 2);
     }
     pub fn upload(&mut self, key: SectionKey, mesh: &SectionMesh) {
+        self.settle();
         self.occlusion.set(key, mesh.visibility);
         let changed = if mesh.block_entities.is_empty() {
             self.block_entities.remove(&key).is_some()
@@ -3175,6 +3208,29 @@ impl Renderer {
             flat_id,
         })
     }
+    /// Wait for the frame on the submitting thread, which must reach the GPU before
+    /// anything else this renderer does.
+    fn settle(&mut self) {
+        if !std::mem::take(&mut self.handed_over) {
+            return;
+        }
+        let waiting = Instant::now();
+        let finished = self.submitter.as_ref().and_then(submitter::Submitter::wait);
+        self.settle_wait += waiting.elapsed();
+        let Some(done) = finished else {
+            return;
+        };
+        self.last_steps[1] = done.finish;
+        self.last_steps[2] = done.submit;
+        self.last_steps[3] = done.present;
+        if let Some(cull) = &mut self.cull {
+            cull.submitted();
+        }
+        if let Some(timer) = &mut self.gpu_timer {
+            timer.submitted(&self.queue);
+            timer.collect(&self.device, &mut self.gpu_times);
+        }
+    }
     /// The section copies recorded since the last submission, closed.
     fn take_section_copies(&mut self) -> Option<wgpu::CommandBuffer> {
         let encoder = self.section_copies.take()?;
@@ -3243,6 +3299,7 @@ impl Renderer {
     }
     /// Drops every section, for a level whose chunks hold `layout`.
     pub fn clear_sections(&mut self, layout: crate::chunk::ColumnLayout) {
+        self.settle();
         self.block_entities.clear();
         self.block_entity_revision = next_block_entity_revision();
         self.sections.clear();
@@ -3308,6 +3365,12 @@ impl Renderer {
     /// tables are by column, and the meshes' ranges freed in one batch. A
     /// teleport removes a few thousand columns in one frame.
     pub fn remove_columns(&mut self, columns: impl IntoIterator<Item = (i32, i32)>) {
+        // Most frames remove nothing: no reason to wait for the last one.
+        let mut columns = columns.into_iter().peekable();
+        if columns.peek().is_none() {
+            return;
+        }
+        self.settle();
         let mut released = Vec::new();
         let mut block_entities = false;
         for (x, z) in columns {
@@ -3411,6 +3474,7 @@ impl Renderer {
         ui: f32,
         marker: &std::path::Path,
     ) {
+        self.settle();
         let output = self.hdr_output.filter(|_| on && self.surface.is_some());
         if output.is_some() != self.hdr.is_some() {
             // If the game dies before HDR output shows a frame, the marker is still there at
@@ -3471,6 +3535,7 @@ impl Renderer {
     }
     /// `upscale`: output pixels per rendered pixel, for TAA to rebuild (1: native).
     pub fn set_world_post(&mut self, scale: f32, antialias: bool, taa: bool, upscale: f32) {
+        self.settle();
         let taa = taa && self.world_post.supports_taa();
         self.world_post.scale = scale.clamp(0.25, 2.0);
         self.world_post.antialias = antialias && !taa;
@@ -3486,6 +3551,7 @@ impl Renderer {
         pack: Option<horizon_shaders::Post>,
         block_ids: &[i32],
     ) -> Option<(Vec<String>, Vec<String>)> {
+        self.settle();
         if pack.is_none() {
             self.pack_atlas = None;
         }
@@ -3544,6 +3610,7 @@ impl Renderer {
     }
     /// Drops the running shader pack, of either kind.
     pub fn drop_shader_packs(&mut self) {
+        self.settle();
         self.pack_post = None;
         self.native = None;
         self.pack_atlas = None;
@@ -3555,6 +3622,7 @@ impl Renderer {
         &mut self,
         pack: Option<(horizon_shader_api::Report, Vec<(String, f64)>)>,
     ) -> std::result::Result<Vec<String>, String> {
+        self.settle();
         let Some((report, constants)) = pack else {
             self.native = None;
             return Ok(Vec::new());
@@ -3577,6 +3645,7 @@ impl Renderer {
     /// What a shader pack's gbuffers programs read from Horizon's geometry: the sky's, and
     /// terrain's in the pack's block atlas (made here when missing; none when it does not fit).
     pub fn pack_inputs(&mut self) -> horizon_shaders::GameInputs {
+        self.settle();
         horizon_shaders::GameInputs {
             terrain: self.pack_terrain_inputs(),
             sky: Some(pack_sky::inputs()),
@@ -3649,6 +3718,7 @@ impl Renderer {
     /// The Mipmap Levels option: block textures sample at most `levels`
     /// reduced copies (0: none).
     pub fn set_mipmap_levels(&mut self, levels: u32) {
+        self.settle();
         let levels = crate::sprites::sprite_mipmap_limit(
             levels,
             self.sprite_textures[0].width(),
@@ -3793,6 +3863,7 @@ impl Renderer {
                 .is_some_and(|(_, post)| post.as_ref().is_some_and(|p| p.has_entities()))
     }
     pub fn render(&mut self, frame: &Frame) -> Result<bool> {
+        self.settle();
         let rendered = self.draw_frame(frame);
         // A frame that was not drawn still submits the section copies.
         if let Some(copies) = self.take_section_copies() {
@@ -3817,8 +3888,8 @@ impl Renderer {
         }
         let acquire = Instant::now();
         let acquired = self.surface.as_ref().map(|s| s.get_current_texture());
-        self.last_wait = acquire.elapsed();
-        self.last_steps[0] = self.last_wait;
+        self.last_steps[0] = acquire.elapsed();
+        self.last_wait = self.last_steps[0] + std::mem::take(&mut self.settle_wait);
         let (surface_frame, reconfigure) = match acquired {
             None => (None, false),
             Some(wgpu::CurrentSurfaceTexture::Success(f)) => (Some(f), false),
@@ -5597,6 +5668,32 @@ impl Renderer {
                 let size = [self.config.width, self.config.height];
                 Some(copy_frame(&self.device, &mut encoder, &texture, size))
             });
+        // A normal frame: its last steps go to their own thread, and the next frame's
+        // building starts now. What needs the result, or the window, stays here.
+        if readback.is_none()
+            && hdr_readback.is_none()
+            && !reconfigure
+            && self.first_frame == FirstFrame::Drawn
+            && self.hdr.is_none()
+            && self.config.present_mode != wgpu::PresentMode::Fifo
+            && self.submit_thread
+            && Self::pass_timer(&mut self.pack_post, &mut self.native).is_none()
+            && let Some(surface_frame) = surface_frame
+        {
+            let queue = &self.queue;
+            self.submitter
+                .get_or_insert_with(|| submitter::Submitter::start(queue.clone()))
+                .hand_over(encoder, surface_frame);
+            self.handed_over = true;
+            self.last_handed_over = true;
+            // `last_wait` holds the acquire so far; `settle` adds what the frame waits.
+            self.last_encode = started.elapsed().saturating_sub(self.last_wait);
+            self.visible = visible;
+            self.visible_lods = visible_lods;
+            self.shadow_visible = shadow_visible;
+            return Ok(true);
+        }
+        self.last_handed_over = false;
         let finish = Instant::now();
         let commands = crate::spans::time("encode", || encoder.finish());
         self.last_steps[1] = finish.elapsed();

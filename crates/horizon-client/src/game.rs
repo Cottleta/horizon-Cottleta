@@ -2139,6 +2139,7 @@ struct Game<'a> {
     /// The chat's messages, and whether they were laid out for the open chat.
     chat_frame: (bool, scoreboard::TickFrame),
     held_items: std::cell::RefCell<mob_blocks::HeldItems>,
+    tag_lines: std::cell::RefCell<names::TagLines>,
     /// `draw_item_model`'s items of this tick: the tick, then by GUI position the
     /// stack and its vertices.
     gui_items: std::cell::RefCell<(
@@ -14904,6 +14905,7 @@ impl<'a> Game<'a> {
             sidebar_frame: Default::default(),
             chat_frame: Default::default(),
             held_items: Default::default(),
+            tag_lines: Default::default(),
             gui_items: Default::default(),
             subtitles: Default::default(),
             adv: Default::default(),

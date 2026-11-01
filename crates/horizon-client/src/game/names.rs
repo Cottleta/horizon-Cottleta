@@ -17,6 +17,15 @@ use horizon_client::{
     text::Text,
 };
 
+/// Which tag's lines: the entity, whether it's a player, and whether it's near
+/// enough for the score below its name.
+pub(super) type TagKey = (u32, bool, bool);
+/// `tag_lines`' tags of this tick: the tick, then each tag's lines.
+pub(super) type TagLines = (
+    u64,
+    rustc_hash::FxHashMap<TagKey, std::sync::Arc<[(Text, f64)]>>,
+);
+
 impl Game<'_> {
     /// A named name tag names the mob under the crosshair.
     pub(super) fn name_mob(&mut self, index: usize) -> bool {
@@ -111,6 +120,24 @@ impl Game<'_> {
             .filter_map(|t| t.lines.last().map(|(t, _)| t.plain()))
             .collect()
     }
+    /// A tag's lines for this tick, made by `make` the first time it's asked for.
+    fn tag_lines(
+        &self,
+        key: TagKey,
+        make: impl FnOnce() -> Vec<(Text, f64)>,
+    ) -> std::sync::Arc<[(Text, f64)]> {
+        let mut kept = self.tag_lines.borrow_mut();
+        if kept.0 != self.ticks {
+            kept.0 = self.ticks;
+            kept.1.clear();
+        }
+        if let Some(lines) = kept.1.get(&key) {
+            return lines.clone();
+        }
+        let lines: std::sync::Arc<[(Text, f64)]> = make().into();
+        kept.1.insert(key, lines.clone());
+        lines
+    }
     /// Each name tag this frame.
     fn name_tags(&self, camera: glam::DVec3, alpha: f64) -> Vec<NameTag> {
         let target = self.mob_hit().map(|(i, _)| self.mobs[i].id);
@@ -196,32 +223,36 @@ impl Game<'_> {
             {
                 continue;
             }
-            // getDisplayName: the name in the team's prefix, suffix and colour.
-            let member = if player {
-                Text::literal(&name)
-            } else {
-                m.custom_name_text
-                    .clone()
-                    .unwrap_or_else(|| Text::literal(&name))
-            };
-            // StringDecomposer.iterateFormatted: `§` codes a server leaves
-            // inside the team prefix or the name itself apply at draw time.
-            let shown = match team {
-                Some(t) => t.formatted_name(member),
-                None => member,
-            }
-            .resolve_legacy();
-            let mut lines = Vec::new();
-            // EntityRenderer.extractNameTags: the score shows within the
-            // below-name distance (10), under the name.
-            let mut lift = 0.0;
-            if distance_sqr < 10.0 * 10.0
-                && let Some(score) = holder().and_then(|h| self.below_name_text(&h))
-            {
-                lines.push((score.resolve_legacy(), 0.0));
-                lift = f64::from(9.0f32 * 1.15 * 0.025);
-            }
-            lines.push((shown, lift));
+            // The text of a tag changes with a server's packets, not with the frame,
+            // and a team's prefix and suffix are components to convert: once a tick.
+            let near = distance_sqr < 10.0 * 10.0;
+            let lines = self.tag_lines((m.id, player, near), || {
+                // getDisplayName: the name in the team's prefix, suffix and colour.
+                let member = if player {
+                    Text::literal(&name)
+                } else {
+                    m.custom_name_text
+                        .clone()
+                        .unwrap_or_else(|| Text::literal(&name))
+                };
+                // StringDecomposer.iterateFormatted: `§` codes a server leaves
+                // inside the team prefix or the name itself apply at draw time.
+                let shown = match team {
+                    Some(t) => t.formatted_name(member),
+                    None => member,
+                }
+                .resolve_legacy();
+                let mut lines = Vec::new();
+                // EntityRenderer.extractNameTags: the score shows within the
+                // below-name distance (10), under the name.
+                let mut lift = 0.0;
+                if near && let Some(score) = holder().and_then(|h| self.below_name_text(&h)) {
+                    lines.push((score.resolve_legacy(), 0.0));
+                    lift = f64::from(9.0f32 * 1.15 * 0.025);
+                }
+                lines.push((shown, lift));
+                lines
+            });
             let l = self.world.light(
                 m.position.x.floor() as i32,
                 (m.position.y + height).floor() as i32,
@@ -266,21 +297,23 @@ impl Game<'_> {
             if !sb::name_shown(team, viewer, view) {
                 continue;
             }
-            let shown = match team {
-                Some(t) => t.formatted_name(name.clone()),
-                None => name.clone(),
-            }
-            .resolve_legacy();
-            let mut lines = Vec::new();
-            let mut lift = 0.0;
-            let holder = self.persist.uuids.get(&a.id).map(|u| uuid_text(*u));
-            if distance_sqr < 10.0 * 10.0
-                && let Some(score) = holder.and_then(|h| self.below_name_text(&h))
-            {
-                lines.push((score.resolve_legacy(), 0.0));
-                lift = f64::from(9.0f32 * 1.15 * 0.025);
-            }
-            lines.push((shown, lift));
+            let near = distance_sqr < 10.0 * 10.0;
+            let lines = self.tag_lines((a.id, false, near), || {
+                let shown = match team {
+                    Some(t) => t.formatted_name(name.clone()),
+                    None => name.clone(),
+                }
+                .resolve_legacy();
+                let mut lines = Vec::new();
+                let mut lift = 0.0;
+                let holder = self.persist.uuids.get(&a.id).map(|u| uuid_text(*u));
+                if near && let Some(score) = holder.and_then(|h| self.below_name_text(&h)) {
+                    lines.push((score.resolve_legacy(), 0.0));
+                    lift = f64::from(9.0f32 * 1.15 * 0.025);
+                }
+                lines.push((shown, lift));
+                lines
+            });
             let l = self.world.light(
                 a.position.x.floor() as i32,
                 (a.position.y + height).floor() as i32,
@@ -319,7 +352,7 @@ impl Game<'_> {
                             0.75,
                             f64::from(step[2] as f32 * 0.3),
                         ),
-                    lines: vec![(Text::literal(name).resolve_legacy(), 0.0)],
+                    lines: vec![(Text::literal(name).resolve_legacy(), 0.0)].into(),
                     light: self.world.light(
                         center.x.floor() as i32,
                         center.y.floor() as i32,
@@ -538,7 +571,7 @@ fn with_name_tag_layout(
 /// the entity and whether it is discrete.
 struct NameTag {
     at: glam::DVec3,
-    lines: Vec<(Text, f64)>,
+    lines: std::sync::Arc<[(Text, f64)]>,
     light: u8,
     discrete: bool,
 }

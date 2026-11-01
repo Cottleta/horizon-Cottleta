@@ -17,7 +17,8 @@ pub struct PartVertex {
 }
 
 /// One drawn part: `count` mesh vertices from `first`, written at entity vertex `dest`
-/// (`frame.entities`' index until the renderer lays the buffer out).
+/// (until the renderer lays the buffer out, `frame.entities`' index of its held quad,
+/// which stands for the part's `count / 4` quads: `entity_batch::held_quads`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PartJob {
@@ -50,43 +51,9 @@ pub const LIT: u32 = 16;
 /// With `ITEM`: glinted. `uv` holds `Glint::uv`'s scale and two offsets, `scroll`'s bits
 /// how many vertices after each vertex its model UV is.
 pub const ITEM_GLINT: u32 = 32;
-/// `Vertex::light` of a vertex whose job writes it; no lit vertex has it.
+/// `Vertex::light` of a held quad's vertices (a job's place in the entity list); no lit
+/// vertex has it.
 pub const PLACEHOLDER_LIGHT: u32 = u32::MAX;
-
-/// The placeholder ranges of `jobs` (ordered by `dest`, `entities` indices) inside
-/// `piece`, a piece of `entities`, as (start, end) indices into `piece`; `None` when it
-/// holds none (or is not part of `entities`).
-pub(super) fn held<'a>(
-    entities: &[super::Vertex],
-    jobs: &'a [PartJob],
-    piece: &[super::Vertex],
-) -> Option<impl Iterator<Item = (usize, usize)> + 'a> {
-    if jobs.is_empty() || piece.is_empty() {
-        return None;
-    }
-    let size = size_of::<super::Vertex>();
-    let offset = (piece.as_ptr() as usize).checked_sub(entities.as_ptr() as usize)?;
-    let first = offset / size;
-    if first + piece.len() > entities.len() {
-        return None;
-    }
-    let end = first + piece.len();
-    let from = jobs.partition_point(|j| (j.dest + j.count) as usize <= first);
-    if jobs.get(from).is_none_or(|j| j.dest as usize >= end) {
-        return None;
-    }
-    Some(
-        jobs[from..]
-            .iter()
-            .take_while(move |j| (j.dest as usize) < end)
-            .map(move |j| {
-                (
-                    (j.dest as usize).max(first) - first,
-                    ((j.dest + j.count) as usize).min(end) - first,
-                )
-            }),
-    )
-}
 
 /// The largest dispatch dimension every backend allows.
 const MAX_GROUPS: u32 = 65535;

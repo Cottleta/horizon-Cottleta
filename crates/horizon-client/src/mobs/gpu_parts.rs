@@ -1,13 +1,14 @@
 //! Model parts posed on the GPU (`gfx::parts`). While a frame's entity list is the
-//! target (`begin`), `draw_normals` into that list holds placeholder vertices for a part's
+//! target (`begin`), `draw_normals` into that list holds one quad in place of a part's
 //! polygons and records a job; the renderer's compute pass writes the vertices. Any other
 //! list (a copy for an outline, a model drawn into a scratch list) still gets them from
 //! the CPU.
 //!
-//! A placeholder vertex holds `PLACEHOLDER_LIGHT` and its job's number, so jobs whose
-//! placeholders were cut from the list (entity culling, an invisible glowing mob) are
-//! dropped (`finish`); its positions are the corners of the part's box, so bounds taken
-//! from the vertices (entity culling) cover the part.
+//! The held quad's vertices hold `PLACEHOLDER_LIGHT`, the job's number and how many quads
+//! it stands for (the renderer leaves that room in the entity buffer), so jobs whose
+//! quad was cut from the list (entity culling, an invisible glowing mob) are dropped
+//! (`finish`); its positions are the corners of the part's box, so bounds taken from
+//! the vertices (entity culling) cover the part.
 use super::{Part, Polygon};
 use crate::gfx::parts::{
     GLINT_UV, ITEM, ITEM_GLINT, LIT, PLACEHOLDER_LIGHT, PartJob, PartVertex, ZERO_NORMAL,
@@ -177,16 +178,19 @@ pub(super) fn defer(
     true
 }
 
-/// `count` placeholder vertices of job `id` at the end of `out`: the box's corners first.
+/// The held quad of job `id` at the end of `out`, standing for `count` vertices: the box's
+/// corners first, the quads it stands for in the first vertex's `glint_uv[0]` bits
+/// (`entity_batch::held_quads`).
 fn hold(out: &mut Vec<Vertex>, count: usize, id: u32, layer: u32, corners: [[f32; 3]; 2]) {
-    out.extend((0..count).map(|i| Vertex {
+    let quads = f32::from_bits((count / 4) as u32);
+    out.extend((0..4).map(|i| Vertex {
         pos: corners[usize::from(i == 1)],
         uv: [0.0; 2],
         layer,
         color: id,
         light: PLACEHOLDER_LIGHT,
         normal: [0; 4],
-        glint_uv: [0.0; 2],
+        glint_uv: [quads, 0.0],
     }));
 }
 
@@ -375,7 +379,7 @@ pub fn finish(entities: &[Vertex], jobs: &mut Vec<PartJob>) -> [[f32; 3]; 2] {
             let held = entities
                 .get(job.dest as usize)
                 .is_some_and(|v| v.light == PLACEHOLDER_LIGHT && v.color == id as u32)
-                && job.dest as usize + job.count as usize <= entities.len();
+                && job.dest as usize + 4 <= entities.len();
             if held {
                 jobs.push(job);
             }

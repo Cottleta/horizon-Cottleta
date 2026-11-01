@@ -44,12 +44,22 @@ fn material(layer: u32) -> usize {
     }
 }
 
+/// The quads a held quad stands for (`parts::PLACEHOLDER_LIGHT` in its first vertex's
+/// light), in its first vertex's `glint_uv[0]` bits: the compute pass writes them.
+fn held_quads(quad: &[Vertex; 4]) -> Option<usize> {
+    (quad[0].light == super::parts::PLACEHOLDER_LIGHT)
+        .then(|| quad[0].glint_uv[0].to_bits() as usize)
+}
+
 #[derive(Default)]
 pub(super) struct EntityBatch {
-    // Runs of consecutive quads of one material (first quad, quad count): a
-    // model's quads share one, so whole runs are copied at once. Cleared each
+    // Runs of consecutive quads of one material (first quad, quad count, held): a
+    // model's quads share one, so whole runs are copied at once. A held quad is a run
+    // of its own that stands for `held` quads nothing is copied into. Cleared each
     // frame, keeping their storage.
-    runs: [Vec<(usize, usize)>; MATERIALS],
+    runs: [Vec<(usize, usize, usize)>; MATERIALS],
+    /// Vertices the runs lay out.
+    vertices: usize,
 }
 
 impl EntityBatch {
@@ -64,36 +74,44 @@ impl EntityBatch {
         let mut start = 0;
         while start < quads.len() {
             let kind = material(quads[start][0].layer);
+            if let Some(held) = held_quads(&quads[start]) {
+                self.runs[kind].push((start, 1, held));
+                counts[kind] += held;
+                start += 1;
+                continue;
+            }
             let end = quads[start + 1..]
                 .iter()
-                .position(|quad| material(quad[0].layer) != kind)
+                .position(|quad| material(quad[0].layer) != kind || held_quads(quad).is_some())
                 .map_or(quads.len(), |n| start + 1 + n);
-            self.runs[kind].push((start, end - start));
+            self.runs[kind].push((start, end - start, 0));
             counts[kind] += end - start;
             start = end;
         }
+        self.vertices = counts.iter().sum::<usize>() * 4;
         counts.map(|count| count as u32)
     }
 
-    /// The vertex count `write` lays out for the same slices `update` saw.
+    /// The vertex count `write` lays out for `update`'s entities and these slices.
     pub(super) fn len(
-        entities: &[Vertex],
+        &self,
         additive: &[Vertex],
         hand: &[Vertex],
         see_through: &[Vertex],
     ) -> usize {
-        entities.len() / 4 * 4 + additive.len() + hand.len() + see_through.len()
+        self.vertices + additive.len() + hand.len() + see_through.len()
     }
 
     /// Where `write` puts each run: (first entity vertex, vertices, buffer vertex), by
-    /// entity vertex, into `places` (cleared).
+    /// entity vertex, into `places` (cleared). A held quad's place is where the
+    /// vertices it stands for start.
     pub(super) fn places(&self, places: &mut Vec<(u32, u32, u32)>) {
         places.clear();
         let mut at = 0;
         for runs in &self.runs {
-            for &(first, count) in runs {
+            for &(first, count, held) in runs {
                 places.push(((first * 4) as u32, (count * 4) as u32, at));
-                at += (count * 4) as u32;
+                at += (count.max(held) * 4) as u32;
             }
         }
         places.sort_unstable_by_key(|p| p.0);
@@ -118,20 +136,23 @@ impl EntityBatch {
         mut put: impl FnMut(usize, &[Vertex]),
     ) {
         let mut at = 0;
-        let mut piece = |vertices: &[Vertex]| {
+        for runs in &self.runs {
+            for &(first, count, held) in runs {
+                if held > 0 {
+                    // Left to the compute pass.
+                    at += held * 4;
+                } else {
+                    put(at, &entities[first * 4..(first + count) * 4]);
+                    at += count * 4;
+                }
+            }
+        }
+        for vertices in [additive, hand, see_through] {
             if !vertices.is_empty() {
                 put(at, vertices);
                 at += vertices.len();
             }
-        };
-        for runs in &self.runs {
-            for &(first, count) in runs {
-                piece(&entities[first * 4..(first + count) * 4]);
-            }
         }
-        piece(additive);
-        piece(hand);
-        piece(see_through);
     }
 
     #[cfg(test)]
@@ -142,8 +163,7 @@ impl EntityBatch {
         hand: &[Vertex],
         see_through: &[Vertex],
     ) -> Vec<Vertex> {
-        let mut out =
-            vec![bytemuck::Zeroable::zeroed(); Self::len(entities, additive, hand, see_through)];
+        let mut out = vec![bytemuck::Zeroable::zeroed(); self.len(additive, hand, see_through)];
         self.write(entities, additive, hand, see_through, |at, src| {
             out[at..at + src.len()].copy_from_slice(src);
         });
@@ -217,7 +237,7 @@ mod tests {
         let combined = batch.combined(entities, additive, hand, &[]);
         assert_eq!(
             combined.len(),
-            EntityBatch::len(entities, additive, hand, &[])
+            entities.len() / 4 * 4 + additive.len() + hand.len()
         );
         assert_eq!(
             bytemuck::cast_slice::<_, u8>(&combined),
@@ -311,7 +331,7 @@ mod tests {
                 batch
                     .runs
                     .iter()
-                    .map(|b| b.capacity() * std::mem::size_of::<(usize, usize)>())
+                    .map(|b| b.capacity() * std::mem::size_of::<(usize, usize, usize)>())
                     .sum::<usize>()
             );
         }
@@ -346,5 +366,49 @@ mod tests {
             assert_eq!(combined[at as usize].pos, vertex.pos);
         }
         assert_eq!(EntityBatch::place(&places, entities.len() as u32), None);
+    }
+
+    /// A held quad leaves room for the quads it stands for, copies nothing there, and
+    /// `place` finds where that room starts.
+    #[test]
+    fn held_quads_leave_room() {
+        let vertex = |x: f32, layer: u32| Vertex {
+            pos: [x, 0.0, 0.0],
+            uv: [0.0; 2],
+            layer,
+            color: 0,
+            light: 0,
+            normal: [0; 4],
+            glint_uv: [0.0; 2],
+        };
+        let held = |layer: u32, quads: u32| Vertex {
+            light: super::super::parts::PLACEHOLDER_LIGHT,
+            glint_uv: [f32::from_bits(quads), 0.0],
+            ..vertex(-1.0, layer)
+        };
+        // A plain quad, a held quad for 6 quads, a plain quad, a held translucent item.
+        let mut entities = vec![vertex(1.0, 0); 4];
+        entities.extend([held(0, 6); 4]);
+        entities.extend(vec![vertex(2.0, 0); 4]);
+        entities.extend([held(32, 3); 4]);
+        let mut batch = EntityBatch::default();
+        let counts = batch.update(&entities);
+        assert_eq!(counts[0], 1 + 6 + 1);
+        assert_eq!(counts[8], 3);
+        assert_eq!(batch.len(&[], &[], &[]), (8 + 3) * 4);
+        let combined = batch.combined(&entities, &[], &[], &[]);
+        assert_eq!(combined[0].pos[0], 1.0);
+        // Room for the held quad's six, untouched; then the next plain quad.
+        assert!(
+            combined[4..28]
+                .iter()
+                .all(|v| v.pos[0] == 0.0 && v.light == 0)
+        );
+        assert_eq!(combined[28].pos[0], 2.0);
+        let mut places = Vec::new();
+        batch.places(&mut places);
+        assert_eq!(EntityBatch::place(&places, 4), Some(4));
+        assert_eq!(EntityBatch::place(&places, 8), Some(28));
+        assert_eq!(EntityBatch::place(&places, 12), Some(32));
     }
 }

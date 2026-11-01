@@ -176,10 +176,7 @@ pub(super) fn defer(
         let dest = out.len() as u32;
         hold(out, count, id, overlay, corners);
         let axes = [m.x_axis, m.y_axis, m.z_axis, m.w_axis];
-        let n = glam::Mat3::from_mat4(m)
-            .inverse()
-            .transpose()
-            .to_cols_array();
+        let n = normal_matrix(m);
         jobs.push(PartJob {
             first,
             count: count as u32,
@@ -202,15 +199,31 @@ pub(super) fn defer(
 /// (`entity_batch::held_quads`).
 fn hold(out: &mut Vec<Vertex>, count: usize, id: u32, layer: u32, corners: [[f32; 3]; 2]) {
     let quads = f32::from_bits((count / 4) as u32);
-    out.extend((0..4).map(|i| Vertex {
-        pos: corners[usize::from(i == 1)],
+    let vertex = |pos| Vertex {
+        pos,
         uv: [0.0; 2],
         layer,
         color: id,
         light: PLACEHOLDER_LIGHT,
         normal: [0; 4],
         glint_uv: [quads, 0.0],
-    }));
+    };
+    let [low, high] = corners;
+    out.extend_from_slice(&[vertex(low), vertex(high), vertex(low), vertex(low)]);
+}
+
+/// The normal matrix of `m`, up to its length: the inverse transpose without the
+/// division by the determinant, keeping its sign. `parts.wgsl` normalizes what
+/// this gives, so the directions are the inverse transpose's.
+fn normal_matrix(m: glam::Mat4) -> [f32; 9] {
+    let (x, y, z) = (
+        m.x_axis.truncate(),
+        m.y_axis.truncate(),
+        m.z_axis.truncate(),
+    );
+    let (cx, cy, cz) = (y.cross(z), z.cross(x), x.cross(y));
+    let sign = if x.dot(cx) < 0.0 { -1.0 } else { 1.0 };
+    glam::Mat3::from_cols(cx * sign, cy * sign, cz * sign).to_cols_array()
 }
 
 /// The corners of the box `min`..`max` moved by `m` (Arvo: the centre moved, the
@@ -271,10 +284,7 @@ pub fn defer_item(
         };
         let corners = moved_box(m, item.min, item.max);
         let axes = [m.x_axis, m.y_axis, m.z_axis, m.w_axis];
-        let normal = glam::Mat3::from_mat4(m)
-            .inverse()
-            .transpose()
-            .to_cols_array();
+        let normal = normal_matrix(m);
         // `Glint::uv`'s scale and offsets; the model UVs follow the vertices.
         let (glinted, uv) = match glint {
             Some(g) => {
@@ -416,4 +426,30 @@ pub fn take_mesh() -> Vec<PartVertex> {
 }
 pub fn restore_mesh(mesh: Vec<PartVertex>) {
     STATE.with_borrow_mut(|state| state.mesh = mesh);
+}
+
+#[cfg(test)]
+mod normal_tests {
+    /// The same directions as the inverse transpose, for a mirrored and a stretched matrix.
+    #[test]
+    fn normal_matrix_points_like_the_inverse_transpose() {
+        let turned = glam::Mat4::from_euler(glam::EulerRot::ZYX, 0.4, -1.1, 2.3);
+        for scale in [
+            glam::Vec3::ONE,
+            glam::Vec3::new(-1.0, 1.0, 1.0),
+            glam::Vec3::new(0.5, 2.0, 1.5),
+        ] {
+            let m = turned * glam::Mat4::from_scale(scale);
+            let exact = glam::Mat3::from_mat4(m).inverse().transpose();
+            let ours = glam::Mat3::from_cols_array(&super::normal_matrix(m));
+            for n in [
+                glam::Vec3::X,
+                glam::Vec3::Y,
+                glam::Vec3::new(0.3, -0.7, 0.2),
+            ] {
+                let (a, b) = ((exact * n).normalize(), (ours * n).normalize());
+                assert!((a - b).length() < 1e-4, "{a} against {b} at {scale}");
+            }
+        }
+    }
 }

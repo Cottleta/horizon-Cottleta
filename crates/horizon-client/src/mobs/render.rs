@@ -1676,12 +1676,7 @@ pub fn part_matrix(
     }
     let m = parent
         * glam::Mat4::from_translation(glam::Vec3::new(p[0], p[1], p[2]) / 16.0)
-        * glam::Mat4::from_quat(glam::Quat::from_euler(
-            glam::EulerRot::ZYX,
-            p[5],
-            p[4],
-            p[3],
-        ))
+        * rotation_zyx(p[5], p[4], p[3])
         * glam::Mat4::from_scale(glam::Vec3::new(p[6], p[7], p[8]));
     if part.name == name {
         return Some(m);

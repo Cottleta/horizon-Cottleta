@@ -318,11 +318,30 @@ pub fn part_id(name: &str) -> u32 {
 
 /// The number of part name `name` if one was given.
 pub fn known_part_id(name: &str) -> Option<u32> {
-    PART_IDS
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(name)
-        .copied()
+    // Animations ask for the same few names, from the same strings, thousands of
+    // times a frame: a small table by address saves the lock and the hash. Its
+    // entries hold the name, so a string reusing an address can't get another's id.
+    const SLOTS: usize = 256;
+    thread_local! {
+        static RECENT: std::cell::RefCell<Vec<Option<(Box<str>, u32)>>> =
+            std::cell::RefCell::new(vec![None; SLOTS]);
+    }
+    let address = name.as_ptr() as usize;
+    let slot = ((address >> 3) ^ (address >> 11)) % SLOTS;
+    RECENT.with_borrow_mut(|recent| {
+        if let Some((kept, id)) = &recent[slot]
+            && **kept == *name
+        {
+            return Some(*id);
+        }
+        let id = PART_IDS
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .copied()?;
+        recent[slot] = Some((name.into(), id));
+        Some(id)
+    })
 }
 /// Kept for callers of the earlier simple AI; species now select behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -401,7 +420,7 @@ pub struct MobType {
     pub model: Arc<Part>,
     /// Every baked layer of this entity's models keyed by `model#layer`
     /// (e.g. `sheep#wool`, `zombie_baby#main`).
-    pub layers: HashMap<String, Arc<Part>>,
+    pub layers: rustc_hash::FxHashMap<String, Arc<Part>>,
     pub texture: String,
     pub brain: Brain,
     pub anim: Anim,
@@ -475,7 +494,7 @@ impl MobTypes {
             };
             let defaults = exact.get(&id).cloned().unwrap_or_default();
             let attr = |k: &str| defaults.get(&format!("minecraft:{k}")).copied();
-            let mut layers = HashMap::new();
+            let mut layers = rustc_hash::FxHashMap::default();
             if let Some(all) = models.as_object() {
                 for prefix in def.layer_prefixes() {
                     let start = format!("minecraft:{prefix}#");
@@ -3222,7 +3241,7 @@ pub(crate) mod sensor_scan_tests {
                 ..Default::default()
             },
             model: Arc::new(Part::parse("root", &json!({}))),
-            layers: HashMap::new(),
+            layers: Default::default(),
             texture: String::new(),
             brain: Brain::Passive,
             anim: Anim::Rabbit,

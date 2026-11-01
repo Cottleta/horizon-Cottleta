@@ -64,14 +64,19 @@ impl Game<'_> {
         }
     }
     /// An entity's block position and (interpolated) eyes, by UUID.
-    fn waypoint_entity(&self, id: u128, alpha: f64) -> Option<([i32; 3], [f64; 3])> {
+    fn waypoint_entity(
+        &self,
+        id: u128,
+        alpha: f64,
+        mobs: &rustc_hash::FxHashMap<u32, &horizon_client::mobs::Mob>,
+    ) -> Option<([i32; 3], [f64; 3])> {
         let at = |p: [f64; 3], q: [f64; 3], eyes: f64| {
             let pos: [f64; 3] = std::array::from_fn(|i| q[i] + (p[i] - q[i]) * alpha);
             (p.map(|c| c.floor() as i32), [pos[0], pos[1] + eyes, pos[2]])
         };
         if let Some(r) = &self.remote {
             let entity = r.player_entity(id)?;
-            let m = self.mobs.iter().find(|m| m.id == entity)?;
+            let m = mobs.get(&entity)?;
             let v = |v: horizon_core::geometry::Vec3| [v.x, v.y, v.z];
             return Some(at(v(m.position), v(m.previous), m.eye_height()));
         }
@@ -106,7 +111,10 @@ impl Game<'_> {
             // Points behind the camera land past the far plane (z > 1).
             [0.0, y, if depth < 0.0 { 2.0 } else { 0.5 }]
         };
-        let entity = |id: u128| self.waypoint_entity(id, alpha);
+        // Each waypoint finds its entity here, not by a search of every mob. In
+        // reverse, so that an id two mobs share keeps the first, as a search would.
+        let mobs = self.mobs.iter().rev().map(|m| (m.id, m)).collect();
+        let entity = |id: u128| self.waypoint_entity(id, alpha, &mobs);
         let view = View {
             gui_width,
             gui_height,

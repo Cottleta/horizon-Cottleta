@@ -2,8 +2,10 @@
 //! knockback with another client: `HORIZON_ENTITY_LOG=FILE` writes one CSV
 //! line per event (`ms,event,id,x,y,z`): each move and motion packet as it
 //! arrives, each hurt, and every tick where the player is drawn from (`tick`)
-//! and where this player is (`self`). Off (nothing checked but one flag)
-//! without the variable.
+//! and where this player is (`self`). For this player too: its attacks on a
+//! player (`attack`: sprinting, attack strength ticks), the motion a server
+//! gives it (`hit`) and where each server teleport finds it (`setback`). Off
+//! (nothing checked but one flag) without the variable.
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::{Mutex, OnceLock};

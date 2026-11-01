@@ -2599,6 +2599,7 @@ impl Game<'_> {
             }
             // ClientPacketListener.handleSetEntityMotion: knockback on this player.
             C::SetEntityMotion(p) if self.remote.as_ref().is_some_and(|r| r.entity_id == p.id) => {
+                entity_log::record("hit", p.id, p.velocity);
                 if let Some(pl) = self.player.as_mut() {
                     pl.velocity = Vec3::new(p.velocity[0], p.velocity[1], p.velocity[2]);
                 }
@@ -3957,6 +3958,8 @@ impl Game<'_> {
             .as_ref()
             .map(|pl| pl.position)
             .unwrap_or(Vec3::ZERO);
+        // Where the server's correction found this player, before it moves it.
+        entity_log::record("setback", p.teleport, [current.x, current.y, current.z]);
         let velocity = self
             .player
             .as_ref()
@@ -6128,9 +6131,16 @@ impl Game<'_> {
         } else if let Some((i, distance)) = self.mob_hit()
             && self.before_block(distance)
         {
-            self.send(S::Attack(play::Attack {
-                id: self.mobs[i].id as i32,
-            }));
+            let id = self.mobs[i].id as i32;
+            self.send(S::Attack(play::Attack { id }));
+            if &*self.mobs[i].kind.id == "minecraft:player" {
+                if entity_log::enabled() {
+                    let sprinting = self.player.as_ref().is_some_and(|p| p.sprinting);
+                    let ticker = f64::from(self.hand_strength.ticker);
+                    entity_log::record("attack", id, [f64::from(u8::from(sprinting)), ticker, 0.0]);
+                }
+                self.extra_knockback_on_remote_player();
+            }
             self.reset_attack_strength();
         } else if !self.entity_targeted()
             && let Some(hit) = self.pick()

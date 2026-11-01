@@ -25,6 +25,12 @@ enum MendSlot {
     Armor(usize),
 }
 
+/// `Player.attack`'s `knockbackAmount > 0`: the attack knockback attribute, or
+/// a sprinting hit at full strength.
+fn has_extra_knockback(attribute: f64, sprinting: bool, charged: bool) -> bool {
+    attribute > 0.0 || (sprinting && charged)
+}
+
 impl Game<'_> {
     /// `Player.getDestroySpeed` after the tool speed: mining efficiency, haste
     /// and mining fatigue.
@@ -153,10 +159,36 @@ impl Game<'_> {
     }
     /// The attacker's side of `causeExtraKnockback` as the attacking client
     /// sees it: the server's player stops sprinting, and its flag reaches the
-    /// client. (The server's 0.6 speed cut never does: the client's own
-    /// `Player.attack` simulates no hurt, so it skips the knockback.)
+    /// client. (The server's 0.6 speed cut never does on a mob: the client's
+    /// own `Player.attack` simulates no hurt, so it skips the knockback. A
+    /// player is `extra_knockback_on_remote_player`.)
     pub(super) fn stop_sprint_after_extra_knockback(&mut self) {
         if let Some(p) = self.player.as_mut() {
+            let _ = p.set_sprinting(false);
+        }
+    }
+    /// `Player.attack` as `MultiPlayerGameMode.attack` runs it on this client
+    /// for a hit on another player: `RemotePlayer.hurtClient` is true, so
+    /// `causeExtraKnockback` cuts this player's speed and stops its sprint at
+    /// once. Call before the attack strength resets.
+    pub(super) fn extra_knockback_on_remote_player(&mut self) {
+        let delay = horizon_client::attack_strength::delay(self.main_hand_attack_speed());
+        // getAttackStrengthScale(0.5) > 0.9, and only a hit with damage.
+        let charged = (self.hand_strength.ticker as f32 + 0.5) / delay > 0.9;
+        let damage = 1.0
+            + self.attack_item_info().map_or(0.0, |i| i.attack_damage)
+            + self.effect_attack_bonus();
+        let Some(p) = self.player.as_mut() else {
+            return;
+        };
+        if damage <= 0.0 && p.auto_spin_attack_dmg <= 0.0 {
+            return;
+        }
+        // LivingEntity.getKnockback on a client: the attribute alone.
+        let attribute = p.attribute("minecraft:attack_knockback").unwrap_or(0.0);
+        if has_extra_knockback(attribute, p.sprinting, charged) {
+            p.velocity.x *= 0.6;
+            p.velocity.z *= 0.6;
             let _ = p.set_sprinting(false);
         }
     }
@@ -1010,5 +1042,17 @@ fn location_requirements(req: &Value, on_ground: bool, riding: bool) -> bool {
                 && (p["minecraft:vehicle"].is_null() || riding)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_a_charged_sprint_or_the_attribute_gives_extra_knockback() {
+        use super::has_extra_knockback as extra;
+        assert!(extra(0.0, true, true));
+        assert!(!extra(0.0, true, false), "a hit too soon");
+        assert!(!extra(0.0, false, true), "walking");
+        assert!(extra(0.5, false, false), "the attribute alone");
     }
 }

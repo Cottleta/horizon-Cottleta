@@ -1202,15 +1202,20 @@ fn draw_normals(
     if hidden || p[6] == 0.0 && p[7] == 0.0 && p[8] == 0.0 {
         return;
     }
-    let m = base
-        * glam::Mat4::from_translation(glam::Vec3::new(p[0], p[1], p[2]) / 16.0)
-        * glam::Mat4::from_quat(glam::Quat::from_euler(
+    let mut m = base * glam::Mat4::from_translation(glam::Vec3::new(p[0], p[1], p[2]) / 16.0);
+    // An unturned or unscaled part skips that step: its matrix is the identity, and
+    // multiplying by it changes nothing.
+    if p[3] != 0.0 || p[4] != 0.0 || p[5] != 0.0 {
+        m *= glam::Mat4::from_quat(glam::Quat::from_euler(
             glam::EulerRot::ZYX,
             p[5],
             p[4],
             p[3],
-        ))
-        * glam::Mat4::from_scale(glam::Vec3::new(p[6], p[7], p[8]));
+        ));
+    }
+    if p[6] != 1.0 || p[7] != 1.0 || p[8] != 1.0 {
+        m *= glam::Mat4::from_scale(glam::Vec3::new(p[6], p[7], p[8]));
+    }
     // Posed on the GPU, the normals come from `m` (`gpu_parts::defer`): the exact
     // normal stack is only kept for vertices written here.
     let deferred = super::gpu_parts::targets(out);

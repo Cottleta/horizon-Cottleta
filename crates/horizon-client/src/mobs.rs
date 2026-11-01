@@ -39,6 +39,7 @@ pub mod gear;
 pub mod goals;
 pub mod goat;
 pub mod golem;
+pub mod gpu_parts;
 pub mod guardian;
 pub mod happy_ghast;
 pub mod hostile;

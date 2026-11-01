@@ -95,6 +95,7 @@ pub mod pack_uniforms;
 mod pack_weather;
 mod page_runs;
 pub mod panorama;
+pub mod parts;
 mod readback;
 mod resident;
 mod stars;
@@ -287,6 +288,10 @@ pub struct Frame<'a> {
     pub glowing: &'a [Vertex],
     /// Runs of `entities` by entity, while a shader pack draws them (`pack_draw::EntitySpan`).
     pub entity_spans: &'a [pack_draw::EntitySpan],
+    /// Every model part mesh the jobs refer to (`parts`), added to over time.
+    pub part_mesh: &'a [parts::PartVertex],
+    /// Parts posed on the GPU into `entities`' placeholder vertices (`parts`).
+    pub part_jobs: &'a [parts::PartJob],
     pub weather: &'a [crate::weather::Vertex],
     pub weather_time: crate::weather::Time,
     /// Horizon Extras' dynamic lights, nearest first (`dynamic_light::select`); empty when off.
@@ -469,6 +474,10 @@ pub struct Renderer {
     hand_group: wgpu::BindGroup,
     hand_globals: wgpu::Buffer,
     entity_buffer: wgpu::Buffer,
+    /// Model parts posed on the GPU, where compute shaders run.
+    gpu_parts: Option<parts::GpuParts>,
+    /// `EntityBatch::places` scratch.
+    entity_places: Vec<(u32, u32, u32)>,
     entity_capacity: u64,
     entity_batch: EntityBatch,
     group: wgpu::BindGroup,
@@ -2509,10 +2518,11 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let entity_capacity = 1 << 14;
+        let gpu_parts = parts::GpuParts::supported(&adapter).then(|| parts::GpuParts::new(&device));
         let entity_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Entity vertices"),
             size: entity_capacity * std::mem::size_of::<Vertex>() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            usage: Self::entity_usage(gpu_parts.is_some()),
             mapped_at_creation: false,
         });
         let flat_wanted = flat::wanted(&adapter, &device);
@@ -2690,6 +2700,8 @@ impl Renderer {
             hand_group,
             hand_globals,
             entity_buffer,
+            gpu_parts,
+            entity_places: Vec::new(),
             entity_capacity,
             entity_batch: EntityBatch::default(),
             group,
@@ -3716,6 +3728,24 @@ impl Renderer {
             );
         }
     }
+    /// The entity buffer's usage: also storage where model parts are posed on the GPU.
+    fn entity_usage(gpu_parts: bool) -> wgpu::BufferUsages {
+        let usage = wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST;
+        if gpu_parts {
+            usage | wgpu::BufferUsages::STORAGE
+        } else {
+            usage
+        }
+    }
+    /// Whether model parts can be posed on the GPU this frame (`Frame::part_jobs`): compute
+    /// shaders run, and no shader pack draws entities from its own copy of their vertices.
+    pub fn gpu_parts(&self) -> bool {
+        self.gpu_parts.is_some()
+            && !self
+                .pack_post
+                .as_ref()
+                .is_some_and(|(_, post)| post.as_ref().is_some_and(|p| p.has_entities()))
+    }
     pub fn render(&mut self, frame: &Frame) -> Result<bool> {
         let rendered = self.draw_frame(frame);
         // A frame that was not drawn still submits the section copies.
@@ -4478,7 +4508,7 @@ impl Renderer {
             self.entity_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Entity vertices"),
                 size: self.entity_capacity * std::mem::size_of::<Vertex>() as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                usage: Self::entity_usage(self.gpu_parts.is_some()),
                 mapped_at_creation: false,
             });
         }
@@ -4501,6 +4531,28 @@ impl Renderer {
                     );
                 },
             );
+        }
+        // Model parts posed on the GPU into their placeholders, which `entities` holds
+        // only when a shader pack doesn't draw entities from its own copy.
+        if let Some(gpu_parts) = &mut self.gpu_parts
+            && (!frame.part_jobs.is_empty() || !frame.part_mesh.is_empty())
+        {
+            let jobs = if std::ptr::eq(entities, frame.entities) {
+                frame.part_jobs
+            } else {
+                &[]
+            };
+            self.entity_batch.places(&mut self.entity_places);
+            let places = &self.entity_places;
+            gpu_parts.prepare(
+                &self.device,
+                &mut self.uploads,
+                &mut encoder,
+                frame.part_mesh,
+                jobs,
+                |vertex| EntityBatch::place(places, vertex),
+            );
+            gpu_parts.dispatch(&self.device, &mut encoder, &self.entity_buffer);
         }
         self.entity_outline.prepare(
             &self.device,

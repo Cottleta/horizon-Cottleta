@@ -1640,6 +1640,8 @@ struct Game<'a> {
     renderer: Option<Renderer>,
     /// CPU geometry storage retained across frames, including empty/title frames.
     entity_vertices: Vec<Vertex>,
+    /// This frame's model parts posed on the GPU (`mobs::gpu_parts`).
+    part_jobs: Vec<horizon_client::gfx::parts::PartJob>,
     /// Horizon Extras' dynamic lights this frame (`dynamic_lights.rs`), and how brightly each
     /// item glows (built the first time the extra is on).
     dynamic_lights: Vec<[f32; 4]>,
@@ -8497,8 +8499,14 @@ impl Game<'_> {
         self.shelf_geometry(camera, &mut out);
         self.mark_entity(out.len(), "minecraft:ominous_item_spawner");
         self.ominous_item_spawner_geometry(camera, alpha, &mut out);
-        // Mobs and their projectiles (a span each).
+        // Mobs and their projectiles (a span each), their model parts posed on the GPU
+        // where it can (`mobs::gpu_parts`).
+        let gpu_parts = self.renderer.as_ref().is_some_and(|r| r.gpu_parts());
+        if gpu_parts {
+            horizon_client::mobs::gpu_parts::begin(&out);
+        }
         self.mob_geometry(camera, alpha, &mut out);
+        horizon_client::mobs::gpu_parts::end();
         // In first person only a shader pack's shadow pass draws the player.
         self.mark_player(out.len(), !self.own_body_in_view());
         self.player_model_geometry(camera, self.clock.camera_fraction(), &mut out);
@@ -12498,6 +12506,9 @@ impl Game<'_> {
                 self.entity_geometry(camera, alpha, entities)
             });
         }
+        let mut part_jobs = std::mem::take(&mut self.part_jobs);
+        horizon_client::mobs::gpu_parts::finish(&entities, &mut part_jobs);
+        let part_mesh = horizon_client::mobs::gpu_parts::take_mesh();
         let bolts = if title {
             Vec::new()
         } else {
@@ -12634,6 +12645,8 @@ impl Game<'_> {
             }),
             entities: &entities,
             entity_spans: &entity_spans,
+            part_mesh: &part_mesh,
+            part_jobs: &part_jobs,
             glowing: &glowing,
             dynamic_lights: &self.dynamic_lights,
             lightning: horizon_client::gfx::lightning::Input {
@@ -12686,6 +12699,8 @@ impl Game<'_> {
         };
         // Restore storage even when rendering fails (for example, a lost surface).
         self.entity_vertices = entities;
+        self.part_jobs = part_jobs;
+        horizon_client::mobs::gpu_parts::restore_mesh(part_mesh);
         *self.entity_spans.get_mut() = entity_spans;
         *self.glowing_vertices.get_mut() = glowing;
         self.see_through_vertices = see_through;
@@ -14548,6 +14563,7 @@ impl<'a> Game<'a> {
             window: None,
             renderer: None,
             entity_vertices: Vec::new(),
+            part_jobs: Vec::new(),
             dynamic_lights: Vec::new(),
             luminance: None,
             see_through_vertices: Vec::new(),
@@ -15711,6 +15727,8 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         nether_lighting: false,
         entities: &[],
         entity_spans: &[],
+        part_mesh: &[],
+        part_jobs: &[],
         glowing: &[],
         dynamic_lights: &[],
         clouds: None,

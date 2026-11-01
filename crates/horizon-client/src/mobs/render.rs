@@ -1210,10 +1210,26 @@ fn draw_normals(
     if poses.is_hidden(part) || p[6] == 0.0 && p[7] == 0.0 && p[8] == 0.0 {
         return;
     }
-    let normals = normals.part(p);
+    // Posed on the GPU, the normals come from `m` (`gpu_parts::defer`): the exact
+    // normal stack is only kept for vertices written here.
+    let deferred = super::gpu_parts::targets(out);
+    let normals = if deferred { normals } else { normals.part(p) };
     // `skips` is a name lookup: ask once per part, not once per polygon. A part
     // hidden this way still draws its children, so only the polygons are gated.
-    if !poses.skips(part) {
+    if !poses.skips(part)
+        && !(deferred
+            && super::gpu_parts::defer(
+                out,
+                part,
+                m,
+                uv,
+                scroll,
+                color,
+                light,
+                overlay,
+                overlay == ARMOR_GLINT,
+            ))
+    {
         for poly in &part.polygons {
             let normal = poly.vertex_normal(normals);
             for v in poly.vertices {
@@ -1479,6 +1495,7 @@ fn render_visible(
             for vertex in &mut out[start..] {
                 vertex.normal = [0; 4];
             }
+            super::gpu_parts::zero_normals_from(start);
         }
     }
     // EnergySwirlLayer: the armour model, additive, scrolling over the sprite.
@@ -1505,6 +1522,7 @@ fn render_visible(
         for vertex in &mut out[start..] {
             vertex.normal = [0; 4];
         }
+        super::gpu_parts::zero_normals_from(start);
     }
     if shell_last {
         draw_body(out);

@@ -4796,6 +4796,10 @@ impl Game<'_> {
         for mob in &self.mobs {
             let entity_start = out.len();
             let outline = self.mob_outline(mob);
+            // A glowing mob's outline copies its vertices: they come from the CPU.
+            let _cpu = outline
+                .is_some()
+                .then(horizon_client::mobs::gpu_parts::pause);
             // Entity.DATA_SHARED_FLAGS_ID invisible: only the name tag draws (and
             // the outline of a glowing mob, LivingEntityRenderer.getRenderType).
             if mob.invisible && outline.is_none() {

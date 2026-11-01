@@ -85,6 +85,27 @@ impl EntityBatch {
         entities.len() / 4 * 4 + additive.len() + hand.len() + see_through.len()
     }
 
+    /// Where `write` puts each run: (first entity vertex, vertices, buffer vertex), by
+    /// entity vertex, into `places` (cleared).
+    pub(super) fn places(&self, places: &mut Vec<(u32, u32, u32)>) {
+        places.clear();
+        let mut at = 0;
+        for runs in &self.runs {
+            for &(first, count) in runs {
+                places.push(((first * 4) as u32, (count * 4) as u32, at));
+                at += (count * 4) as u32;
+            }
+        }
+        places.sort_unstable_by_key(|p| p.0);
+    }
+
+    /// The buffer vertex of entity vertex `vertex`, by `places`.
+    pub(super) fn place(places: &[(u32, u32, u32)], vertex: u32) -> Option<u32> {
+        let i = places.partition_point(|p| p.0 <= vertex).checked_sub(1)?;
+        let (first, count, at) = places[i];
+        (vertex < first + count).then_some(at + vertex - first)
+    }
+
     /// Hand `put` each piece of the combined buffer with its vertex offset:
     /// the material runs, then `additive`, `hand` and `see_through`. Copying
     /// straight into the upload's staging memory spares a combined copy.
@@ -294,5 +315,36 @@ mod tests {
                     .sum::<usize>()
             );
         }
+    }
+
+    /// `place` finds every entity vertex where `write` put it.
+    #[test]
+    fn places_match_write() {
+        let layers = [0, 11, 0, 0, 14, 35, 0, 11, 32, 0];
+        let entities: Vec<Vertex> = layers
+            .iter()
+            .enumerate()
+            .flat_map(|(q, &layer)| {
+                (0..4).map(move |i| Vertex {
+                    pos: [(q * 4 + i) as f32, 0.0, 0.0],
+                    uv: [0.0; 2],
+                    layer,
+                    color: 0,
+                    light: 0,
+                    normal: [0; 4],
+                    glint_uv: [0.0; 2],
+                })
+            })
+            .collect();
+        let mut batch = EntityBatch::default();
+        batch.update(&entities);
+        let combined = batch.combined(&entities, &[], &[], &[]);
+        let mut places = Vec::new();
+        batch.places(&mut places);
+        for (i, vertex) in entities.iter().enumerate() {
+            let at = EntityBatch::place(&places, i as u32).expect("every vertex is laid out");
+            assert_eq!(combined[at as usize].pos, vertex.pos);
+        }
+        assert_eq!(EntityBatch::place(&places, entities.len() as u32), None);
     }
 }

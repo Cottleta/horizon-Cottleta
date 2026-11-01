@@ -9,33 +9,57 @@ use std::collections::VecDeque;
 
 const HISTORY: usize = 160;
 
+/// One frame's steps in milliseconds. `cpu` is `build`, `record`, `finish` and
+/// `submit`; `acquire` and `present` are the wait it leaves out.
+#[derive(Clone, Copy, Default)]
+pub struct Steps {
+    /// Everything before the renderer: the world, entities and HUD.
+    pub build: f32,
+    /// Recording the frame's passes.
+    pub record: f32,
+    pub finish: f32,
+    pub submit: f32,
+    pub acquire: f32,
+    pub present: f32,
+}
+
 #[derive(Default)]
 pub struct FrameGraph {
-    /// Frame, CPU and GPU milliseconds of recent frames, oldest first, and the
-    /// milliseconds `cpu` leaves out: acquiring the swapchain image.
-    frames: VecDeque<(f32, f32, f32, f32)>,
+    /// Frame, CPU and GPU milliseconds of recent frames, oldest first, and their
+    /// steps.
+    frames: VecDeque<(f32, f32, f32, Steps)>,
 }
 impl FrameGraph {
-    pub fn record(&mut self, frame_ms: f32, cpu_ms: f32, gpu_ms: Option<f32>, acquire_ms: f32) {
+    pub fn record(&mut self, frame_ms: f32, cpu_ms: f32, gpu_ms: Option<f32>, steps: Steps) {
         let gpu = gpu_ms.unwrap_or_else(|| self.frames.back().map_or(0.0, |f| f.2));
         if self.frames.len() == HISTORY {
             self.frames.pop_front();
         }
-        self.frames.push_back((frame_ms, cpu_ms, gpu, acquire_ms));
+        self.frames.push_back((frame_ms, cpu_ms, gpu, steps));
     }
     pub fn draw(&self, mode: Overlay, batch: &mut HudBatch, atlas: &HudAtlas) {
         if mode == Overlay::Off || self.frames.is_empty() {
             return;
         }
         let n = self.frames.len() as f32;
-        let avg = |f: fn(&(f32, f32, f32, f32)) -> f32| self.frames.iter().map(f).sum::<f32>() / n;
-        let (frame, cpu, gpu, acquire) = (avg(|f| f.0), avg(|f| f.1), avg(|f| f.2), avg(|f| f.3));
+        let avg =
+            |f: fn(&(f32, f32, f32, Steps)) -> f32| self.frames.iter().map(f).sum::<f32>() / n;
+        let (frame, cpu, gpu) = (avg(|f| f.0), avg(|f| f.1), avg(|f| f.2));
+        let (build, record, finish, submit) = (
+            avg(|f| f.3.build),
+            avg(|f| f.3.record),
+            avg(|f| f.3.finish),
+            avg(|f| f.3.submit),
+        );
+        let (acquire, present) = (avg(|f| f.3.acquire), avg(|f| f.3.present));
         let worst = self.frames.iter().map(|f| f.0).fold(0.0f32, f32::max);
         let lines = [
             format!("{:.0} fps", 1000.0 / frame.max(0.001)),
             format!("frame {frame:.3} ms  max {worst:.3}"),
             format!("cpu {cpu:.3}  gpu {gpu:.3} ms"),
-            format!("acquire {acquire:.3} ms"),
+            format!("build {build:.3}  record {record:.3}"),
+            format!("finish {finish:.3}  submit {submit:.3}"),
+            format!("acquire {acquire:.3}  present {present:.3}"),
         ];
         let width = 120.0f32.max(
             lines

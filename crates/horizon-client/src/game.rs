@@ -14242,7 +14242,18 @@ impl ApplicationHandler for Game<'_> {
                                 ms(elapsed),
                                 ms(cpu),
                                 r.gpu_times.last().copied(),
-                                ms(r.last_wait),
+                                {
+                                    let [acquire, finish, submit, present] = r.last_steps.map(ms);
+                                    let encode = ms(r.last_encode);
+                                    horizon_client::perf_overlay::Steps {
+                                        build: ms(cpu) - encode,
+                                        record: encode - finish - submit,
+                                        finish,
+                                        submit,
+                                        acquire,
+                                        present,
+                                    }
+                                },
                             );
                             self.frame_stats.record_cpu(ms(cpu));
                             let render = r.last_encode;

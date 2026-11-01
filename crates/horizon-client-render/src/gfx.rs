@@ -401,6 +401,9 @@ pub struct Renderer {
     pub last_wait: std::time::Duration,
     /// CPU time of the last `render`, waits excluded.
     pub last_encode: std::time::Duration,
+    /// Of the last frame: acquiring the image, closing the command encoder,
+    /// submitting and presenting (`last_wait` is the first and last together).
+    pub last_steps: [std::time::Duration; 4],
     /// What the system says about the window's display, watched only while HDR output
     /// is on; before `window`, so it's dropped first.
     display: DisplayWatch,
@@ -2682,6 +2685,7 @@ impl Renderer {
             lightmap_pixels: [0; 16 * 16 * 4],
             last_wait: std::time::Duration::ZERO,
             last_encode: std::time::Duration::ZERO,
+            last_steps: [std::time::Duration::ZERO; 4],
             window,
             device,
             queue,
@@ -3814,6 +3818,7 @@ impl Renderer {
         let acquire = Instant::now();
         let acquired = self.surface.as_ref().map(|s| s.get_current_texture());
         self.last_wait = acquire.elapsed();
+        self.last_steps[0] = self.last_wait;
         let (surface_frame, reconfigure) = match acquired {
             None => (None, false),
             Some(wgpu::CurrentSurfaceTexture::Success(f)) => (Some(f), false),
@@ -5592,13 +5597,17 @@ impl Renderer {
                 let size = [self.config.width, self.config.height];
                 Some(copy_frame(&self.device, &mut encoder, &texture, size))
             });
+        let finish = Instant::now();
         let commands = crate::spans::time("encode", || encoder.finish());
+        self.last_steps[1] = finish.elapsed();
         let first_frame = self.first_frame == FirstFrame::Submit;
         if first_frame {
             startup_step(format_args!("submitting the first frame"));
             self.first_frame = FirstFrame::Drawn;
         }
+        let submit = Instant::now();
         let submission = crate::spans::time("submit", || self.queue.submit([commands]));
+        self.last_steps[2] = submit.elapsed();
         if let Some(cull) = &mut self.cull {
             cull.submitted();
         }
@@ -5662,7 +5671,8 @@ impl Renderer {
                 });
             }
         }
-        self.last_wait += present.elapsed();
+        self.last_steps[3] = present.elapsed();
+        self.last_wait += self.last_steps[3];
         self.last_encode = started.elapsed().saturating_sub(self.last_wait);
         let _ = self.started;
         self.visible = visible;

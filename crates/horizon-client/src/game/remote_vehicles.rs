@@ -68,11 +68,13 @@ impl Game<'_> {
             let p = self.carts[i].position;
             hits.push((self.carts[i].id as i32, d, [p.x, p.y, p.z]));
         }
+        // Interaction.isPickable: attacked and used alike.
+        let reach = if self.creative { 5.0 } else { 3.0 };
+        hits.extend(self.interaction_hit(eye, dir, reach));
         if attacking {
             // EndCrystal.isPickable: its 2 x 2 box, with the server's entity
             // id, not special_targets' local projectile target id.
             // Entity.interact passes on a crystal, so right clicks use the item.
-            let reach = if self.creative { 5.0 } else { 3.0 };
             for c in self.crystals.iter().filter(|c| c.id != 0) {
                 let p = c.position;
                 let bounds = Aabb::new(

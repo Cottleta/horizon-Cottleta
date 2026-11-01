@@ -47,6 +47,9 @@ impl Game<'_> {
                 id as i32,
                 super::text_displays::RemoteTextDisplay::new(shows, position, yaw),
             );
+        } else if kind == "minecraft:interaction" {
+            self.interactions
+                .insert(id as i32, super::interactions::Interaction::new(position));
         } else if kind == "minecraft:ominous_item_spawner" {
             self.add_remote_ominous_item_spawner(id, position);
         } else if let Some(cart) = super::minecarts::CartKind::from_id(kind) {
@@ -128,6 +131,7 @@ impl Game<'_> {
 
     /// `handleSetEntityData` for an object: what changes how it looks.
     pub(super) fn remote_object_data(&mut self, id: i32, values: &[(u8, i32, Value)]) {
+        self.interaction_data(id, values);
         if self.text_displays.contains_key(&id) {
             // ItemDisplay.DATA_ITEM_STACK, read with the server's registries.
             let item = values
@@ -362,6 +366,7 @@ impl Game<'_> {
     /// Every object a server sent (a new connection, level or dimension).
     pub(super) fn clear_remote_objects(&mut self) {
         self.text_displays.clear();
+        self.interactions.clear();
         self.ominous_spawners.clear();
         self.remote_knots.clear();
         self.carts.clear();
@@ -374,6 +379,7 @@ impl Game<'_> {
 
     pub(super) fn remove_remote_object(&mut self, id: u32) {
         self.text_displays.remove(&(id as i32));
+        self.interactions.remove(&(id as i32));
         self.ominous_spawners.retain(|s| s.id != id);
         self.remote_knots.remove(&id);
         self.carts.retain(|c| c.id != id);

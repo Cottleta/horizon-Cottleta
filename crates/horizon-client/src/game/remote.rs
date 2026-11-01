@@ -1783,6 +1783,7 @@ impl Game<'_> {
         }
         self.turn_remote_object(id, rotation.map(|(yaw, _)| yaw), on_ground);
         self.move_remote_text_display(id, position, rotation);
+        self.move_remote_interaction(id, position);
         self.turn_remote_projectile(id, rotation);
     }
     fn remove_entity(&mut self, id: i32) {
@@ -5206,7 +5207,11 @@ impl Game<'_> {
             if passes {
                 return false;
             }
-            self.swing_arm();
+            // Interaction.interact on the client: SUCCESS swings, CONSUME
+            // only ends the click.
+            if self.interactions.get(&hit.id).is_none_or(|i| i.response) {
+                self.swing_arm();
+            }
             return true;
         }
         if let Some((i, distance)) = self.mob_hit()

@@ -33,6 +33,27 @@ fn banner_matrix(head: glam::Mat4) -> glam::Mat4 {
 /// `ElderGuardianParticle.lifetime`.
 pub(super) const APPARITION_TICKS: i32 = 30;
 
+/// What a mob's held item model depends on, within a tick.
+#[derive(PartialEq)]
+pub(super) struct HeldItemKey {
+    item: std::sync::Arc<str>,
+    enchanted: bool,
+    charged: bool,
+    using: Option<i32>,
+    left: bool,
+}
+/// The held item models of this tick: the tick, then by mob and off hand.
+pub(super) type HeldItems = (
+    u64,
+    rustc_hash::FxHashMap<
+        (u32, bool),
+        (
+            HeldItemKey,
+            std::sync::Arc<horizon_client::item_render::ItemRenderState>,
+        ),
+    >,
+);
+
 impl Game<'_> {
     /// `CustomHeadLayer` for a pumpkin worn by a LAN guest drawn on the
     /// in-frame host, whose model has no worn stacks for `head_item_geometry`.
@@ -341,6 +362,37 @@ impl Game<'_> {
                 .player_model
                 .as_ref()
                 .is_some_and(|p| p.id == mob.id && p.kind.id == mob.kind.id);
+            // Within a tick another player's hand holds what it held: its model isn't
+            // resolved again each frame (the local player's stack can change at once).
+            let using = off_hand == mob.extra.using_off_hand && mob.extra.using_item > 0;
+            let kept_key = (!local_player).then(|| HeldItemKey {
+                item: item.clone(),
+                enchanted: horizon_client::mobs::gear::enchanted(mob, slot),
+                charged: mob.extra.flag2,
+                using: using.then_some(mob.extra.using_item),
+                left,
+            });
+            if let Some(key) = &kept_key {
+                let mut kept = self.held_items.borrow_mut();
+                if kept.0 != self.ticks {
+                    kept.0 = self.ticks;
+                    kept.1.clear();
+                }
+                let state = kept
+                    .1
+                    .get(&(mob.id, off_hand))
+                    .filter(|(same, _)| same == key)
+                    .map(|(_, state)| state.clone());
+                drop(kept);
+                if let Some(state) = state {
+                    if lit {
+                        self.submit_item_world(&state, t, light, out);
+                    } else {
+                        self.submit_item_unlit(&state, t, light, out);
+                    }
+                    continue;
+                }
+            }
             let mut stack = if local_player {
                 let Some(stack) = self.stack_in(if off_hand {
                     super::shield::OFFHAND_SLOT
@@ -373,7 +425,7 @@ impl Game<'_> {
                     .as_ref()
                     .is_some_and(|p| std::ptr::eq(p, mob));
             owner.main_arm_left = mob.main_arm_left();
-            if off_hand == mob.extra.using_off_hand && mob.extra.using_item > 0 {
+            if using {
                 owner.using_this_item = true;
                 owner.use_duration = 72_000;
                 owner.use_item_remaining_ticks = 72_000 - mob.extra.using_item;
@@ -394,6 +446,12 @@ impl Game<'_> {
                 self.submit_item_world(&state, t, light, out);
             } else {
                 self.submit_item_unlit(&state, t, light, out);
+            }
+            if let Some(key) = kept_key {
+                self.held_items
+                    .borrow_mut()
+                    .1
+                    .insert((mob.id, off_hand), (key, std::sync::Arc::new(state)));
             }
         }
     }

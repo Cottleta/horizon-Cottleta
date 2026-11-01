@@ -394,15 +394,17 @@ pub fn zero_normals_from(start: usize) {
 pub fn finish(entities: &[Vertex], jobs: &mut Vec<PartJob>) -> [[f32; 3]; 2] {
     jobs.clear();
     STATE.with_borrow_mut(|state| {
-        for (id, job) in state.jobs.drain(..).enumerate() {
+        // In place, then the lists swap: thousands of jobs in a crowd, a copy saved.
+        let mut id = 0u32;
+        state.jobs.retain(|job| {
             let held = entities
                 .get(job.dest as usize)
-                .is_some_and(|v| v.light == PLACEHOLDER_LIGHT && v.color == id as u32)
+                .is_some_and(|v| v.light == PLACEHOLDER_LIGHT && v.color == id)
                 && job.dest as usize + 4 <= entities.len();
-            if held {
-                jobs.push(job);
-            }
-        }
+            id += 1;
+            held
+        });
+        std::mem::swap(jobs, &mut state.jobs);
         let (l0, l1) = state.lights.take().unwrap_or_default();
         [l0.to_array(), l1.to_array()]
     })

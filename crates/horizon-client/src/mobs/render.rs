@@ -1184,6 +1184,24 @@ pub fn draw_scrolled(
         out,
     );
 }
+/// `Quaternionf.rotationZYX` as a matrix, without going through the quaternion:
+/// a model part's rotation, thousands of times a frame in a crowd.
+fn rotation_zyx(z: f32, y: f32, x: f32) -> glam::Mat4 {
+    let turn = |angle: f32| {
+        if angle == 0.0 {
+            (0.0, 1.0)
+        } else {
+            angle.sin_cos()
+        }
+    };
+    let ((sz, cz), (sy, cy), (sx, cx)) = (turn(z), turn(y), turn(x));
+    glam::Mat4::from_cols(
+        glam::Vec4::new(cz * cy, sz * cy, -sy, 0.0),
+        glam::Vec4::new(cz * sy * sx - sz * cx, sz * sy * sx + cz * cx, cy * sx, 0.0),
+        glam::Vec4::new(cz * sy * cx + sz * sx, sz * sy * cx - cz * sx, cy * cx, 0.0),
+        glam::Vec4::W,
+    )
+}
 #[allow(clippy::too_many_arguments)]
 fn draw_normals(
     part: &Part,
@@ -1206,12 +1224,7 @@ fn draw_normals(
     // An unturned or unscaled part skips that step: its matrix is the identity, and
     // multiplying by it changes nothing.
     if p[3] != 0.0 || p[4] != 0.0 || p[5] != 0.0 {
-        m *= glam::Mat4::from_quat(glam::Quat::from_euler(
-            glam::EulerRot::ZYX,
-            p[5],
-            p[4],
-            p[3],
-        ));
+        m *= rotation_zyx(p[5], p[4], p[3]);
     }
     if p[6] != 1.0 || p[7] != 1.0 || p[8] != 1.0 {
         m *= glam::Mat4::from_scale(glam::Vec3::new(p[6], p[7], p[8]));
@@ -2195,5 +2208,23 @@ mod scroll_tests {
         assert!((scroll_u(0.25, 0.5) - 0.75).abs() < 1e-6);
         assert!((scroll_u(0.75, 0.5) - 0.25).abs() < 1e-6);
         assert!((scroll_u(1.0, 0.5) - 0.5).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    /// The same turn as the quaternion the part's rotation stands for.
+    #[test]
+    fn rotation_zyx_matches_the_quaternion() {
+        for (z, y, x) in [
+            (0.0, 0.0, 0.7),
+            (0.4, -1.1, 2.3),
+            (-3.0, 0.2, 0.0),
+            (1.5, 1.5, 1.5),
+        ] {
+            let exact = glam::Mat4::from_quat(glam::Quat::from_euler(glam::EulerRot::ZYX, z, y, x));
+            let ours = super::rotation_zyx(z, y, x);
+            assert!(exact.abs_diff_eq(ours, 1e-5), "{exact} against {ours}");
+        }
     }
 }

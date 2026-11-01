@@ -5,9 +5,14 @@ use crate::{
     hud::{HudAtlas, HudBatch, rgba},
     text::Text,
 };
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 const HISTORY: usize = 160;
+/// How often the numbers change.
+const REDRAW: Duration = Duration::from_millis(100);
 
 /// One frame's steps in milliseconds. `cpu` is `build`, `record`, `finish` and
 /// `submit`; `acquire` and `present` are the wait it leaves out.
@@ -25,6 +30,10 @@ pub struct Steps {
 
 #[derive(Default)]
 pub struct FrameGraph {
+    /// What the last redraw drew, and when: it costs more than it shows a
+    /// thousand times a second.
+    drawn: Vec<crate::hud::HudVertex>,
+    drawn_at: Option<(Instant, Overlay, f32, f32)>,
     /// Frame, CPU and GPU milliseconds of recent frames, oldest first, and their
     /// steps.
     frames: VecDeque<(f32, f32, f32, Steps)>,
@@ -37,10 +46,26 @@ impl FrameGraph {
         }
         self.frames.push_back((frame_ms, cpu_ms, gpu, steps));
     }
-    pub fn draw(&self, mode: Overlay, batch: &mut HudBatch, atlas: &HudAtlas) {
+    pub fn draw(&mut self, mode: Overlay, batch: &mut HudBatch, atlas: &HudAtlas) {
         if mode == Overlay::Off || self.frames.is_empty() {
             return;
         }
+        if let Some((at, kept, width, height)) = self.drawn_at
+            && kept == mode
+            && width == batch.width
+            && height == batch.height
+            && at.elapsed() < REDRAW
+        {
+            batch.vertices.extend_from_slice(&self.drawn);
+            return;
+        }
+        let start = batch.vertices.len();
+        self.redraw(mode, batch, atlas);
+        self.drawn.clear();
+        self.drawn.extend_from_slice(&batch.vertices[start..]);
+        self.drawn_at = Some((Instant::now(), mode, batch.width, batch.height));
+    }
+    fn redraw(&self, mode: Overlay, batch: &mut HudBatch, atlas: &HudAtlas) {
         let n = self.frames.len() as f32;
         let avg =
             |f: fn(&(f32, f32, f32, Steps)) -> f32| self.frames.iter().map(f).sum::<f32>() / n;

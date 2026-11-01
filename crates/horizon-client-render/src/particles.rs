@@ -3964,6 +3964,7 @@ impl ParticleEngine {
         pitch: f32,
         partial: f32,
         light_at: &dyn Fn([i32; 3]) -> u8,
+        view: Option<&crate::gfx::Frustum>,
         out: &mut Vec<Vertex>,
     ) {
         // Camera.setRotation: rotationYXZ(PI - yRot, -xRot, 0).
@@ -4007,6 +4008,12 @@ impl ParticleEngine {
                 base
             };
             let size = p.quad_size(partial);
+            // Out of view it draws nothing: no quads to build. Its quad reaches
+            // `size` from its centre at any roll, along each axis at most that.
+            let reach = glam::Vec3::splat(size * 2.0);
+            if view.is_some_and(|v| !v.intersects(center - reach, center + reach)) {
+                continue;
+            }
             let mut alpha = p.rgba[3];
             // OverlayParticle.extract: the flash fades as it pulses.
             if p.ty == ParticleType::Flash {

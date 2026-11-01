@@ -8803,6 +8803,7 @@ impl Game<'_> {
             self.pitch,
             alpha as f32,
             &|b| world.light(b[0], b[1], b[2]),
+            self.view_frustum.as_ref(),
             &mut out,
         );
         // Breaking progress overlays (destroy_stage_0..9): ours and the other players'.

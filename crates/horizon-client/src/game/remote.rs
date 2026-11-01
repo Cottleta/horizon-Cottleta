@@ -3612,13 +3612,18 @@ impl Game<'_> {
                 &r.level_players,
                 &r.skin_textures,
                 &mut r.level_player_textures,
-                |uuid| uuid != local && known.contains_key(&uuid),
+                |uuid| known.contains_key(&uuid),
             )
         };
         // Minecraft.profileFuture: the signed-in account's own profile, fetched from the
         // services, gives the local player its skin where the server sends none (single
         // player's offline-mode server).
-        if !entries.iter().any(|(u, t)| *u == local && t.skin.is_some())
+        let own_known = self
+            .remote
+            .as_ref()
+            .is_some_and(|r| r.skin_models.contains_key(&local));
+        if !own_known
+            && !entries.iter().any(|(u, t)| *u == local && t.skin.is_some())
             && let Some(own) = self.own_textures()
         {
             entries.retain(|(u, _)| *u != local);

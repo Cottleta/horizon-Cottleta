@@ -5686,8 +5686,8 @@ impl Renderer {
                 .hand_over(encoder, surface_frame);
             self.handed_over = true;
             self.last_handed_over = true;
-            // `last_wait` holds the acquire so far; `settle` adds what the frame waits.
-            self.last_encode = started.elapsed().saturating_sub(self.last_wait);
+            // `started` is after the wait for the last frame: only the acquire is in it.
+            self.last_encode = started.elapsed().saturating_sub(self.last_steps[0]);
             self.visible = visible;
             self.visible_lods = visible_lods;
             self.shadow_visible = shadow_visible;

@@ -8563,6 +8563,17 @@ impl Game<'_> {
             };
             let mut casters: Vec<(glam::DVec3, &str, f32)> =
                 horizon_client::shadows::mob_casters(&self.mobs, a).collect();
+            // The player's own model, in third person: it isn't one of `mobs`.
+            if self.own_body_in_view()
+                && self.player_model_shown()
+                && self.potions.effects.get("invisibility").is_none()
+                && let Some(own) = &self.player_model
+            {
+                casters.extend(horizon_client::shadows::mob_casters(
+                    std::slice::from_ref(own),
+                    self.clock.camera_fraction(),
+                ));
+            }
             let fixed = |id: &'static str| (id, horizon_client::shadows::shadow_params(id).0);
             let (item, item_radius) = fixed("minecraft:item");
             casters.extend(

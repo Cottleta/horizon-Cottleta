@@ -421,6 +421,9 @@ pub struct Renderer {
     sides_on: bool,
     sky: wgpu::RenderPipeline,
     dark_disc: wgpu::RenderPipeline,
+    /// `sky` and `dark_disc` depth tested at the far plane (late sky).
+    sky_late: wgpu::RenderPipeline,
+    dark_disc_late: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
     lines_secondary: wgpu::RenderPipeline,
     /// Gizmo lines (`RenderTypes.linesTranslucentNoDepthWrite`) and the
@@ -455,6 +458,8 @@ pub struct Renderer {
     see_through_pipeline: wgpu::RenderPipeline,
     text_polygon_offset_pipeline: wgpu::RenderPipeline,
     celestial_pipeline: wgpu::RenderPipeline,
+    /// `celestial_pipeline` at the far plane, depth tested (late sky).
+    celestial_far: wgpu::RenderPipeline,
     celestial_buffer: wgpu::Buffer,
     end_sky: end_sky::EndSky,
     stars: stars::Stars,
@@ -1450,6 +1455,30 @@ impl Renderer {
             false,
             Some(alpha_blend),
         );
+        // The sky and dark disc lie at the far plane: depth tested after solid terrain,
+        // only the pixels terrain left open shade them (late sky).
+        let sky_late = pipeline(
+            "Sky late",
+            "vs_sky",
+            "fs_sky",
+            &[],
+            tri,
+            None,
+            false,
+            true,
+            None,
+        );
+        let dark_disc_late = pipeline(
+            "Dark disc late",
+            "vs_sky",
+            "fs_dark_disc",
+            &[],
+            tri,
+            None,
+            false,
+            true,
+            Some(alpha_blend),
+        );
         let lines = pipeline(
             "Block outline",
             "vs_line",
@@ -2219,55 +2248,60 @@ impl Renderer {
             },
             ..additive_descriptor
         });
-        let celestial_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Celestial bodies"),
-            layout: Some(&entity_layout),
-            vertex: wgpu::VertexState {
-                module: &entity_shader,
-                entry_point: Some("vs_entity"),
-                compilation_options: Default::default(),
-                buffers: &entity_vertex,
-            },
-            primitive: wgpu::PrimitiveState {
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &entity_shader,
-                entry_point: Some("fs_sky_celestial"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format.remove_srgb_suffix(),
-                    // RenderPipelines.CELESTIAL: additive (src alpha, one), with
-                    // the colour premultiplied in fs_sky_celestial. Its alpha is
-                    // how much a texel adds: HDR output (hdr.wgsl) lets the sun's
-                    // and moon's discs shine; nothing else reads the frame's alpha.
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::Zero,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let celestial = |entry, compare| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Celestial bodies"),
+                layout: Some(&entity_layout),
+                vertex: wgpu::VertexState {
+                    module: &entity_shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    buffers: &entity_vertex,
+                },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(compare),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &entity_shader,
+                    entry_point: Some("fs_sky_celestial"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format.remove_srgb_suffix(),
+                        // RenderPipelines.CELESTIAL: additive (src alpha, one), with
+                        // the colour premultiplied in fs_sky_celestial. Its alpha is
+                        // how much a texel adds: HDR output (hdr.wgsl) lets the sun's
+                        // and moon's discs shine; nothing else reads the frame's alpha.
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let celestial_pipeline = celestial("vs_entity", wgpu::CompareFunction::Always);
+        // At the far plane, depth tested: drawn after solid terrain (late sky).
+        let celestial_far = celestial("vs_celestial_far", wgpu::CompareFunction::GreaterEqual);
         // WorldBorderRenderer: misc/forcefield.png as a MipmappedTexture
         // (repeat, linear minification with mipmaps, nearest magnification).
         let forcefield_size = forcefield.1;
@@ -2658,6 +2692,8 @@ impl Renderer {
             flat,
             sky,
             dark_disc,
+            sky_late,
+            dark_disc_late,
             lines,
             lines_secondary,
             debug_lines,
@@ -2686,6 +2722,7 @@ impl Renderer {
             see_through_pipeline,
             text_polygon_offset_pipeline,
             celestial_pipeline,
+            celestial_far,
             celestial_buffer,
             end_sky: end_sky::EndSky::default(),
             stars,
@@ -4887,6 +4924,16 @@ impl Renderer {
                     store: wgpu::StoreOp::Store,
                 },
             })];
+            // The overworld sky, sun, moon, stars and dark disc draw after solid terrain
+            // (see below) unless a shader pack, Horizon's own packs, the End sky or the
+            // title screen draw the sky.
+            let late_sky = !frame.title
+                && !frame.end_sky
+                && !pack_post
+                && !native_post
+                && self.native.is_none()
+                && !pack_draws_sky
+                && !pack_draws_celestial;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Horizon world"),
                 color_attachments: &attachments,
@@ -4906,7 +4953,7 @@ impl Renderer {
             });
             pass.set_bind_group(0, &self.group, &[]);
             pack_frame(&mut pass);
-            if frame.title || (sky_visible && (frame.skybox || frame.end_sky)) {
+            if !late_sky && (frame.title || (sky_visible && (frame.skybox || frame.end_sky))) {
                 if !frame.title && frame.skybox && !pack_draws_sky && !native_sky_pass {
                     match self
                         .native
@@ -5019,6 +5066,29 @@ impl Renderer {
                         }
                         None => self.draw_sections(&mut pass, &self.indirect, 0, 0, solid_draws),
                     }
+                }
+            }
+            // The overworld sky after solid terrain, at the far plane: the pixels terrain
+            // covers skip the sky's shading. The same draws, in the same order, as before
+            // terrain; shader packs, the End sky and the title screen keep that order.
+            if late_sky && sky_visible && frame.skybox {
+                pass.set_pipeline(&self.sky_late);
+                pass.draw(0..3, 0..1);
+                if celestial_vertices > 0 {
+                    pass.set_pipeline(&self.celestial_far);
+                    pass.set_bind_group(0, &self.entity_group, &[]);
+                    pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_vertex_buffer(0, self.celestial_buffer.slice(..));
+                    pass.draw_indexed(0..(celestial_vertices as u32 / 4) * 6, 0, 0..1);
+                    pass.set_bind_group(0, &self.group, &[]);
+                }
+                if frame.stars.is_some() {
+                    self.stars.draw_far(&mut pass);
+                    pass.set_bind_group(0, &self.group, &[]);
+                }
+                if frame.dark_disc {
+                    pass.set_pipeline(&self.dark_disc_late);
+                    pass.draw(0..3, 0..1);
                 }
             }
             if entity_quads > 0 {

@@ -10,6 +10,12 @@ struct Stars {
 @vertex fn vs_stars(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
     return stars.clip_from_sky * vec4(position, 1.0);
 }
+// After solid terrain (gfx.rs late sky): at the far plane, behind everything drawn.
+@vertex fn vs_stars_far(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+    var clip = stars.clip_from_sky * vec4(position, 1.0);
+    clip.z = 0.0;
+    return clip;
+}
 
 @fragment fn fs_stars() -> @location(0) vec4<f32> {
     return stars.color;

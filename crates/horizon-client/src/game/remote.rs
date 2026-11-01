@@ -189,6 +189,12 @@ pub(super) struct Remote {
     tab_players: HashMap<u128, horizon_client::tab_list::TabPlayer>,
     /// Each listed profile's unpacked `textures` property.
     skin_textures: HashMap<u128, horizon_client::skins::Textures>,
+    /// `skins`' models and capes (PlayerSkin.model, PlayerSkin.cape): an entry
+    /// here is a skin resolved for good, until its player leaves the list.
+    skin_models: HashMap<u128, (bool, Option<String>)>,
+    /// The faces `remote_tab_hidden` gave the atlas, and the tick it last did.
+    object_skins: HashMap<u128, String>,
+    object_skins_tick: u64,
     /// The skin texture each profile's players show, once its download is ready.
     skins: HashMap<u128, String>,
     listed: std::collections::HashSet<u128>,
@@ -522,6 +528,9 @@ impl Game<'_> {
             players: HashMap::new(),
             tab_players: HashMap::new(),
             skin_textures: HashMap::new(),
+            skin_models: HashMap::new(),
+            object_skins: HashMap::new(),
+            object_skins_tick: 0,
             skins: HashMap::new(),
             listed: Default::default(),
             online_mode: false,
@@ -3141,6 +3150,10 @@ impl Game<'_> {
                                     };
                                     let textures =
                                         skins::unpack(&t.value, signature, &skins::TEXTURE_URIS);
+                                    if !r.skin_textures.contains_key(&e.uuid) {
+                                        r.skins.remove(&e.uuid);
+                                        r.skin_models.remove(&e.uuid);
+                                    }
                                     r.skin_textures.entry(e.uuid).or_insert(textures);
                                 }
                             }
@@ -3186,6 +3199,9 @@ impl Game<'_> {
                         r.players.remove(&u);
                         r.tab_players.remove(&u);
                         r.skin_textures.remove(&u);
+                        r.skins.remove(&u);
+                        r.skin_models.remove(&u);
+                        r.object_skins.remove(&u);
                         r.listed.remove(&u);
                     }
                 }
@@ -3427,6 +3443,41 @@ impl Game<'_> {
     /// The player list's view of the connection: the listed players (with
     /// their downloaded skins once ready), online mode, and which players
     /// are in the level with an upside-down name.
+    /// What `remote_tab_players` keeps up while the list is hidden, without
+    /// building it: the drawn players' skins each frame, and once a tick the
+    /// listed players' faces for chat's `object:player`.
+    pub(super) fn remote_tab_hidden(&mut self) {
+        self.update_remote_skins();
+        let ticks = self.ticks;
+        let Some(r) = self.remote.as_mut() else {
+            return;
+        };
+        if r.object_skins_tick == ticks {
+            return;
+        }
+        r.object_skins_tick = ticks;
+        for uuid in &r.listed {
+            let Some(p) = r.tab_players.get(uuid) else {
+                continue;
+            };
+            let skin = r.skins.get(uuid).map_or_else(
+                || horizon_client::tab_list::default_skin(*uuid),
+                |s| s.as_str(),
+            );
+            if r.object_skins.get(uuid).is_some_and(|s| s == skin) {
+                continue;
+            }
+            r.object_skins.insert(*uuid, skin.to_owned());
+            self.gui
+                .atlas
+                .set_object_skin(format!("id:{uuid:032x}"), skin.to_owned());
+            self.gui.atlas.set_object_skin(
+                format!("name:{}", p.name.to_ascii_lowercase()),
+                skin.to_owned(),
+            );
+        }
+    }
+
     pub(super) fn remote_tab_players(
         &mut self,
     ) -> Option<(Vec<horizon_client::tab_list::TabPlayer>, bool, Vec<u128>)> {
@@ -3523,13 +3574,19 @@ impl Game<'_> {
         let Some(r) = self.remote.as_mut() else {
             return;
         };
-        let mut entries = skin_entries(
-            &r.level_players,
-            &r.skin_textures,
-            &mut r.level_player_textures,
-        );
-        let r = &*r;
         let local = r.profile;
+        // A skin once resolved stays until its player leaves the list, so only
+        // the new and the still downloading are looked up: on a busy server
+        // that is every frame's hashing of hundreds of texture URLs saved.
+        let mut entries = {
+            let known = &r.skin_models;
+            skin_entries(
+                &r.level_players,
+                &r.skin_textures,
+                &mut r.level_player_textures,
+                |uuid| uuid != local && known.contains_key(&uuid),
+            )
+        };
         // Minecraft.profileFuture: the signed-in account's own profile, fetched from the
         // services, gives the local player its skin where the server sends none (single
         // player's offline-mode server).
@@ -3539,11 +3596,6 @@ impl Game<'_> {
             entries.retain(|(u, _)| *u != local);
             entries.push((local, own));
         }
-        let mut resolved: Vec<(u128, String)> = Vec::new();
-        // PlayerSkin.model of each resolved skin: the textures' `slim`.
-        let mut slim = std::collections::HashSet::new();
-        // PlayerSkin.cape of each resolved skin.
-        let mut capes: HashMap<u128, String> = HashMap::new();
         for (uuid, textures) in entries {
             // PlayerInfo.createSkinLookup: only the local player's own skin
             // may be unsigned.
@@ -3553,45 +3605,60 @@ impl Game<'_> {
                     downloads.state(kind, url)
                 })
             };
+            let Some(r) = self.remote.as_mut() else {
+                return;
+            };
             if let Some(skin) = skin {
-                if textures.slim {
-                    slim.insert(uuid);
-                }
-                if let Some(cape) = horizon_client::skins::cape(&textures) {
-                    capes.insert(uuid, cape);
-                }
-                resolved.push((uuid, skin));
+                // PlayerSkin.model and PlayerSkin.cape of the resolved skin:
+                // the textures' `slim` and cape.
+                let cape = horizon_client::skins::cape(&textures);
+                r.skins.insert(uuid, skin);
+                r.skin_models.insert(uuid, (textures.slim, cape));
+            } else if uuid == local {
+                r.skins.remove(&uuid);
+                r.skin_models.remove(&uuid);
             }
         }
         // An offline name's cape from the launcher, where the profile has none.
-        if !capes.contains_key(&local)
-            && let Some(rgba) = horizon_client::skins::offline_cape()
-        {
+        let local_cape = self
+            .remote
+            .as_ref()
+            .and_then(|r| r.skin_models.get(&local))
+            .is_some_and(|(_, cape)| cape.is_some());
+        let mut offline_cape = None;
+        if !local_cape && let Some(rgba) = horizon_client::skins::offline_cape() {
             const OFFLINE: &str = "capes/offline";
             if !self.skin_slots.contains(OFFLINE) {
                 self.store_skin(OFFLINE.into(), rgba.to_vec());
             }
-            capes.insert(local, OFFLINE.into());
+            offline_cape = Some(OFFLINE.to_owned());
         }
         // PlayerInfo.getSkin: the downloaded skin and its model, else the
-        // profile's default skin (DefaultPlayerSkin.get), slim or wide.
-        let skin_of = |skins: &HashMap<u128, String>, uuid: u128| match skins.get(&uuid) {
-            Some(skin) => (skin.clone(), slim.contains(&uuid)),
-            None => {
-                let skin = horizon_client::tab_list::default_skin(uuid);
-                (skin.to_owned(), skin.contains("/slim/"))
+        // profile's default skin (DefaultPlayerSkin.get), slim or wide. Then
+        // the cape.
+        let skin_of = |r: &Remote, uuid: u128| {
+            let (slim, cape) = r
+                .skin_models
+                .get(&uuid)
+                .map_or((false, None), |(slim, cape)| (*slim, cape.clone()));
+            let cape = if uuid == local {
+                cape.or_else(|| offline_cape.clone())
+            } else {
+                cape
+            };
+            match r.skins.get(&uuid) {
+                Some(skin) => (skin.clone(), slim, cape),
+                None => {
+                    let skin = horizon_client::tab_list::default_skin(uuid);
+                    (skin.to_owned(), skin.contains("/slim/"), cape)
+                }
             }
         };
-        let Some((level, skins, own)) = self.remote.as_mut().map(|r| {
-            r.skins = resolved.into_iter().collect();
-            (
-                r.level_players
-                    .iter()
-                    .map(|(id, uuid)| (*id as u32, *uuid))
-                    .collect::<Vec<_>>(),
-                r.skins.clone(),
-                r.profile,
-            )
+        let Some(level) = self.remote.as_ref().map(|r| {
+            r.level_players
+                .iter()
+                .map(|(id, uuid)| (*id as u32, *uuid))
+                .collect::<Vec<_>>()
         }) else {
             return;
         };
@@ -3605,21 +3672,25 @@ impl Game<'_> {
             else {
                 continue;
             };
-            let (skin, is_slim) = self.drawn_skin(uuid, skin_of(&skins, uuid));
-            let cape = capes.get(&uuid).filter(|c| self.again_skin(c)).cloned();
+            let Some((skin, slim, cape)) = self.remote.as_ref().map(|r| skin_of(r, uuid)) else {
+                return;
+            };
+            let (skin, is_slim) = self.drawn_skin(uuid, (skin, slim));
+            let cape = cape.filter(|c| self.again_skin(c));
             let mob = &mut self.mobs[i];
             mob.skin = Some(skin);
             mob.slim = is_slim;
             mob.cape = cape;
         }
         if self.player_model.is_some() {
-            let (skin, is_slim) = self.drawn_skin(own, skin_of(&skins, own));
+            let Some((skin, slim, cape)) = self.remote.as_ref().map(|r| skin_of(r, local)) else {
+                return;
+            };
+            let (skin, is_slim) = self.drawn_skin(local, (skin, slim));
             // Avatar.isModelPartShown(CAPE): the Skin Customization option.
-            let cape = capes
-                .get(&own)
+            let cape = cape
                 .filter(|_| self.settings.file.bool("modelPart_cape"))
-                .filter(|c| self.again_skin(c))
-                .cloned();
+                .filter(|c| self.again_skin(c));
             if let Some(mob) = self.player_model.as_mut() {
                 mob.skin = Some(skin);
                 mob.slim = is_slim;
@@ -7390,6 +7461,7 @@ fn skin_entries(
     level_players: &HashMap<i32, u128>,
     listed: &HashMap<u128, horizon_client::skins::Textures>,
     kept: &mut HashMap<i32, horizon_client::skins::Textures>,
+    known: impl Fn(u128) -> bool,
 ) -> Vec<(u128, horizon_client::skins::Textures)> {
     for (id, uuid) in level_players {
         if !kept.contains_key(id)
@@ -7398,10 +7470,15 @@ fn skin_entries(
             kept.insert(*id, textures.clone());
         }
     }
-    let mut entries: Vec<_> = listed.iter().map(|(u, t)| (*u, t.clone())).collect();
+    let mut entries: Vec<_> = listed
+        .iter()
+        .filter(|(u, _)| !known(**u))
+        .map(|(u, t)| (*u, t.clone()))
+        .collect();
     for (id, textures) in kept.iter() {
         if let Some(uuid) = level_players.get(id)
             && !listed.contains_key(uuid)
+            && !known(*uuid)
             && !entries.iter().any(|(u, _)| u == uuid)
         {
             entries.push((*uuid, textures.clone()));
@@ -7433,6 +7510,18 @@ mod tests {
     /// An NPC plugin lists the NPC, spawns it, and takes the entry off the list:
     /// the entity keeps the skin it found; a player spawned before its entry
     /// arrives takes the entry once it comes.
+    /// A skin resolved for good is not looked up again, listed or kept.
+    #[test]
+    fn a_known_skin_is_left_out_of_the_entries() {
+        use horizon_client::skins::Textures;
+        use std::collections::HashMap;
+        let listed = HashMap::from([(7u128, Textures::default()), (8, Textures::default())]);
+        let mut kept = HashMap::from([(3i32, Textures::default())]);
+        let players = HashMap::from([(3i32, 9u128)]);
+        let mut entries = super::skin_entries(&players, &listed, &mut kept, |u| u == 7 || u == 9);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries.pop().unwrap().0, 8);
+    }
     #[test]
     fn a_player_entity_keeps_the_skin_its_entry_gave() {
         use horizon_client::skins::Textures;
@@ -7445,12 +7534,12 @@ mod tests {
         let (mut listed, mut kept) = (HashMap::from([(7u128, npc.clone())]), HashMap::new());
         let mut players = HashMap::from([(2i32, 7u128), (3, 8)]);
         assert_eq!(
-            super::skin_entries(&players, &listed, &mut kept),
+            super::skin_entries(&players, &listed, &mut kept, |_| false),
             [(7, npc.clone())]
         );
         listed.remove(&7);
         assert_eq!(
-            super::skin_entries(&players, &listed, &mut kept),
+            super::skin_entries(&players, &listed, &mut kept, |_| false),
             [(7, npc.clone())]
         );
         // Player 8's entry comes after its entity.
@@ -7459,14 +7548,17 @@ mod tests {
             ..npc.clone()
         };
         listed.insert(8, late.clone());
-        let mut entries = super::skin_entries(&players, &listed, &mut kept);
+        let mut entries = super::skin_entries(&players, &listed, &mut kept, |_| false);
         entries.sort_by_key(|(u, _)| *u);
         assert_eq!(entries, [(7, npc), (8, late)]);
         // A removed entity forgets its profile with it.
         players.remove(&2);
         kept.remove(&2);
         listed.clear();
-        assert_eq!(super::skin_entries(&players, &listed, &mut kept).len(), 1);
+        assert_eq!(
+            super::skin_entries(&players, &listed, &mut kept, |_| false).len(),
+            1
+        );
     }
 
     /// An NPC plugin's scale: a base the plugin sets, or a modifier on 1.

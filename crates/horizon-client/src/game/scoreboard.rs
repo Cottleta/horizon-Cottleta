@@ -690,6 +690,13 @@ impl Game<'_> {
         }
         let key = self.screen == super::Screen::Playing
             && self.keys.contains(&winit::keyboard::KeyCode::Tab);
+        // tab_list::visible needs the key: on a server's list of hundreds, no
+        // list is built for the frames it does not show.
+        if !key && self.remote.is_some() {
+            self.remote_tab_hidden();
+            self.tab_list.set_visible(false);
+            return;
+        }
         let (mut players, online_mode, upside_down) = match self.remote_tab_players() {
             Some(remote) => remote,
             None => {

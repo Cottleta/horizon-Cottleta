@@ -64,6 +64,8 @@ pub(super) struct GpuParts {
     mesh: wgpu::Buffer,
     /// Mesh vertices uploaded (a prefix of the frame's `part_mesh`).
     mesh_len: usize,
+    /// The `part_mesh_generation` they belong to.
+    generation: u32,
     mesh_capacity: usize,
     jobs: wgpu::Buffer,
     job_capacity: usize,
@@ -135,6 +137,7 @@ impl GpuParts {
             layout,
             mesh: Self::buffer(device, "Model part meshes", 4096 * size_of::<PartVertex>()),
             mesh_len: 0,
+            generation: 0,
             mesh_capacity: 4096,
             jobs: Self::buffer(device, "Model part jobs", 1024 * size_of::<PartJob>()),
             job_capacity: 1024,
@@ -165,12 +168,15 @@ impl GpuParts {
         uploads: &mut Uploads,
         encoder: &mut wgpu::CommandEncoder,
         mesh: &[PartVertex],
+        generation: u32,
         jobs: &[PartJob],
         lights: [[f32; 3]; 2],
         place: impl Fn(u32) -> Option<u32>,
     ) {
-        // A mesh list that shrank was started over (models reloaded): upload it again.
-        if mesh.len() < self.mesh_len {
+        // A mesh list that started over (models reloaded, resources changed) is
+        // uploaded again, even one already longer than the old upload.
+        if generation != self.generation || mesh.len() < self.mesh_len {
+            self.generation = generation;
             self.mesh_len = 0;
         }
         if mesh.len() > self.mesh_capacity {

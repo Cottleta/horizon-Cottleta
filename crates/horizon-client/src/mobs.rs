@@ -212,6 +212,9 @@ pub struct Part {
     pub name: String,
     /// `part_id(name)`: where `anim::Poses` keeps this name's pose.
     pub id: u32,
+    /// This part's own number, never given to another (`new_part_uid`); a clone keeps
+    /// it with the same polygons. The GPU mesh cache knows parts by it.
+    pub uid: u64,
     /// x, y, z, xRot, yRot, zRot, xScale, yScale, zScale
     pub pose: [f32; 9],
     pub polygons: Vec<Polygon>,
@@ -285,11 +288,18 @@ impl Part {
         Self {
             name: name.to_owned(),
             id: part_id(name),
+            uid: new_part_uid(),
             pose: p,
             polygons,
             children,
         }
     }
+}
+
+/// A number no other part has had (`Part::uid`).
+pub fn new_part_uid() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Every part name a model or animation has used, numbered in order of use.
@@ -2881,6 +2891,7 @@ mod lighting_tests {
         let parent = Part {
             name: "parent".into(),
             id: part_id("parent"),
+            uid: new_part_uid(),
             pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 1.0, 0.5],
             polygons: Vec::new(),
             children: vec![child],

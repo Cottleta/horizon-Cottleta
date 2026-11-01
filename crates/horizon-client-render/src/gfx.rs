@@ -290,6 +290,9 @@ pub struct Frame<'a> {
     pub entity_spans: &'a [pack_draw::EntitySpan],
     /// Every model part mesh the jobs refer to (`parts`), added to over time.
     pub part_mesh: &'a [parts::PartVertex],
+    /// Which start of `part_mesh` this is: a new one (the list started over) is
+    /// uploaded whole.
+    pub part_mesh_generation: u32,
     /// Parts posed on the GPU into `entities`' placeholder vertices (`parts`).
     pub part_jobs: &'a [parts::PartJob],
     /// The diffuse lights `parts::LIT` item jobs are shaded by.
@@ -4590,6 +4593,7 @@ impl Renderer {
                 &mut self.uploads,
                 &mut encoder,
                 frame.part_mesh,
+                frame.part_mesh_generation,
                 jobs,
                 frame.part_lights,
                 |vertex| EntityBatch::place(places, vertex),

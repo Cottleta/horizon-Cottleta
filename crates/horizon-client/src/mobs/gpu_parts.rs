@@ -9,7 +9,7 @@
 //! quad was cut from the list (entity culling, an invisible glowing mob) are dropped
 //! (`finish`); its positions are the corners of the part's box, so bounds taken from
 //! the vertices (entity culling) cover the part.
-use super::{Part, Polygon};
+use super::Part;
 use crate::gfx::parts::{
     GLINT_UV, ITEM, ITEM_GLINT, LIT, PLACEHOLDER_LIGHT, PartJob, PartVertex, ZERO_NORMAL,
 };
@@ -24,8 +24,6 @@ use std::collections::HashMap;
 const MESH_LIMIT: usize = 1 << 22;
 
 struct Mesh {
-    /// The polygons it was made from, to notice a part that reuses a freed one's address.
-    polygons: *const Polygon,
     len: usize,
     first: u32,
     min: glam::Vec3,
@@ -49,13 +47,28 @@ struct ItemMesh {
 
 #[derive(Default)]
 struct State {
-    meshes: rustc_hash::FxHashMap<*const Part, Mesh>,
-    /// By model and the sprite rects it was laid out with.
+    /// By `Part::uid`: a model part keeps its uid for life and no other part gets it,
+    /// where a freed part's address could come back as another (a player who left, a
+    /// model reloaded) and draw with the old part's polygons.
+    meshes: rustc_hash::FxHashMap<u64, Mesh>,
+    /// By model and the sprite rects it was laid out with: both live until a resource
+    /// reload, which empties this (`forget`).
     items: rustc_hash::FxHashMap<(*const BakedItemModel, *const HashMap<String, Rect>), ItemMesh>,
     mesh: Vec<PartVertex>,
     jobs: Vec<PartJob>,
     /// The diffuse lights of this frame's `LIT` item jobs.
     lights: Option<(glam::Vec3, glam::Vec3)>,
+    /// Bumped whenever `mesh` starts over, so the renderer uploads it again
+    /// (`mesh_generation`).
+    generation: u32,
+}
+impl State {
+    fn start_over(&mut self) {
+        self.mesh.clear();
+        self.meshes.clear();
+        self.items.clear();
+        self.generation = self.generation.wrapping_add(1);
+    }
 }
 
 thread_local! {
@@ -67,12 +80,20 @@ thread_local! {
 pub fn begin(out: &Vec<Vertex>) {
     STATE.with_borrow_mut(|state| {
         if state.mesh.len() > MESH_LIMIT {
-            state.mesh.clear();
-            state.meshes.clear();
-            state.items.clear();
+            state.start_over();
         }
     });
     TARGET.set(out);
+}
+/// Resources reloaded: the item models and sprite rects the item meshes were made
+/// from are gone, and their addresses may come back as others'.
+pub fn forget() {
+    STATE.with_borrow_mut(State::start_over);
+}
+/// Which start of the mesh list `take_mesh` hands out: when it changes, the renderer
+/// uploads the whole list again.
+pub fn mesh_generation() -> u32 {
+    STATE.with_borrow(|state| state.generation)
 }
 pub fn end() {
     TARGET.set(std::ptr::null());
@@ -116,10 +137,9 @@ pub(super) fn defer(
         let State {
             meshes, mesh, jobs, ..
         } = state;
-        let polygons = part.polygons.as_ptr();
         let known = meshes
-            .get(&std::ptr::from_ref(part))
-            .filter(|m| m.polygons == polygons && m.len == part.polygons.len());
+            .get(&part.uid)
+            .filter(|m| m.len == part.polygons.len());
         let (first, min, max) = match known {
             Some(m) => (m.first, m.min, m.max),
             None => {
@@ -139,9 +159,8 @@ pub(super) fn defer(
                     }
                 }
                 meshes.insert(
-                    std::ptr::from_ref(part),
+                    part.uid,
                     Mesh {
-                        polygons,
                         len: part.polygons.len(),
                         first,
                         min,

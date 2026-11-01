@@ -31,6 +31,20 @@ fn layer_color(undyed: Option<u32>, stack: Option<&ItemStack>) -> u32 {
     })
 }
 
+/// An armour item's layer as `armor_layers` finds it, kept until the
+/// resources change (`Game::armor_layer_cache`): the lookups by name cost more
+/// than the drawing for a crowd of armoured players.
+pub(super) struct ArmorLayer {
+    rect: [f32; 4],
+    undyed: Option<u32>,
+    item_glint: bool,
+    kind: &'static str,
+    asset: String,
+}
+
+/// Each worn armour item's layers by slot (head to feet), resolved on first use.
+pub(super) type ArmorLayerCache = rustc_hash::FxHashMap<Box<str>, [Option<Option<ArmorLayer>>; 4]>;
+
 /// Armor stand models and the humanoid layers of every equipment asset.
 pub(super) struct ArmorStandAssets {
     pub main: Option<Part>,
@@ -175,61 +189,72 @@ impl Game<'_> {
     ) -> Vec<(&Part, [f32; 4], u32, u32)> {
         let assets = &self.armor_stand_assets;
         let mut out = Vec::new();
-        for (item, layer) in worn
+        let mut cache = self.armor_layer_cache.borrow_mut();
+        for (slot, (item, layer)) in worn
             .into_iter()
             .zip(["helmet", "chestplate", "leggings", "boots"])
+            .enumerate()
         {
             let Some((item, stack)) = item else {
                 continue;
             };
-            let Some(asset) = self
-                .res
-                .items()
-                .get(item)
-                .and_then(|i| i.equip_asset.clone())
-            else {
+            if !cache.contains_key(item) {
+                cache.insert(item.into(), Default::default());
+            }
+            let resolved = cache.get_mut(item).expect("just inserted")[slot]
+                .get_or_insert_with(|| self.resolve_armor_layer(item, layer));
+            let (Some(l), Some(part)) = (resolved.as_ref(), assets.player.get(layer)) else {
                 continue;
             };
-            let kind = if layer == "leggings" {
-                "humanoid_leggings"
-            } else {
-                "humanoid"
-            };
-            let Some((texture, undyed)) = assets.equipment.get(&asset).and_then(|k| k.get(kind))
-            else {
-                continue;
-            };
-            let (Some(r), Some(part)) = (
-                self.gui.atlas.sprites.get(texture.as_str()),
-                assets.player.get(layer),
-            ) else {
-                continue;
-            };
-            let color = layer_color(*undyed, stack);
+            let color = layer_color(l.undyed, stack);
             // EquipmentLayerRenderer.renderLayers: NO_OVERLAY, the armour
             // glint on the layer and its trim when `stack.hasFoil()`.
-            let item_glint = self
-                .res
-                .items()
-                .enchantments
-                .props
-                .get(item)
-                .is_some_and(|p| p.glint);
-            let overlay = if stack.is_some_and(|s| s.has_foil(item_glint)) {
+            let overlay = if stack.is_some_and(|s| s.has_foil(l.item_glint)) {
                 horizon_client::mobs::render::ARMOR_GLINT
             } else {
                 0
             };
-            out.push((part, [r.u0, r.v0, r.u1, r.v1], color, overlay));
+            out.push((part, l.rect, color, overlay));
             // EquipmentLayerRenderer: the trim layer over the armour.
             if let Some(r) = stack
-                .and_then(|s| assets.trim_texture(&asset, kind, s))
+                .and_then(|s| assets.trim_texture(&l.asset, l.kind, s))
                 .and_then(|t| self.gui.atlas.sprites.get(&t.sprite()))
             {
                 out.push((part, [r.u0, r.v0, r.u1, r.v1], 0xFFFF_FFFF, overlay));
             }
         }
         out
+    }
+    /// What `armor_layers` draws for `item` worn as `layer`, apart from the
+    /// stack: its equipment asset's texture in the atlas. None when it has no
+    /// humanoid layer there.
+    fn resolve_armor_layer(&self, item: &str, layer: &str) -> Option<ArmorLayer> {
+        let asset = self.res.items().get(item)?.equip_asset.clone()?;
+        let kind = if layer == "leggings" {
+            "humanoid_leggings"
+        } else {
+            "humanoid"
+        };
+        let (texture, undyed) = self
+            .armor_stand_assets
+            .equipment
+            .get(&asset)
+            .and_then(|k| k.get(kind))?;
+        let r = self.gui.atlas.sprites.get(texture.as_str())?;
+        let item_glint = self
+            .res
+            .items()
+            .enchantments
+            .props
+            .get(item)
+            .is_some_and(|p| p.glint);
+        Some(ArmorLayer {
+            rect: [r.u0, r.v0, r.u1, r.v1],
+            undyed: *undyed,
+            item_glint,
+            kind,
+            asset,
+        })
     }
     /// `PalettedTextureManager.getOrPrepare` for the trims drawn this frame
     /// (the player's armour and the armour stands'): each generated texture

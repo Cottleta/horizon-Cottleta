@@ -226,6 +226,7 @@ impl Game<'_> {
         let context = pack.context.clone();
         self.pack = pack;
         self.gui = gui;
+        self.armor_layer_cache.get_mut().clear();
         // The atlas's sprites moved: the particle engine re-reads every rect
         // and the packs' sprite sets, or every particle draws a stale region.
         self.particles

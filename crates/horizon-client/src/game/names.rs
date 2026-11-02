@@ -214,7 +214,9 @@ impl Game<'_> {
                 invisible_to_viewer: invisible,
                 hud_hidden: self.ui.hide_gui,
                 is_camera: false,
-                is_vehicle: ridden.contains(&m.id),
+                // A server's passenger list counts any rider: a text display riding a
+                // player is how servers replace the player's tag.
+                is_vehicle: ridden.contains(&m.id) || m.extra.rider.is_some(),
             };
             // MobRenderer.shouldShowName: a visible name, or the mob under the
             // crosshair; players (LivingEntityRenderer) need neither.

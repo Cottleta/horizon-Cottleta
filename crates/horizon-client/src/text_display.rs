@@ -382,6 +382,8 @@ fn transformation(tag: &Tag) -> Option<([f32; 3], [f32; 4], [f32; 3], [f32; 4])>
 pub struct Lines {
     pub lines: Vec<(Text, f32)>,
     pub width: f32,
+    /// Obfuscated text, whose glyphs change every frame.
+    pub obfuscated: bool,
 }
 
 impl Lines {
@@ -396,7 +398,16 @@ impl Lines {
             })
             .collect();
         let width = lines.iter().map(|l| l.1).fold(0.0, f32::max);
-        Self { lines, width }
+        let obfuscated = lines.iter().any(|(line, _)| {
+            line.spans
+                .iter()
+                .any(|span| span.style.obfuscated == Some(true) || span.text.contains("§k"))
+        });
+        Self {
+            lines,
+            width,
+            obfuscated,
+        }
     }
     /// Ten units a line, less the spacing under the last.
     pub fn height(&self) -> f32 {

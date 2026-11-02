@@ -3,7 +3,7 @@ use super::Game;
 use horizon_assets::item_model::DisplayContext;
 use horizon_client::{
     gfx::TEXT_POLYGON_OFFSET_OVERLAY,
-    hud::HudBatch,
+    hud::{HudBatch, HudVertex},
     items::ItemStack,
     mesher::Vertex,
     text_display::{self, Lines, TextDisplayData},
@@ -51,10 +51,18 @@ pub(super) struct RemoteTextDisplay {
     /// `TextDisplay.clientDisplayCache`: the split lines, until the render
     /// state changes.
     lines: Option<Lines>,
+    /// `text_display::draw`'s quads in `CORNERS` order, kept until the next tick or
+    /// until what they were drawn from changes.
+    quads: Vec<[HudVertex; 4]>,
+    quads_key: Option<QuadsKey>,
     /// `Entity.vehicle`: the mob it rides (`SetPassengers`), which places it
     /// every tick (`positionRider`), as NPC plugins hang a name over a head.
     pub(super) vehicle: Option<u32>,
 }
+
+/// What `RemoteTextDisplay::quads` were drawn from: the tick, opacity, flags, the
+/// background and the settings' default background.
+type QuadsKey = (u64, i8, u8, i32, u32);
 
 /// `Display.RENDER_STATE_IDS` and `TextDisplay.TEXT_RENDER_STATE_IDS`: the
 /// data a render state is built from (not the view range, size or glow).
@@ -88,6 +96,8 @@ impl RemoteTextDisplay {
             initialized: false,
             last_progress: 0.0,
             lines: None,
+            quads: Vec::new(),
+            quads_key: None,
             vehicle: None,
         }
     }
@@ -176,6 +186,7 @@ impl RemoteTextDisplay {
             self.shown = self.data.clone();
             self.initialized = true;
             self.lines = None;
+            self.quads_key = None;
         }
         self.dirty = false;
         self.start_dirty = false;
@@ -369,8 +380,22 @@ impl Game<'_> {
             if !matrix.is_finite() {
                 continue;
             }
-            let mut batch = HudBatch::new([1, 1]);
-            text_display::draw(&mut batch, &self.gui.atlas, &d, lines, background);
+            let key = (self.ticks, d.opacity, d.flags, d.background, background);
+            if display.quads_key != Some(key) || lines.obfuscated {
+                let mut batch = HudBatch::new([1, 1]);
+                text_display::draw(&mut batch, &self.gui.atlas, &d, lines, background);
+                display.quads.clear();
+                display.quads.extend(
+                    batch
+                        .vertices
+                        .as_chunks::<6>()
+                        .0
+                        .iter()
+                        .map(|quad| text_display::CORNERS.map(|i| quad[i])),
+                );
+                display.quads_key = Some(key);
+                self.map_patches.extend(batch.patches);
+            }
             let light = Self::display_light(&self.world, &d, position);
             // Font.DisplayMode: SEE_THROUGH over everything, else POLYGON_OFFSET.
             let through = d.flags & 2 != 0;
@@ -379,25 +404,19 @@ impl Game<'_> {
             } else {
                 (&mut *normal, TEXT_POLYGON_OFFSET_OVERLAY)
             };
-            for quad in batch.vertices.as_chunks::<6>().0 {
-                for i in text_display::CORNERS {
-                    let v = quad[i];
-                    let point =
-                        matrix.transform_point3(glam::Vec3::new(v.pos[0], v.pos[1], v.depth));
-                    out.push(Vertex {
-                        pos: point.to_array(),
-                        uv: v.uv,
-                        color: v.color,
-                        light,
-                        layer,
-                        normal: [0; 4],
+            out.extend(display.quads.iter().flatten().map(|v| Vertex {
+                pos: matrix
+                    .transform_point3(glam::Vec3::new(v.pos[0], v.pos[1], v.depth))
+                    .to_array(),
+                uv: v.uv,
+                color: v.color,
+                light,
+                layer,
+                normal: [0; 4],
 
-                        glint_uv: [0.0, 0.0],
-                    });
-                }
-            }
-            self.text_display_vertices += batch.vertices.len() / 6 * 4;
-            self.map_patches.extend(batch.patches);
+                glint_uv: [0.0, 0.0],
+            }));
+            self.text_display_vertices += display.quads.len() * 4;
         }
         self.text_displays = displays;
     }

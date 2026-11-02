@@ -30,17 +30,29 @@ if (Get-Process -Name 'horizon-launcher', 'horizon-client' -ErrorAction Silently
 if (-not (Test-Path $versions)) {
     Stop-With 'The Horizon Launcher is not set up yet. Install it, open it, launch the game once, close it, then run this again.'
 }
-# The newest official version whose game has run: its prepared files come along.
+# The date of a version: a nightly's from its name, any other's from its folder.
+function Get-VersionDate($version) {
+    if ($version.Name -match '^nightly-(\d{4}-\d{2}-\d{2})') {
+        return $Matches[1]
+    }
+    return $version.LastWriteTime.ToString('yyyy-MM-dd')
+}
+# The newest official version whose game has run: its prepared files come along. This build
+# was tested on files prepared by the $oldestData nightly, so none older will do.
+$oldestData = '2026-11-01'
 $source = Get-ChildItem $versions -Directory |
     Where-Object {
+        $resources = Join-Path $_.FullName '.local\horizon-client\26.3'
         $_.Name -notlike '*Cottleta*' -and
+        (Get-VersionDate $_) -ge $oldestData -and
         (Test-Path (Join-Path $_.FullName '.installed')) -and
-        (Test-Path (Join-Path $_.FullName '.local\datagen'))
+        (Test-Path (Join-Path $resources 'horizon-resources.json')) -and
+        (Test-Path (Join-Path $resources 'assets\minecraft\sounds.json'))
     } |
-    Sort-Object LastWriteTime -Descending |
+    Sort-Object { Get-VersionDate $_ }, LastWriteTime -Descending |
     Select-Object -First 1
 if (-not $source) {
-    Stop-With 'No version has run yet. Open the launcher, launch the game once, close it, then run this again.'
+    Stop-With 'No recent version has run yet. Open the launcher, let it update, press Play on the newest version once, close the game and the launcher, then run this again.'
 }
 
 Write-Host "Copying $($source.Name) to $tag (about 1.5 GB, a minute or so)..."

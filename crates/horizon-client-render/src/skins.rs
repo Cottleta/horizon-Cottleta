@@ -242,6 +242,8 @@ struct Entry {
     touched: std::time::Instant,
     /// `None` while the fetch is in flight.
     resolved: Option<Option<ResolvedProfile>>,
+    /// What `resolved`'s texture property decodes to (`Resolver::skin_download`).
+    download: Option<(String, String)>,
 }
 /// `ProfileResolver.Cached`'s cache bounds.
 const MAX_PROFILES: usize = 256;
@@ -324,6 +326,27 @@ impl Resolver {
             self.entries.remove(&oldest);
         }
     }
+    /// The skin URL and sprite location of a resolved profile. Decoded once: a skull asks
+    /// each frame. Goes through `state` now and then, so the entry stays and can expire.
+    pub fn skin_download(&mut self, key: &NameOrId) -> Option<(String, String)> {
+        if let Some(entry) = self.entries.get(key)
+            && entry.touched.elapsed().as_secs() < 60
+            && let Some(download) = &entry.download
+        {
+            return Some(download.clone());
+        }
+        let Resolve::Done(Some(profile)) = self.state(key) else {
+            return None;
+        };
+        let (value, signature) = profile.textures()?;
+        let url = unpack(&value, signature, &TEXTURE_URIS).skin?;
+        let location = skin_location(&texture_hash(&url)?);
+        let download = (url, location);
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.download = Some(download.clone());
+        }
+        Some(download)
+    }
     /// How the resolution of `key` stands, starting it the first time.
     pub fn state(&mut self, key: &NameOrId) -> Resolve {
         while let Ok((key, resolved)) = self.done.try_recv() {
@@ -331,7 +354,7 @@ impl Resolver {
                 key,
                 Entry {
                     touched: std::time::Instant::now(),
-                    resolved: Some(resolved),
+                    resolved: Some(resolved), download: None,
                 },
             );
         }
@@ -350,7 +373,7 @@ impl Resolver {
             key.clone(),
             Entry {
                 touched: std::time::Instant::now(),
-                resolved: resolved.then_some(None),
+                resolved: resolved.then_some(None), download: None,
             },
         );
         if resolved {

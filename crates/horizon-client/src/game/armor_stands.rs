@@ -391,11 +391,14 @@ impl Game<'_> {
                 wanted.push(t);
             }
         }
-        for t in wanted {
-            let name = t.sprite();
-            // Entries the atlas no longer has (rebuilt by a resource reload) are free.
+        // Entries the atlas no longer has (rebuilt by a resource reload) are free.
+        if !wanted.is_empty() && self.trim_slots_checked != self.ticks {
+            self.trim_slots_checked = self.ticks;
             let sprites = &self.gui.atlas.sprites;
             self.trim_slots.retain(|(n, _)| sprites.contains_key(n));
+        }
+        for t in wanted {
+            let name = t.sprite();
             if let Some(i) = self.trim_slots.iter().position(|e| e.0 == name) {
                 let e = self.trim_slots.remove(i);
                 self.trim_slots.push(e);

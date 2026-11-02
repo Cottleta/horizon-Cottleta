@@ -650,10 +650,10 @@ impl Game<'_> {
             }
             let test_beams: Vec<_> = world
                 .block_entities
-                .iter()
+                .scanned()
                 .filter_map(|(k, e)| Some((*k, self.test_instance_beam(e)?)))
                 .collect();
-            for (k, e) in &world.block_entities {
+            for (k, e) in world.block_entities.scanned() {
                 if let Some(sections) = beam(e) {
                     self.far_beacons.insert(*k, sections.to_vec());
                 }

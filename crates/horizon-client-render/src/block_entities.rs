@@ -89,6 +89,23 @@ pub struct BlockEntities {
     /// instance blocks, `shows_box`), so a frame looks at them without scanning the map.
     /// Like `mods`, one taken out stays listed until `put` or `remove`.
     boxes: FxHashSet<Pos>,
+    /// The positions of the kinds a frame or tick looks through (`scanned_kind`), which a
+    /// lobby of thousands of block entities mostly has none of. Listed like `boxes`.
+    scanned: FxHashSet<Pos>,
+}
+
+/// The block entities a pass over all of them would be looking for: what draws an item or
+/// a beam of its own beside the block entity renderers.
+fn scanned_kind(entity: &BlockEntity) -> bool {
+    matches!(
+        entity,
+        BlockEntity::Vault(_)
+            | BlockEntity::Campfire(_)
+            | BlockEntity::Brushable(_)
+            | BlockEntity::Shelf(_)
+            | BlockEntity::Beacon(_)
+            | BlockEntity::TestInstanceBlock(_)
+    )
 }
 
 /// A structure or test instance block: the block entities whose box the frame may draw.
@@ -272,8 +289,21 @@ impl BlockEntities {
             .iter()
             .filter_map(|pos| Some((pos, self.map.get(pos)?)))
     }
-    /// Keeps `pos` listed in `boxes` exactly while `entity` shows a box.
+    /// Vaults, campfires, brushable blocks, shelves, beacons and test instance blocks, in
+    /// no order: without going through every block entity.
+    pub fn scanned(&self) -> impl Iterator<Item = (&Pos, &BlockEntity)> {
+        self.scanned
+            .iter()
+            .filter_map(|pos| Some((pos, self.map.get(pos)?)))
+    }
+    /// Keeps `pos` listed in `boxes` exactly while `entity` shows a box, and in `scanned`
+    /// exactly while it is of those kinds.
     fn note_box(&mut self, pos: Pos, entity: Option<&BlockEntity>) {
+        if entity.is_some_and(scanned_kind) {
+            self.scanned.insert(pos);
+        } else {
+            self.scanned.remove(&pos);
+        }
         if entity.is_some_and(shows_box) {
             self.boxes.insert(pos);
         } else {
@@ -394,7 +424,7 @@ impl BlockEntities {
             &mut self.freed,
             &mut self.attachments,
         );
-        let (mods, boxes) = (&mut self.mods, &mut self.boxes);
+        let (mods, boxes, scanned) = (&mut self.mods, &mut self.boxes, &mut self.scanned);
         self.map.retain(|p, e| {
             let kept = keep(p, e);
             if !kept {
@@ -403,6 +433,7 @@ impl BlockEntities {
                 pending.remove(p);
                 forget_mod(mods, *p);
                 boxes.remove(p);
+                scanned.remove(p);
             }
             kept
         });
@@ -412,6 +443,7 @@ impl BlockEntities {
         self.map.clear();
         self.mods.clear();
         self.boxes.clear();
+        self.scanned.clear();
         self.tickers = Arc::default();
         self.live.clear();
         self.added.clear();

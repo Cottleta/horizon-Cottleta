@@ -247,7 +247,7 @@ impl Game<'_> {
             .iter()
             .map(|(&pos, (text, _))| ([pos.0, pos.1, pos.2], text.clone(), HIGHLIGHT_FILL))
             .collect();
-        for (pos, entity) in &self.world.block_entities {
+        for (pos, entity) in self.world.block_entities.scanned() {
             let BlockEntity::TestInstanceBlock(b) = entity else {
                 continue;
             };

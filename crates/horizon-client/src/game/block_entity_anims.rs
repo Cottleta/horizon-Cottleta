@@ -809,14 +809,7 @@ impl Game<'_> {
         // `Dynamic` (name- or id-only) profile.
         let download = skin.download.clone().or_else(|| {
             let key = skin.dynamic.as_ref()?;
-            let skins::Resolve::Done(Some(profile)) = self.skin_profiles.borrow_mut().state(key)
-            else {
-                return None;
-            };
-            let (value, signature) = profile.textures()?;
-            let url = skins::unpack(&value, signature, &skins::TEXTURE_URIS).skin?;
-            let location = skins::skin_location(&skins::texture_hash(&url)?);
-            Some((url, location))
+            self.skin_profiles.borrow_mut().skin_download(key)
         });
         if let Some((url, location)) = download {
             let mut downloads = self.skin_downloads.borrow_mut();

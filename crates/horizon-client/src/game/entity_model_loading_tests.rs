@@ -166,10 +166,16 @@ fn optimized(root: &Path) -> BTreeMap<String, Part> {
 }
 
 fn assert_equivalent(root: &Path) {
-    // Debug includes every part name, pose, polygon normal/vertex and child.
+    // Debug includes every part name, pose, polygon normal/vertex and child. Not the uids:
+    // every part made gets a new one (`Part::uid`), however it was loaded.
+    let without_uids = |text: String| {
+        text.split("uid: ")
+            .map(|rest| rest.trim_start_matches(|c: char| c.is_ascii_digit()))
+            .collect::<String>()
+    };
     assert_eq!(
-        format!("{:?}", baseline(root)),
-        format!("{:?}", optimized(root))
+        without_uids(format!("{:?}", baseline(root))),
+        without_uids(format!("{:?}", optimized(root)))
     );
 }
 

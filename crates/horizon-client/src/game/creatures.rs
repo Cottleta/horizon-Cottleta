@@ -7227,6 +7227,8 @@ mod pearl_tests {
             p.velocity = velocity;
             p
         };
+        // ThrowableProjectile.applyInertia's floats, widened.
+        let (air, water) = (f64::from(0.99_f32), f64::from(0.8_f32));
         // Skimming the pool: its feet are in the water block, its box above
         // the surface. ThrowableProjectile.applyInertia keeps the air drag.
         let mut p = pearl(25.5, 4.95, Vec3::new(0.3, 0.0, 0.0));
@@ -7234,7 +7236,7 @@ mod pearl_tests {
         assert!(p.position.y > 4.9, "the pearl dipped: {p:?}");
         p.tick(&pw);
         assert!(
-            (p.velocity.x - 0.3 * 0.99 * 0.99).abs() < 1e-9,
+            (p.velocity.x - 0.3 * air * air).abs() < 1e-9,
             "a pearl above the surface slowed as in water: {p:?}"
         );
         // At the pool's edge: its feet over the dry block at x = 19, a side
@@ -7243,12 +7245,12 @@ mod pearl_tests {
         let mut p = pearl(19.95, 4.3, Vec3::ZERO);
         p.tick(&pw);
         assert!(
-            (p.velocity.y - (-0.03 * 0.99)).abs() < 1e-9,
+            (p.velocity.y - (-0.03 * air)).abs() < 1e-9,
             "the first tick has the air drag: {p:?}"
         );
         p.tick(&pw);
         assert!(
-            (p.velocity.y - (-0.03 * 0.99 - 0.03) * 0.8).abs() < 1e-9,
+            (p.velocity.y - (-0.03 * air - 0.03) * water).abs() < 1e-9,
             "a pearl whose box is in the water kept the air drag: {p:?}"
         );
         // Thrown under water, a pearl moves with the air drag on its first
@@ -7256,12 +7258,12 @@ mod pearl_tests {
         let mut p = pearl(30.5, 4.2, Vec3::ZERO);
         p.tick(&pw);
         assert!(
-            (p.velocity.y - (-0.03 * 0.99)).abs() < 1e-9,
+            (p.velocity.y - (-0.03 * air)).abs() < 1e-9,
             "the first tick under water has the air drag: {p:?}"
         );
         p.tick(&pw);
         assert!(
-            (p.velocity.y - (-0.03 * 0.99 - 0.03) * 0.8).abs() < 1e-9,
+            (p.velocity.y - (-0.03 * air - 0.03) * water).abs() < 1e-9,
             "the second tick under water has the water drag: {p:?}"
         );
     }

@@ -1431,14 +1431,23 @@ impl wgpu::rwh::HasDisplayHandle for WindowDisplay {
 /// then OpenGL (Windows and Linux) for GPUs with neither driver, each when the one
 /// before has no surface, adapter or device. A native crash in the driver can't be
 /// caught in the game; the launcher switches the setting to DirectX 12 after one at
-/// the renderer's start (#746). macOS has Metal only.
-fn backend_order(api: GraphicsApi, os: &str, wgpu_backend: bool) -> Vec<wgpu::Backends> {
+/// the renderer's start (#746). macOS has Metal only. `directx_first` puts DirectX 12
+/// ahead on Windows where Auto knows it presents faster (`directx_first`).
+fn backend_order(
+    api: GraphicsApi,
+    os: &str,
+    wgpu_backend: bool,
+    directx_first: bool,
+) -> Vec<wgpu::Backends> {
     use wgpu::Backends;
     if os == "macos" || wgpu_backend {
         return vec![Backends::default()];
     }
     let windows = os == "windows";
     match api {
+        GraphicsApi::Auto if windows && directx_first => {
+            vec![Backends::DX12, Backends::VULKAN, Backends::GL]
+        }
         GraphicsApi::Auto if windows => vec![Backends::VULKAN, Backends::DX12, Backends::GL],
         GraphicsApi::Auto => vec![Backends::VULKAN, Backends::GL],
         GraphicsApi::Dx12 if windows => vec![Backends::DX12],
@@ -1554,6 +1563,24 @@ async fn open_device(
         },
     }
 }
+/// Whether this Windows machine's discrete GPU is AMD's, whose Vulkan and OpenGL drivers
+/// took about 0.45 ms longer per frame than its DirectX 12 in tests. Asks DirectX, so no
+/// Vulkan driver is loaded to decide. Without a discrete GPU, Auto's order stands.
+async fn directx_first() -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let instance = wgpu::Instance::new(instance_descriptor(wgpu::Backends::DX12, None, false));
+    instance
+        .enumerate_adapters(wgpu::Backends::DX12)
+        .await
+        .iter()
+        .map(wgpu::Adapter::get_info)
+        .find(|info| info.device_type == wgpu::DeviceType::DiscreteGpu)
+        .is_some_and(|info| info.vendor == AMD_VENDOR)
+}
+/// PCI vendor id.
+const AMD_VENDOR: u32 = 0x1002;
 /// `open_device`, taking an adapter of the CPU type (software rendering) only
 /// when `allow_cpu`.
 async fn open_device_with(
@@ -1563,10 +1590,12 @@ async fn open_device_with(
     layers: u32,
     allow_cpu: bool,
 ) -> Result<Opened> {
+    let api = api.with_env();
     let order = backend_order(
-        api.with_env(),
+        api,
         std::env::consts::OS,
         std::env::var_os("WGPU_BACKEND").is_some(),
+        api == GraphicsApi::Auto && directx_first().await,
     );
     let mut failures = Vec::new();
     for (attempt, backends) in order.iter().copied().enumerate() {
@@ -9355,10 +9384,19 @@ mod tests {
     fn auto_tries_vulkan_then_directx_12_then_opengl() {
         use super::{GraphicsApi, backend_order};
         use wgpu::Backends;
-        let order = |api, os| backend_order(api, os, false);
+        let order = |api, os| backend_order(api, os, false, false);
         assert_eq!(
             order(GraphicsApi::Auto, "windows"),
             [Backends::VULKAN, Backends::DX12, Backends::GL]
+        );
+        assert_eq!(
+            backend_order(GraphicsApi::Auto, "windows", false, true),
+            [Backends::DX12, Backends::VULKAN, Backends::GL]
+        );
+        // The player's own pick stands.
+        assert_eq!(
+            backend_order(GraphicsApi::Vulkan, "windows", false, true),
+            [Backends::VULKAN]
         );
         assert_eq!(order(GraphicsApi::Vulkan, "windows"), [Backends::VULKAN]);
         assert_eq!(order(GraphicsApi::Dx12, "windows"), [Backends::DX12]);
@@ -9371,7 +9409,7 @@ mod tests {
         assert_eq!(order(GraphicsApi::OpenGl, "linux"), [Backends::GL]);
         // WGPU_BACKEND picks the backends itself; macOS has Metal only.
         for api in GraphicsApi::ALL {
-            assert_eq!(backend_order(api, "windows", true), [Backends::default()]);
+            assert_eq!(backend_order(api, "windows", true, false), [Backends::default()]);
             assert_eq!(order(api, "macos"), [Backends::default()]);
         }
     }

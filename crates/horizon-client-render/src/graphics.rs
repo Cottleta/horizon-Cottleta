@@ -669,9 +669,11 @@ fn bool_text(v: bool) -> &'static str {
 }
 impl Graphics {
     pub fn load(dir: &Path) -> Self {
-        let mut g: Self = fs::read_to_string(dir.join(FILE))
-            .map(|t| Self::parse(&t))
-            .unwrap_or_default();
+        let mut g: Self = match fs::read_to_string(dir.join(FILE)) {
+            Ok(text) => Self::parse(&text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::first_start(),
+            Err(_) => Self::default(),
+        };
         if fs::remove_file(dir.join(HDR_MARKER)).is_ok() && g.hdr {
             g.hdr = false;
             g.save(dir);
@@ -680,6 +682,16 @@ impl Graphics {
             );
         }
         g
+    }
+    /// The settings of a game that has saved none: what costs nothing to look at and
+    /// can only save time. The rest is decided at each start from the hardware
+    /// (`worker_threads`, `gfx`'s backend order), where a saved choice stays the player's.
+    fn first_start() -> Self {
+        Self {
+            // Only hides what stands behind terrain, in the frame it is hidden.
+            entity_culling: EntityCullingMode::Synchronous,
+            ..Self::default()
+        }
     }
     pub fn parse(text: &str) -> Self {
         let mut g = Self::default();
@@ -909,6 +921,19 @@ pub fn apply_preset(preset: Preset, s: &mut crate::settings::Settings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a game with no settings file gets them: a saved file keeps its choice,
+    /// even from before the option existed.
+    #[test]
+    fn first_start_settings_never_replace_saved_ones() {
+        let dir = std::env::temp_dir().join(format!("hz-first-start-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let _ = fs::remove_file(dir.join(FILE));
+        assert_eq!(Graphics::load(&dir).entity_culling, EntityCullingMode::Synchronous);
+        fs::write(dir.join(FILE), "fog:false\n").unwrap();
+        assert_eq!(Graphics::load(&dir).entity_culling, EntityCullingMode::Off);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn the_api_choice_matches_the_system() {

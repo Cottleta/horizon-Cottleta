@@ -2935,6 +2935,8 @@ struct Game<'a> {
     chat_frame: (bool, scoreboard::TickFrame),
     held_items: std::cell::RefCell<mob_blocks::HeldItems>,
     tag_lines: std::cell::RefCell<names::TagLines>,
+    /// `armor_layers` per item and slot, until the resources reload.
+    armor_layer_cache: std::cell::RefCell<armor_stands::ArmorLayerCache>,
     /// `draw_item_model`'s items of this tick: the tick, then by GUI position the
     /// stack and its vertices.
     gui_items: std::cell::RefCell<(
@@ -18553,6 +18555,7 @@ impl<'a> Game<'a> {
             chat_frame: Default::default(),
             held_items: Default::default(),
             tag_lines: Default::default(),
+            armor_layer_cache: Default::default(),
             gui_items: Default::default(),
             subtitles: Default::default(),
             adv: Default::default(),

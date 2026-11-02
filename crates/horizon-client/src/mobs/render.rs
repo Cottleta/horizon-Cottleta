@@ -2121,15 +2121,18 @@ fn with_body_poses<R>(
 ) -> R {
     let mut f = Some(f);
     let key = BodyKey::of(m, alpha, data);
+    let (model_key, _) = body(m);
+    let model = body_model(m, &model_key);
+    // A custom entity model drawn in its place has poses of other parts.
     let cached = LAST_BODY.with_borrow(|last| {
-        let body = last.as_ref().filter(|b| b.key == key)?;
+        let body = last
+            .as_ref()
+            .filter(|b| b.key == key && std::sync::Arc::ptr_eq(&b.model, &model))?;
         f.take().map(|f| f(&body.model, &body.poses))
     });
     if let Some(r) = cached {
         return r;
     }
-    let (model_key, _) = body(m);
-    let model = body_model(m, &model_key);
     let mut poses = Poses::new(&model);
     anim::setup(m, &anim::state(m, alpha), &mut poses, &data.animations);
     let f = f
@@ -2374,6 +2377,49 @@ fn crossed_arms_matrix(model: &Part, base: glam::Mat4, poses: &Poses) -> Option<
             * glam::Mat4::from_rotation_x(std::f32::consts::PI),
     )
 }
+/// Where a mob's held item goes: done, or on its hand with the item's own moves to come.
+enum HeldBase {
+    Final(glam::Mat4),
+    Hand(glam::Mat4),
+}
+/// `held_item_transform` as far as the model's poses go.
+fn held_item_base(
+    m: &Mob,
+    model: &Part,
+    base: glam::Mat4,
+    poses: &Poses,
+    left: bool,
+) -> Option<HeldBase> {
+    // WitchItemLayer.applyTranslation: a potion is held at the nose, any other
+    // item as CrossedArmsItemLayer holds it; only the main hand's item is drawn.
+    if m.species() == Species::Witch {
+        let item = m.extra.main_hand.as_deref()?;
+        if left != m.main_arm_left() {
+            return None;
+        }
+        if super::witch::holds_potion(item) {
+            let nose = part_matrix(model, base, poses, "nose", 0.0)?;
+            return Some(HeldBase::Final(
+                nose * glam::Mat4::from_translation(glam::Vec3::new(0.0625, 0.25, 0.0))
+                    * glam::Mat4::from_rotation_z(180.0f32.to_radians())
+                    * glam::Mat4::from_rotation_x(140.0f32.to_radians())
+                    * glam::Mat4::from_rotation_z(10.0f32.to_radians())
+                    * glam::Mat4::from_rotation_x(180.0f32.to_radians()),
+            ));
+        }
+        return crossed_arms_matrix(model, base, poses).map(HeldBase::Final);
+    }
+    // CrossedArmsItemLayer (villagers and wandering traders): the main hand's
+    // item over the folded arms.
+    if matches!(m.species(), Species::Villager | Species::WanderingTrader) {
+        m.extra.main_hand.as_deref()?;
+        if left != m.main_arm_left() {
+            return None;
+        }
+        return crossed_arms_matrix(model, base, poses).map(HeldBase::Final);
+    }
+    hand_base(m, model, base, poses, left).map(HeldBase::Hand)
+}
 /// The pose a mob's held item is submitted under (`ItemInHandLayer`:
 /// `translateToHand`, then the hand offset; the item model adds its own
 /// display transform), or `None` when the mob shows no held items.
@@ -2413,43 +2459,14 @@ pub fn held_item_transform(
     }
     let base = base_transform(m, alpha, camera);
     let s = anim::state(m, alpha);
-    let (model_key, _) = body(m);
-    let model = m
-        .kind
-        .layer(&model_key)
-        .cloned()
-        .unwrap_or_else(|| m.kind.model.clone());
-    let mut poses = Poses::new(&model);
-    anim::setup(m, &s, &mut poses, &data.animations);
-    // WitchItemLayer.applyTranslation: a potion is held at the nose, any other
-    // item as CrossedArmsItemLayer holds it; only the main hand's item is drawn.
-    if m.species() == Species::Witch {
-        let item = m.extra.main_hand.as_deref()?;
-        if left != m.main_arm_left() {
-            return None;
-        }
-        if super::witch::holds_potion(item) {
-            let nose = part_matrix(&model, base, &poses, "nose", 0.0)?;
-            return Some(
-                nose * glam::Mat4::from_translation(glam::Vec3::new(0.0625, 0.25, 0.0))
-                    * glam::Mat4::from_rotation_z(180.0f32.to_radians())
-                    * glam::Mat4::from_rotation_x(140.0f32.to_radians())
-                    * glam::Mat4::from_rotation_z(10.0f32.to_radians())
-                    * glam::Mat4::from_rotation_x(180.0f32.to_radians()),
-            );
-        }
-        return crossed_arms_matrix(&model, base, &poses);
-    }
-    // CrossedArmsItemLayer (villagers and wandering traders): the main hand's
-    // item over the folded arms.
-    if matches!(m.species(), Species::Villager | Species::WanderingTrader) {
-        m.extra.main_hand.as_deref()?;
-        if left != m.main_arm_left() {
-            return None;
-        }
-        return crossed_arms_matrix(&model, base, &poses);
-    }
-    let mut t = hand_base(m, &model, base, &poses, left)?;
+    // The body's poses, just worked out to draw it, when they were of this model.
+    let placed = with_body_poses(m, alpha, data, |model, poses| {
+        held_item_base(m, model, base, poses, left)
+    })?;
+    let mut t = match placed {
+        HeldBase::Final(t) => return Some(t),
+        HeldBase::Hand(t) => t,
+    };
     // ItemInHandLayer: a STAB swing of this arm thrusts its item out
     // (SpearAnimations.thirdPersonAttackItem, the main hand's forward
     // movement), and a spear in use moves with it (ArmPose.SPEAR's

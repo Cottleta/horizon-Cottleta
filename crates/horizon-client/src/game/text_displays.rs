@@ -290,6 +290,10 @@ impl Game<'_> {
                 "minecraft:item_display"
             };
             self.mark_entity(out.len(), kind);
+            // The items posed on the GPU where it can (`mobs::gpu_parts`).
+            if shows == Shows::Item && self.renderer.as_ref().is_some_and(|r| r.gpu_parts()) {
+                horizon_client::mobs::gpu_parts::begin(out);
+            }
             for (id, display) in displays.iter_mut().filter(|(_, d)| d.shows == shows) {
                 display.last_progress = display.progress(partial as f32);
                 let d = display.shown.blend(&display.from, display.last_progress);
@@ -344,6 +348,7 @@ impl Game<'_> {
                 }
             }
         }
+        horizon_client::mobs::gpu_parts::end();
         self.mark_entity(out.len(), "");
         self.text_displays = displays;
     }

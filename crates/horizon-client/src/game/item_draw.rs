@@ -557,6 +557,10 @@ impl Game<'_> {
             );
             let seed = i64::from(self.pack.item_renderer.item_id(&item.stack.item))
                 + i64::from(item.stack.damage);
+            // A glowing item's outline copies its vertices: they come from the CPU.
+            let _cpu = self
+                .entity_glowing(item.id)
+                .then(horizon_client::mobs::gpu_parts::pause);
             for copy in item_render::cluster_poses(
                 &state,
                 pose,

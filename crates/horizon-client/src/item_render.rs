@@ -937,6 +937,10 @@ impl ItemSink for WorldSink<'_> {
         sprites: &HashMap<String, Rect>,
         renderer: &ItemRenderer,
     ) -> bool {
+        // A job has no room for the HDR tier in its layer's high bits.
+        if self.tier != 0 {
+            return false;
+        }
         crate::mobs::gpu_parts::defer_item(
             self.out,
             baked,

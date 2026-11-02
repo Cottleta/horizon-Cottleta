@@ -589,6 +589,10 @@ impl Game<'_> {
                 * glam::DMat4::from_scale(glam::DVec3::splat(0.5));
             items.push((stack, f.id, m.as_mat4(), item_light));
         }
+        // The items posed on the GPU where it can (`mobs::gpu_parts`).
+        if self.renderer.as_ref().is_some_and(|r| r.gpu_parts()) {
+            horizon_client::mobs::gpu_parts::begin(out);
+        }
         // `extractRenderState`: FIXED, seeded by the frame entity.
         for (stack, id, m, light) in items {
             let entity_start = out.len();
@@ -607,6 +611,7 @@ impl Game<'_> {
             );
             self.cull_entity_vertices(out, entity_start);
         }
+        horizon_client::mobs::gpu_parts::end();
         for (id, m, light) in maps {
             let entity_start = out.len();
             self.map_vertices(id, true, m, light, out);

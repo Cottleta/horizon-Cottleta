@@ -11030,9 +11030,14 @@ impl Game<'_> {
             }
         }
         laps.lap("eg_fire_stands");
-        // `ItemEntityRenderer`.
+        let gpu_parts = self.renderer.as_ref().is_some_and(|r| r.gpu_parts());
+        // `ItemEntityRenderer`, posed on the GPU where it can (`mobs::gpu_parts`).
         self.mark_entity(out.len(), "minecraft:item");
+        if gpu_parts {
+            horizon_client::mobs::gpu_parts::begin(&out);
+        }
         self.dropped_item_geometry(camera, alpha, &mut out);
+        horizon_client::mobs::gpu_parts::end();
         self.mark_motion(out.len(), 0);
         // `VaultRenderer`.
         self.mark_entity(out.len(), "");
@@ -11047,7 +11052,6 @@ impl Game<'_> {
         laps.lap("eg_items_misc");
         // Mobs and their projectiles (a span each), their model parts posed on the GPU
         // where it can (`mobs::gpu_parts`).
-        let gpu_parts = self.renderer.as_ref().is_some_and(|r| r.gpu_parts());
         if gpu_parts {
             horizon_client::mobs::gpu_parts::begin(&out);
         }
@@ -11362,7 +11366,11 @@ impl Game<'_> {
         self.mark_entity(out.len(), "minecraft:item_frame");
         self.frame_geometry(camera, &mut out);
         self.mark_entity(out.len(), "minecraft:armor_stand");
+        if gpu_parts {
+            horizon_client::mobs::gpu_parts::begin(&out);
+        }
         self.armor_stand_geometry(camera, alpha, &mut out);
+        horizon_client::mobs::gpu_parts::end();
         self.cushion_geometry(camera, &mut out);
         self.mark_entity(out.len(), "minecraft:oak_boat");
         self.boat_geometry(camera, alpha, &mut out);

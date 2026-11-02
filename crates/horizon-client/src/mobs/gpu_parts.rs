@@ -76,10 +76,11 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::default();
 }
 
-/// Draws into `out` hold placeholders and jobs until `end`.
+/// Draws into `out` hold placeholders and jobs until `end`. A frame can do this several
+/// times; the meshes only start over before its first job, which would point at them.
 pub fn begin(out: &Vec<Vertex>) {
     STATE.with_borrow_mut(|state| {
-        if state.mesh.len() > MESH_LIMIT {
+        if state.mesh.len() > MESH_LIMIT && state.jobs.is_empty() {
             state.start_over();
         }
     });

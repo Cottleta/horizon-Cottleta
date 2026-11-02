@@ -500,6 +500,7 @@ mod tests {
     /// culling keeps) and whether its text reads left to right.
     fn seen(d: &TextDisplayData, entity: [f32; 2], camera: [f32; 2], eye: glam::Vec3) -> [bool; 2] {
         let lines = Lines {
+            obfuscated: false,
             lines: vec![],
             width: 10.0,
         };

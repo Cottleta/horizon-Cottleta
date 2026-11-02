@@ -10,7 +10,27 @@ use std::{
 };
 use winit::{event::MouseButton, keyboard::KeyCode};
 
+/// The control protocol's version (`docs/api/stability.md`): before 1.0 an
+/// addition makes the next patch and a breaking change the next line.
+const PROTOCOL: &str = "0.1.0";
+
+/// The command groups the game serves, as `help` chains them: what `hello` reports as its features.
+const FEATURES: &[&str] = &[
+    "game", "station", "blocks", "lan", "friends", "render", "sculk", "agent", "ui", "options",
+    "events", "saves", "pad",
+];
+
+/// `hello`: the protocol the socket speaks, the game's release and the command groups it serves.
+fn hello() -> Value {
+    json!({
+        "protocol": PROTOCOL,
+        "release": horizon_core::release::VERSION,
+        "features": FEATURES,
+    })
+}
+
 const HELP: &[&str] = &[
+    "hello                          the control protocol's version, the game's release and the command groups it serves",
     "status                         game, player, streaming and renderer state",
     "simulation                     authoritative projectiles in the owner's level",
     "server-hold on|off             hold simulation and player packets at a control-fixture barrier",
@@ -355,6 +375,7 @@ impl Game<'_> {
                 Ok(Some(json!({ "ok": true, "sides": r.section_sides() })))
             }
             "sculk" => Ok(Some(self.sculk_command(&words)?)),
+            "hello" => Ok(Some(hello())),
             "status" => Ok(Some(self.control_status())),
             "stall" => {
                 let millis: u64 = arg(1)?.parse()?;
@@ -1402,6 +1423,25 @@ fn key_code(name: &str) -> Option<KeyCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hello_names_the_protocol_the_release_and_the_command_groups() {
+        let reply = hello();
+        assert_eq!(reply["release"], horizon_core::release::VERSION);
+        let protocol = reply["protocol"].as_str().unwrap();
+        let parts: Vec<_> = protocol.split('.').collect();
+        assert!(
+            parts.len() == 3 && parts.iter().all(|p| p.parse::<u32>().is_ok()),
+            "{protocol}"
+        );
+        let features = reply["features"].as_array().unwrap();
+        assert!(!features.is_empty());
+        let mut names: Vec<_> = features.iter().filter_map(Value::as_str).collect();
+        assert_eq!(names.len(), features.len());
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), features.len(), "a group is named twice");
+    }
 
     #[test]
     fn taps_and_ups_always_release_their_key() {

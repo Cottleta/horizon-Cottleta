@@ -2,7 +2,7 @@
 //! end crystals on a server's client (`ClientPacketListener.handleAddEntity`
 //! and `handleSetEntityData`): the server simulates them, the client draws
 //! them where it says and interpolates their moves.
-use super::{FallStep, FallingBlock, Game, fireworks::fireworks_of, view_vector};
+use super::{FallStep, FallingBlock, Game, fireworks::fireworks_of};
 use horizon_client::items::ItemStack;
 use horizon_client::projectiles::{Hit, Projectile, ProjectileKind, ProjectileWorld};
 use horizon_client::{
@@ -105,31 +105,45 @@ fn projectile_kind(kind: &str) -> Option<ProjectileKind> {
             seed: 0,
         },
         "minecraft:wither_skull" => ProjectileKind::WitherSkull { dangerous: false },
-        _ => return None,
+        _ => ProjectileKind::Thrown(horizon_client::projectiles::thrown_type(kind)?),
     })
 }
 
 /// `AbstractArrow.tick` on a client: water drag before the move, air drag
 /// after it, then gravity; a block it reaches holds it (`inGround`).
 fn remote_arrow_tick(p: &mut Projectile, w: &impl ProjectileWorld) {
-    p.previous = p.position;
+    p.set_old_pos_and_rot();
     p.age += 1;
-    // AbstractArrow.tick: `inGroundTime` counts the ticks in a block.
+    // AbstractArrow.tick: the shake timer runs down, and `inGroundTime` counts
+    // the ticks in a block.
     if let Some(a) = p.arrow.as_mut() {
+        a.shake = (a.shake - 1).max(0);
         a.in_ground_time = if p.stuck { a.in_ground_time + 1 } else { 0 };
     }
     if p.stuck {
         return;
     }
-    let water = w.in_water(p.position);
+    let water = w.in_water(p.bounds());
     if water {
         p.velocity = p.velocity.scale(0.6);
     }
+    let (movement_x, movement_y, movement_z) = (p.velocity.x, p.velocity.y, p.velocity.z);
+    let sd = (movement_x * movement_x + movement_z * movement_z).sqrt();
+    let y_rot = horizon_core::geometry::trig::atan2_degrees(movement_x, movement_z);
+    let x_rot = horizon_core::geometry::trig::atan2_degrees(movement_y, sd);
+    p.pitch = horizon_client::arrows::lerp_rotation(p.pitch, x_rot);
+    p.yaw = horizon_client::arrows::lerp_rotation(p.yaw, y_rot);
     let to = p.position.add_vector(p.velocity);
     if let Some((at, _, _)) = w.clip(p.position, to) {
         p.position = at;
         p.velocity = Vec3::ZERO;
         p.stuck = true;
+        // AbstractArrow.onSyncedDataUpdated: IN_GROUND turning true starts the shake.
+        if let Some(a) = p.arrow.as_mut()
+            && a.shake <= 0
+        {
+            a.shake = 7;
+        }
         return;
     }
     p.position = to;
@@ -144,6 +158,35 @@ fn remote_arrow_tick(p: &mut Projectile, w: &impl ProjectileWorld) {
 pub(super) fn remote_projectile_tick(p: &mut Projectile, w: &impl ProjectileWorld) {
     if !matches!(p.tick(w).1, Hit::None) {
         p.velocity = Vec3::ZERO;
+    }
+}
+
+/// `Entity.getRandomX(0.5)` / `getRandomY` / `getRandomZ(0.5)` for a shulker
+/// bullet (`EntityType.SHULKER_BULLET` is 0.3125 x 0.3125).
+fn shulker_bullet_trail_at(at: Vec3, random: &mut impl RandomSource) -> [f64; 3] {
+    const SIZE: f64 = 0.3125;
+    [
+        at.x + SIZE * (2.0 * random.next_double() - 1.0) * 0.5,
+        at.y + SIZE * random.next_double(),
+        at.z + SIZE * (2.0 * random.next_double() - 1.0) * 0.5,
+    ]
+}
+
+/// `ClientPacketListener.handleProjectilePowerPacket`: the power a hurting
+/// projectile (`AbstractHurtingProjectile`) accelerates by, found by id;
+/// anything else is ignored.
+pub(super) fn remote_projectile_power(projectiles: &mut [Projectile], id: i32, power: f64) {
+    if let Some(p) = projectiles.iter_mut().find(|p| p.id == id as u32)
+        && matches!(
+            p.kind,
+            ProjectileKind::SmallFireball
+                | ProjectileKind::LargeFireball { .. }
+                | ProjectileKind::WitherSkull { .. }
+                | ProjectileKind::WindCharge
+                | ProjectileKind::BreezeWindCharge
+        )
+    {
+        p.acceleration = power;
     }
 }
 
@@ -164,8 +207,7 @@ impl Game<'_> {
     /// fifth tick in a block; a spectral arrow an effect sparkle at its
     /// position while flying.
     fn arrow_effect_particles(&mut self) {
-        // The arrow's box: `EntityType.ARROW` is 0.5 x 0.5.
-        const SIZE: f64 = 0.5;
+        let mut puffs: Vec<(Vec3, i32, u32)> = Vec::new();
         for p in &self.creatures.projectiles {
             let Some(a) = p.arrow.as_ref().filter(|_| p.is_arrow()) else {
                 continue;
@@ -178,30 +220,54 @@ impl Game<'_> {
                 }
                 continue;
             }
-            let color = a.effect_color;
             let count = match (p.stuck, a.in_ground_time % 5) {
                 (true, 0) => 1,
                 (true, _) => 0,
                 (false, _) => 2,
             };
-            if color == -1 {
-                continue;
-            }
-            // ColorParticleOption.create(ENTITY_EFFECT, colour): ARGB as floats.
-            let channel = |shift: u32| (color as u32 >> shift & 255) as f32 / 255.0;
-            let options = ParticleOptions::colored(
-                ParticleType::EntityEffect,
-                [channel(16), channel(8), channel(0), channel(24)],
-            );
-            for _ in 0..count {
-                // getRandomX(0.5), getRandomY, getRandomZ(0.5).
-                let r = self.particles.random();
-                let x = at.x + SIZE * (2.0 * r.next_double() - 1.0) * 0.5;
-                let y = at.y + SIZE * r.next_double();
-                let z = at.z + SIZE * (2.0 * r.next_double() - 1.0) * 0.5;
-                self.particles.add(&options, [x, y, z], [0.0; 3]);
-            }
+            puffs.push((at, a.effect_color, count));
         }
+        for (at, color, count) in puffs {
+            self.arrow_makeparticle(at, color, count);
+        }
+    }
+
+    /// `Arrow.makeParticle`: `count` entity-effect swirls in `color` (an ARGB
+    /// int, -1 for none) inside the arrow's 0.5 x 0.5 box.
+    fn arrow_makeparticle(&mut self, at: Vec3, color: i32, count: u32) {
+        // `EntityType.ARROW` is 0.5 x 0.5.
+        const SIZE: f64 = 0.5;
+        if color == -1 {
+            return;
+        }
+        // ColorParticleOption.create(ENTITY_EFFECT, colour): ARGB as floats.
+        let channel = |shift: u32| (color as u32 >> shift & 255) as f32 / 255.0;
+        let options = ParticleOptions::colored(
+            ParticleType::EntityEffect,
+            [channel(16), channel(8), channel(0), channel(24)],
+        );
+        for _ in 0..count {
+            // getRandomX(0.5), getRandomY, getRandomZ(0.5).
+            let r = self.particles.random();
+            let x = at.x + SIZE * (2.0 * r.next_double() - 1.0) * 0.5;
+            let y = at.y + SIZE * r.next_double();
+            let z = at.z + SIZE * (2.0 * r.next_double() - 1.0) * 0.5;
+            self.particles.add(&options, [x, y, z], [0.0; 3]);
+        }
+    }
+
+    /// `Arrow.handleEntityEvent(0)`: a tipped arrow stuck for 600 ticks bursts
+    /// into twenty particles in its colour. The server turns it into a plain
+    /// arrow and does not send the colour again, so it stops here.
+    pub(super) fn remote_arrow_puff(&mut self, id: u32) {
+        let Some(p) = self.creatures.projectiles.iter_mut().find(|p| p.id == id) else {
+            return;
+        };
+        let Some(a) = p.arrow.as_mut() else {
+            return;
+        };
+        let (at, color) = (p.position, std::mem::replace(&mut a.effect_color, -1));
+        self.arrow_makeparticle(at, color, 20);
     }
 
     /// `AbstractHurtingProjectile.createParticleTrail`: one smoke puff half a
@@ -210,6 +276,25 @@ impl Game<'_> {
         let smoke = ParticleOptions::simple(ParticleType::Smoke);
         for p in at {
             self.particles.add(&smoke, [p.x, p.y + 0.5, p.z], [0.0; 3]);
+        }
+    }
+
+    /// `ShulkerBullet.tick` on a client: two `END_ROD` particles in its
+    /// 0.3125 box (`getRandomX(0.5)`, `getRandomY`, `getRandomZ(0.5)`).
+    pub(super) fn shulker_bullet_trails(&mut self) {
+        let bullets: Vec<Vec3> = self
+            .creatures
+            .projectiles
+            .iter()
+            .filter(|p| matches!(p.kind, ProjectileKind::ShulkerBullet { .. }))
+            .map(|p| p.position)
+            .collect();
+        let options = ParticleOptions::simple(ParticleType::EndRod);
+        for at in bullets {
+            for _ in 0..2 {
+                let p = shulker_bullet_trail_at(at, self.particles.random());
+                self.particles.add(&options, p, [0.0; 3]);
+            }
         }
     }
 
@@ -231,12 +316,15 @@ impl Game<'_> {
         match kind {
             "minecraft:evoker_fangs" => self.insert_fangs(id, position, yaw, 0, 0),
             "minecraft:tnt" => self.tnts.push(super::tnt::PrimedTnt {
+                no_gravity: false,
                 id,
                 position: at,
                 previous: at,
                 velocity,
                 fuse: 80,
                 on_ground: false,
+                owner: None,
+                guest: None,
             }),
             // FallingBlockEntity.recreateFromPacket: the block state is the data.
             "minecraft:falling_block" => self.falling.push(FallingBlock {
@@ -248,6 +336,7 @@ impl Game<'_> {
                 velocity,
                 age: 0,
                 no_gravity: false,
+                portal: Default::default(),
                 drop_item: false,
                 fall_distance: 0.0,
                 stuck: Vec3::ZERO,
@@ -286,14 +375,19 @@ impl Game<'_> {
             }
             // FishingHook.recreateFromPacket: the owner's id is the data.
             "minecraft:fishing_bobber" => self.spawn_remote_hook(id, at, velocity, data),
-            "minecraft:end_crystal" => self.crystals.push(super::dragon::Crystal {
-                id,
-                position: at,
-                show_bottom: true,
-                time: 0,
-                beam: None,
-                invulnerable: false,
-            }),
+            "minecraft:end_crystal" => {
+                // EndCrystal's constructor starts `time` random, so each
+                // placed crystal spins from its own phase.
+                let time = self.world.random.next_int_bound(100_000).unwrap_or(0);
+                self.crystals.push(super::dragon::Crystal {
+                    id,
+                    position: at,
+                    show_bottom: true,
+                    time,
+                    beam: None,
+                    invulnerable: false,
+                });
+            }
             _ => {
                 let Some(k) = projectile_kind(kind) else {
                     return false;
@@ -424,6 +518,16 @@ impl Game<'_> {
                         *critical = flags & 1 != 0;
                     }
                     (ProjectileKind::Arrow { .. }, 10, Value::Bool(in_ground)) => {
+                        // AbstractArrow.onSyncedDataUpdated: IN_GROUND turning true after
+                        // the first tick starts the shake.
+                        if *in_ground
+                            && !p.stuck
+                            && p.age > 0
+                            && let Some(a) = p.arrow.as_mut()
+                            && a.shake <= 0
+                        {
+                            a.shake = 7;
+                        }
                         p.stuck = *in_ground;
                     }
                     // Arrow.ID_EFFECT_COLOR.
@@ -459,11 +563,7 @@ impl Game<'_> {
     /// `Entity.getEyePosition` of a projectile's owner: this game's player or
     /// another player the server sent.
     fn remote_eye(&self, id: u32) -> Option<Vec3> {
-        let me = self
-            .remote
-            .as_ref()
-            .and_then(|r| u32::try_from(r.entity_id).ok());
-        if me == Some(id) {
+        if self.remote_player_id() == Some(id) {
             let eye = self.eye_position()?;
             return Some(Vec3::new(eye[0], eye[1], eye[2]));
         }
@@ -473,6 +573,34 @@ impl Game<'_> {
             m.position.y + m.eye_height(),
             m.position.z,
         ))
+    }
+
+    /// This client's own player's entity id on the server.
+    fn remote_player_id(&self) -> Option<u32> {
+        self.remote
+            .as_ref()
+            .and_then(|r| u32::try_from(r.entity_id).ok())
+    }
+
+    /// `FireworkRocketEntity.tick` for the rockets attached to this client's
+    /// own player, once the player has moved (it ticks before them in
+    /// `ClientLevel.tickEntities`), each with its spark.
+    pub(super) fn tick_own_rockets(&mut self) {
+        let Some(me) = self.remote_player_id() else {
+            return;
+        };
+        if !self.clock.runs_normally()
+            || self.player.is_none()
+            || !self.rockets.iter().any(|r| r.attached_to == Some(me))
+        {
+            return;
+        }
+        let mut rockets = std::mem::take(&mut self.rockets);
+        for r in rockets.iter_mut().filter(|r| r.attached_to == Some(me)) {
+            self.follow_own_player(r);
+            self.rocket_spark(r);
+        }
+        self.rockets = rockets;
     }
 
     /// One tick of interpolation, as `tick_remote_objects`.
@@ -520,7 +648,7 @@ impl Game<'_> {
                     ProjectileKind::Arrow { .. } => remote_arrow_tick(p, &world),
                     // ShulkerBullet.tick: only the server steers it.
                     ProjectileKind::ShulkerBullet { .. } => {
-                        p.previous = p.position;
+                        p.set_old_pos_and_rot();
                         p.age += 1;
                         p.position = p.position.add_vector(p.velocity);
                     }
@@ -542,13 +670,11 @@ impl Game<'_> {
             .map(|p| p.position)
             .collect();
         self.smoke_trails(trails);
-        // FireworkRocketEntity.tick: a rocket attached to an entity follows it
-        // and boosts it client-side too (attachedToEntity.isFallFlying), and
-        // every rocket leaves its spark trail on a client.
-        let me = self
-            .remote
-            .as_ref()
-            .and_then(|r| u32::try_from(r.entity_id).ok());
+        self.shulker_bullet_trails();
+        // FireworkRocketEntity.tick: a rocket attached to another entity
+        // follows it, and every rocket leaves its spark trail on a client. One
+        // boosting this client's own player ticks after it (`tick_own_rockets`).
+        let me = self.remote_player_id();
         let mut rockets = std::mem::take(&mut self.rockets);
         for r in &mut rockets {
             r.remote_step(&mut SceneCollisions {
@@ -558,20 +684,9 @@ impl Game<'_> {
             });
             if let Some(target) = r.attached_to {
                 if me == Some(target) {
-                    if let Some(p) = self.player.as_mut() {
-                        if p.fall_flying {
-                            let look = view_vector(self.yaw, self.pitch);
-                            let m = p.velocity;
-                            p.velocity = Vec3::new(
-                                m.x + look[0] * 0.1 + (look[0] * 1.5 - m.x) * 0.5,
-                                m.y + look[1] * 0.1 + (look[1] * 1.5 - m.y) * 0.5,
-                                m.z + look[2] * 0.1 + (look[2] * 1.5 - m.z) * 0.5,
-                            );
-                        }
-                        r.position = p.position;
-                        r.velocity = p.velocity;
-                    }
-                } else if let Some(m) = self.mobs.iter().find(|m| m.id == target) {
+                    continue;
+                }
+                if let Some(m) = self.mobs.iter().find(|m| m.id == target) {
                     // Another player's motion is not known here: its step.
                     r.velocity = Vec3::new(
                         m.position.x - r.previous.x,
@@ -581,17 +696,7 @@ impl Game<'_> {
                     r.position = m.position;
                 }
             }
-            let g = |g: &mut horizon_core::random::LegacyRandom| g.next_gaussian() * 0.05;
-            let v = [
-                g(&mut self.world.random),
-                -r.velocity.y * 0.5,
-                g(&mut self.world.random),
-            ];
-            self.particles.add(
-                &ParticleOptions::simple(ParticleType::Firework),
-                [r.position.x, r.position.y, r.position.z],
-                v,
-            );
+            self.rocket_spark(r);
         }
         self.rockets = rockets;
         for c in &mut self.crystals {
@@ -678,7 +783,13 @@ impl Game<'_> {
             out.push(json!({"id": t.id, "kind": "minecraft:tnt", "position": at(t.position), "fuse": t.fuse}));
         }
         for f in &self.falling {
-            out.push(json!({"id": f.id, "kind": "minecraft:falling_block", "position": at(f.position), "state": f.state.0}));
+            out.push(json!({"id": f.id, "kind": "minecraft:falling_block", "position": at(f.position), "velocity": at(f.velocity), "state": f.state.0}));
+        }
+        for b in &self.boats {
+            out.push(json!({"id": b.id, "kind": "minecraft:boat", "position": at(b.position), "velocity": at(b.velocity)}));
+        }
+        for c in &self.carts {
+            out.push(json!({"id": c.id, "kind": "minecraft:minecart", "position": at(c.position), "velocity": at(c.velocity)}));
         }
         for c in &self.crystals {
             out.push(json!({"id": c.id, "kind": "minecraft:end_crystal", "position": at(c.position), "show_bottom": c.show_bottom}));
@@ -714,7 +825,7 @@ mod tests {
         fn clip(&self, _: Vec3, _: Vec3) -> Option<(Vec3, [i32; 3], [i32; 3])> {
             None
         }
-        fn in_water(&self, _: Vec3) -> bool {
+        fn in_water(&self, _: Aabb) -> bool {
             false
         }
         fn targets(&self) -> &[(Who, Aabb)] {
@@ -728,6 +839,58 @@ mod tests {
         let mut p = Projectile::new(kind, Vec3::new(0.0, 100.0, 0.0), None);
         p.velocity = Vec3::new(1.5, 0.0, 0.0);
         p
+    }
+
+    /// The same, under the id a server tracks it by.
+    fn tracked(kind: ProjectileKind, id: u32) -> Projectile {
+        Projectile { id, ..thrown(kind) }
+    }
+
+    #[test]
+    fn a_shulker_bullet_trail_stays_inside_its_box() {
+        let at = Vec3::new(10.0, 20.0, 30.0);
+        let mut random = horizon_core::random::LegacyRandom::new(1);
+        for _ in 0..32 {
+            let [x, y, z] = shulker_bullet_trail_at(at, &mut random);
+            assert!((x - at.x).abs() <= 0.3125 * 0.5 + 1e-12, "{x}");
+            assert!((0.0..0.3125 + 1e-12).contains(&(y - at.y)), "{y}");
+            assert!((z - at.z).abs() <= 0.3125 * 0.5 + 1e-12, "{z}");
+        }
+    }
+
+    /// `Entity.setOldPosAndRot`: what the renderer interpolates a projectile's
+    /// rotation from is the rotation the last tick ended with. An arrow shot
+    /// straight up at the lowest power a bow fires turns over within a few
+    /// ticks, so every tick has to carry the value of the one before it.
+    #[test]
+    fn a_remote_arrow_keeps_the_rotation_the_last_tick_drew() {
+        let mut p = Projectile::new(
+            ProjectileKind::Arrow {
+                base_damage: 2.0,
+                critical: false,
+                effect: None,
+            },
+            Vec3::new(0.0, 100.0, 0.0),
+            None,
+        );
+        let mut random = horizon_core::random::LegacyRandom::new(7);
+        p.shoot(&mut random, [0.0, 1.0, 0.0], 0.3, 0.0);
+        // `Projectile.shoot` ends with `yRotO = getYRot(); xRotO = getXRot()`.
+        assert_eq!(p.previous_pitch, p.pitch);
+        assert_eq!(p.previous_yaw, p.yaw);
+        assert!((p.pitch - 90.0).abs() < 1.0e-4, "aimed up: {}", p.pitch);
+        let (mut yaw, mut pitch) = (p.yaw, p.pitch);
+        for _ in 0..30 {
+            remote_arrow_tick(&mut p, &Empty);
+            assert_eq!(p.previous_pitch, pitch);
+            assert_eq!(p.previous_yaw, yaw);
+            (yaw, pitch) = (p.yaw, p.pitch);
+        }
+        assert!(
+            p.pitch < 0.0,
+            "the arrow turned over as it fell: {}",
+            p.pitch
+        );
     }
 
     #[test]
@@ -763,5 +926,43 @@ mod tests {
         remote_projectile_tick(&mut p, &Empty);
         assert!((p.velocity.x - 1.5).abs() < 1e-9, "{p:?}");
         assert!((p.velocity.y - 0.0).abs() < 1e-9, "{p:?}");
+    }
+
+    #[test]
+    fn a_power_packet_gives_a_fireball_the_power_its_next_tick_uses() {
+        // ClientPacketListener.handleProjectilePowerPacket: the fireball with
+        // id 12 gets the power the server sends bundled with its motion.
+        let mut list = vec![tracked(ProjectileKind::LargeFireball { power: 1 }, 12)];
+        remote_projectile_power(&mut list, 12, 0.5);
+        assert_eq!(list[0].acceleration, 0.5);
+        // AbstractHurtingProjectile.applyInertia: (v + v/|v| * 0.5) * 0.95,
+        // where the default 0.1 would have made 1.52.
+        remote_projectile_tick(&mut list[0], &Empty);
+        assert!((list[0].velocity.x - 1.9).abs() < 1e-9, "{:?}", list[0]);
+    }
+
+    #[test]
+    fn a_power_packet_ignores_an_arrow_an_unknown_id_and_a_thrown_item() {
+        // Vanilla's instanceof AbstractHurtingProjectile: an arrow and a
+        // thrown egg are none, and no entity is id 99.
+        let mut list = vec![
+            tracked(
+                ProjectileKind::Arrow {
+                    base_damage: 2.0,
+                    critical: false,
+                    effect: None,
+                },
+                3,
+            ),
+            tracked(ProjectileKind::Egg, 4),
+            tracked(ProjectileKind::LargeFireball { power: 1 }, 12),
+        ];
+        remote_projectile_power(&mut list, 3, 0.5);
+        remote_projectile_power(&mut list, 4, 0.5);
+        remote_projectile_power(&mut list, 99, 0.5);
+        assert_eq!(
+            list.iter().map(|p| p.acceleration).collect::<Vec<_>>(),
+            [0.1; 3]
+        );
     }
 }

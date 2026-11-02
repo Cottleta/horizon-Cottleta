@@ -118,6 +118,7 @@ impl Game<'_> {
             dimension: self.dim,
             level: None,
             block: None,
+            cart: None,
         }
     }
     /// Run a sign's `run_command` line as the prefixed command vanilla runs
@@ -333,6 +334,26 @@ impl Game<'_> {
         self.right = false;
         self.capture(false);
     }
+    /// `AbstractSignEditScreen.tick`: the editor closes (and `removed` sends
+    /// the text) once its sign is removed or the player's eyes are further
+    /// than 4 blocks beyond the block interaction range
+    /// (`SignBlockEntity.playerIsTooFarAwayToEdit`).
+    pub(super) fn tick_sign_editor(&mut self) {
+        let Some(edit) = &self.sign_edit else {
+            return;
+        };
+        let (x, y, z) = edit.pos;
+        let near = self.eye_position().is_some_and(|eye| {
+            horizon_client::lan::guest::within_block_range(eye, self.reach() + 4.0, [x, y, z])
+        });
+        let sign = matches!(
+            self.world.block_entities.get(&edit.pos),
+            Some(BlockEntity::Sign(_))
+        );
+        if !sign || !near {
+            self.close_sign_editor();
+        }
+    }
     /// `AbstractSignEditScreen.removed`: a server's client sends what it
     /// wrote (ServerboundSignUpdatePacket); the window's own world keeps it
     /// and sends it to its guests (`sendBlockUpdated`).
@@ -370,7 +391,12 @@ impl Game<'_> {
     /// codes stripped, go on the sign the guest may write on unless it is
     /// waxed (`SignBlockEntity.updateSignText`); a guest gone out of reach
     /// may no longer write (`playerIsTooFarAwayToEdit`).
-    pub(super) fn lan_sign_update(&mut self, host: &mut LanHost, conn: u32, p: play::SignUpdate) {
+    pub(super) fn lan_sign_update(
+        &mut self,
+        host: &mut LanHost,
+        conn: u32,
+        mut p: play::SignUpdate,
+    ) {
         let Some(g) = host.hub.guest(conn) else {
             return;
         };
@@ -386,6 +412,66 @@ impl Game<'_> {
             return;
         }
         let key = (p.pos[0], p.pos[1], p.pos[2]);
+        let lines = p.lines.join(" ");
+        if !self.chat_filter_text(
+            host,
+            conn,
+            &[&lines],
+            horizon_client::lan::hub::chat_filter::Place::Sign,
+        ) {
+            // The sign stays as it was: the editor closes, as after a sign the server refused.
+            if let Some(play) = host.play.get_mut(&conn) {
+                play.sign_editing = None;
+            }
+            // The player's client shows the text it sent: the sign as it is, again.
+            self.mark_block_entity_updated(key);
+            return;
+        }
+        if !matches!(
+            self.world.block_entities.get(&key),
+            Some(BlockEntity::Sign(sign)) if !sign.waxed
+        ) {
+            return;
+        }
+        // Everything vanilla checks has passed: the mods hear what is about to
+        // go on the sign, with the player's state swapped in, and may rewrite
+        // or refuse it.
+        if let Some((uuid, name, dimension)) = host
+            .hub
+            .guest(conn)
+            .map(|g| (g.uuid, g.name.clone(), g.dimension.clone()))
+        {
+            let mut lines = p.lines.to_vec();
+            let mut cancel = false;
+            self.as_guest_messaged(host, conn, |game| {
+                game.native_sign_changed(
+                    uuid,
+                    &name,
+                    &dimension,
+                    p.pos,
+                    p.front,
+                    &mut lines,
+                    &mut cancel,
+                );
+            });
+            if cancel {
+                // The sign keeps its text: the editor closes, and the player's
+                // client, which shows what it sent, gets the sign as it is.
+                if let Some(play) = host.play.get_mut(&conn) {
+                    play.sign_editing = None;
+                }
+                self.mark_block_entity_updated(key);
+                return;
+            }
+            lines.resize(4, String::new());
+            for (line, new) in p.lines.iter_mut().zip(lines) {
+                *line = new;
+            }
+        }
+        let Some(play) = host.play.get_mut(&conn) else {
+            return;
+        };
+        // A hook may have broken the sign.
         let Some(BlockEntity::Sign(sign)) = self.world.block_entities.get_mut(&key) else {
             return;
         };
@@ -660,6 +746,10 @@ impl Game<'_> {
             ("sign.edit", "Edit Sign Message")
         };
         let title = self.translate(key, fallback);
+        // SignEditScreen / HangingSignEditScreen: their title.
+        horizon_client::widgets::begin_screen(|| {
+            horizon_client::widgets::ScreenInfo::new("sign_edit", title.clone())
+        });
         let tw = HudBatch::text_width(atlas, &title);
         batch.text(atlas, &title, (w - tw) / 2.0, 40.0, u32::MAX, true);
         let name = self
@@ -742,19 +832,21 @@ impl Game<'_> {
                     true,
                 );
             }
+            let pre: String = value.chars().take(edit.edit.cursor).collect();
+            let caret_x = x + HudBatch::text_width(atlas, &pre);
             if edit.edit.cursor_visible() {
-                let pre: String = value.chars().take(edit.edit.cursor).collect();
-                batch.fill(
-                    atlas,
-                    x + HudBatch::text_width(atlas, &pre),
-                    ly,
-                    1.0,
-                    line_height,
-                    color,
-                );
+                batch.fill(atlas, caret_x, ly, 1.0, line_height, color);
             }
+            horizon_client::preedit::report_caret(caret_x, ly, line_height);
         }
         let (bx, by) = done_button(w, h);
+        horizon_client::widgets::narratable(|| {
+            horizon_client::widgets::Narratable::button(
+                super::screen_info::tr("gui.done", &[]),
+                [bx, by, 200.0, 20.0],
+                true,
+            )
+        });
         batch.sprite_scaled(
             atlas,
             "gui/sprites/widget/button",

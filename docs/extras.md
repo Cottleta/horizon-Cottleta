@@ -1,7 +1,7 @@
 # Horizon extras
 
-Optional conveniences built into the client: fullbright, dynamic lights, your own name tag, auto-reconnect,
-Mouse Tweaks-style inventory controls and inventory sorting. **Every one is off by default**: a fresh
+Optional conveniences built into the client: fullbright, dynamic lights, your own name tag, hiding block-break particles, auto-reconnect,
+Mouse Tweaks-style inventory controls, inventory sorting and a smooth chat. **Every one is off by default**: a fresh
 install looks and behaves exactly like vanilla 26.3, and turning an extra off
 again restores vanilla's behaviour completely.
 
@@ -65,7 +65,7 @@ in Controls, and adding one would put a non-vanilla mapping into `options.txt`.
 The **FPS counter**, **Keystrokes**, **Zoom** and the **Minimap** are official native mods now (in
 horizon-rust/horizon-mods under `native/<name>/`, [mods.md](mods.md#horizons-official-mods)), with the same look and
 options. Players install them from the launcher's Mods page, and the launcher builds them into the game
-([native-mods.md](native-mods.md)). They were WebAssembly mods for a while; those don't run any more. The game keeps
+([native-mods.md](native-mods.md)). The game keeps
 the hook points they use (`crates/horizon-client/src/game/native_hooks.rs`), and `horizon-extras.txt` keeps the old
 keys and `movedToMods`.
 
@@ -88,6 +88,13 @@ The game still draws the minimap, for the native mod (`native_minimap` in `nativ
   whenever the team's name tag visibility would hide it, exactly as the other
   players' tags (`game/names.rs`, `own_name_tag`). Client-only: nothing is sent.
 
+### Hide block-break particles (`hideBlockParticles`, default off)
+- Hides the debris particles that burst from a block when it breaks
+  (`ClientLevel.addDestroyBlockEffect`) and the crumbs off the face you mine
+  (`addBreakingParticles`). Other particles (critical hits, smoke, rain...) are
+  unchanged, and the block still breaks and drops as usual. Client-only:
+  nothing is sent (`game.rs`, `destroy_particles` and `crack_particle`).
+
 ### Auto-reconnect (`autoReconnect`, default off)
 - On the "Connection lost" screen after a multiplayer connection drops, a
   countdown "Reconnecting in N s" with a Cancel button, then a new connection
@@ -104,9 +111,24 @@ The game still draws the minimap, for the native mod (`native_minimap` in `nativ
   with, held in memory for the whole run (`auth::current()`); nothing is
   written to disk.
 
+### Keep channels for UI sounds (`uiSoundReserve`, default off)
+- Positional sounds (a block breaking, a mob, an explosion) start only while at
+  least 16 of the 247 static sound channels are free; sounds played to the
+  listener (`relative`, or no attenuation: UI clicks, toasts) may take those 16.
+  A flood of world sounds (a big explosion, `/fill … destroy`, a mod breaking
+  hundreds of blocks at once) then can't stop the pause menu's clicks.
+- Vanilla 26.3 gives all 247 to whatever starts first
+  (`Library.acquireChannel` returns null once the pool is full); with the
+  extra off Horizon does exactly that. Below 231 sounds at once nothing
+  changes either way. Streaming sounds (music, records) are untouched
+  (`sound_engine.rs`, `listener_reserve`). Client-only.
+
 ### Mouse Tweaks controls (`mouseTweaks`, default off; `mouseTweaksWheel`, default on)
-In the player inventory and chest-like containers (chests, barrels, ender
-chests, shulker boxes, hoppers, dispensers), in singleplayer and on servers:
+In the player inventory, chest-like containers (chests, barrels, ender chests,
+shulker boxes, hoppers, dispensers and droppers), furnaces (also blast furnaces
+and smokers) and crafting tables, in singleplayer and on servers. Anvils,
+enchanting tables, merchants, beacons, brewing stands, crafters and the other
+workstations keep vanilla's controls:
 - Right-drag holding a stack: one item goes into each slot entered, at once
   (slots holding another item, or full, are skipped).
 - Left-drag holding a stack: each slot entered that holds the same item is
@@ -116,9 +138,15 @@ chests, shulker boxes, hoppers, dispensers), in singleplayer and on servers:
 - Shift + left-drag: every slot entered is quick-moved (with a stack in hand,
   only the slots of its item).
 - The wheel over a slot, with an empty hand (`mouseTweaksWheel`): down moves
-  one item to the other side (container and inventory, or hotbar and main
-  inventory: to a stack of it with room, else the first empty slot, as
-  quick-move picks), up brings one of the same item back.
+  one item where a Shift click would send it (vanilla's `quickMoveStack`: fuel
+  to the fuel slot, a smeltable to the input, into the crafting grid, across a
+  container, between hotbar and main inventory, an armour piece onto the
+  player), up brings one of the same item from the other side.
+- Nothing goes into a result slot. The wheel down over one takes one craft, or a
+  furnace's whole output, to the inventory when it all fits (a result can't be
+  split or put back); the wheel up over one does nothing, and it isn't a source
+  for the wheel up elsewhere. A right-drag skips it, and a right press on it is
+  vanilla's.
 
 Every action is ordinary slot clicks (`ContainerClick` on a server), so a
 vanilla server sees nothing unusual. With the extra off, the hooks return at
@@ -136,6 +164,32 @@ and the container screen tests are unchanged).
 - Done with ordinary left clicks planned by `inv_sort::plan`, so a vanilla
   server accepts it; a unit test replays the planned clicks through the menu
   engine on random chests.
+
+### Smooth chat (`chatAnimation`, default off; `chatIndicator`, default on)
+- A new chat line slides in from the left while it fades in over a quarter of
+  a second (5 ticks, `INTRO_TICKS`/`INTRO_WIDTH` in `Chat::layout`), instead of
+  appearing whole on the tick it arrives. Its background and its indicator bar
+  move with it, and the fractional tick from `Game::clock` drives the motion, so
+  it moves every frame and not 20 times a second.
+- Only the unfocused chat (the HUD's) animates: with the chat screen open the
+  history is drawn as vanilla draws it, so clicking a line lands on its text.
+- `chatIndicator` off removes the coloured bar at the left of a line. It hides
+  the bar only, never the message.
+
+### Splitscreen (`splitscreen`, default off)
+
+**Options → Horizon Settings... → Splitscreen...** turns local joining on or off at once.
+In P1's single-player world, a controller P1 isn't using can press a button, then A to join
+(or Y to play as P1, while P1 has no controller). Each
+player picks an instance-local profile with its own options and saved progress. LB/RB on
+the profile page move the view between shared positions, a new window or another monitor.
+A joined player's **Splitscreen Settings** in the pause menu switches profiles in place;
+Cancel keeps the current one. The switch is disabled while another player is joined; once
+P1 is alone, turning it off restores the normal controller reader. Leaving it on while
+alone keeps watching for joins without a compositor.
+
+`HORIZON_SPLIT=N` remains a testing shortcut to enable it and add N-1 players.
+The Setup map and joining P1 on an external server are separate follow-ups.
 
 ## Shared rules
 

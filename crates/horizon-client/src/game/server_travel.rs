@@ -11,7 +11,7 @@ use super::end::GatewayJob;
 use super::nether_portal::{PLAYER_DELAY, Plan};
 use super::respawn_anchor::RespawnConfig;
 use super::{Dim, Game, Mob, boats, lan::LanHost, minecarts};
-use horizon_client::{lan::hub::TickCtx, text::Text, world_spawn::PlayerSpawnFinder};
+use horizon_client::{lan::hub::TickCtx, world_spawn::PlayerSpawnFinder};
 use horizon_core::{geometry::Vec3, position::BlockPos};
 use horizon_protocol::packets::play::{self, Clientbound as C};
 
@@ -44,6 +44,9 @@ pub(super) struct Trip {
     finder: Option<PlayerSpawnFinder>,
     /// Sent by a command: the player is already where it goes.
     placed: bool,
+    /// The level the player left for another one: the mods are told they
+    /// changed dimension when the trip ends (`tell_mods_changed_dimension`).
+    pub(super) left: Option<Dim>,
 }
 
 /// A vehicle a player rides: an animal, a boat or a minecart. It travels
@@ -99,6 +102,16 @@ impl Rideable for minecarts::Minecart {
 
 /// The vehicle `id` leaves the level it is in, at the point its rider
 /// arrives. It keeps its entity id, so the ride is never broken.
+/// A guest leaving for another level leaves its fishing hook behind in the
+/// old one, where vanilla's hook stays until its distance check ends it. A
+/// guest's hook lives on the guest here, so it ends now: it must not act on
+/// the blocks of the level the guest arrives in.
+fn drop_hook(host: &mut LanHost, conn: u32) {
+    if let Some(play) = host.play.get_mut(&conn) {
+        play.hook = None;
+    }
+}
+
 fn take_vehicle<T: Rideable>(list: &mut Vec<T>, id: u32, at: Vec3, yaw: f32) -> Option<T> {
     let i = list.iter().position(|v| v.id() == id)?;
     let mut v = list.remove(i);
@@ -126,6 +139,13 @@ impl Trip {
 }
 
 impl Game<'_> {
+    pub(super) fn gateway_source_chunks(&self) -> Vec<(i32, i32)> {
+        self.server_trips
+            .iter()
+            .filter(|t| t.dim == self.dim)
+            .filter_map(|t| t.gateway.and_then(GatewayJob::source_chunk))
+            .collect()
+    }
     /// Whether `conn` is between two levels: the server leaves its body
     /// alone until it arrives.
     pub(super) fn on_server_trip(&self, conn: u32) -> bool {
@@ -330,6 +350,9 @@ impl Game<'_> {
         let Some(i) = host.hub.guests.iter().position(|g| g.conn == conn) else {
             return;
         };
+        if target != self.dim {
+            drop_hook(host, conn);
+        }
         let g = &host.hub.guests[i];
         let from = Vec3::new(g.position[0], g.position[1], g.position[2]);
         let yaw = g.yaw;
@@ -394,6 +417,7 @@ impl Game<'_> {
             world_spawn: false,
             finder: None,
             placed: false,
+            left: Some(source),
         });
         if let Err(e) = self.enter_level(Some(host), source) {
             log::error!("could not reopen {}: {e}", source.id());
@@ -417,13 +441,14 @@ impl Game<'_> {
             world_spawn: false,
             finder: None,
             placed: false,
+            left: None,
         });
     }
 
     /// `findRespawnAndUseSpawnBlock` for the player in place, at its point
     /// in the level in place: where it stands up, facing the anchor (with
-    /// the deplete sound) or the bed; else the point is forgotten
-    /// (`block.minecraft.spawn.not_valid`).
+    /// the deplete sound) or the bed; else the point is forgotten, and the
+    /// caller tells the player (`Hub::missing_respawn_block`).
     pub(super) fn resolve_server_respawn(&mut self, config: RespawnConfig) -> Option<(Vec3, f32)> {
         let [x, y, z] = config.pos;
         let anchor = self.is_anchor(self.world.block(x, y, z));
@@ -442,7 +467,6 @@ impl Game<'_> {
             }
             Ok(None) | Err(_) => {
                 self.respawn_config = None;
-                self.system_message(Text::translate("block.minecraft.spawn.not_valid", &[]));
                 None
             }
         }
@@ -469,6 +493,7 @@ impl Game<'_> {
             world_spawn: true,
             finder: None,
             placed: false,
+            left: None,
         });
     }
 
@@ -517,6 +542,7 @@ impl Game<'_> {
             world_spawn: false,
             finder: None,
             placed: false,
+            left: None,
         });
     }
 
@@ -538,12 +564,17 @@ impl Game<'_> {
             );
             if trip.dim != self.dim
                 || !(-2..=2).all(|dz| (-2..=2).all(|dx| self.streaming.is_lit(cx + dx, cz + dz)))
+                || trip
+                    .gateway
+                    .and_then(GatewayJob::source_chunk)
+                    .is_some_and(|c| !self.world.chunks.contains_key(&c))
             {
                 k += 1;
                 continue;
             }
             let mut trip = self.server_trips.remove(k);
             if trip.placed {
+                self.tell_mods_changed_dimension(host, trip.conn, trip.left, trip.dim);
                 continue;
             }
             // A portal's trip (`start_server_trip`): its client waits to land.
@@ -554,7 +585,15 @@ impl Game<'_> {
                 match self.as_guest(host, trip.conn, |g| g.resolve_server_respawn(config)) {
                     Some(Some(found)) => found,
                     _ => {
+                        host.hub.missing_respawn_block(trip.conn);
                         self.respawn_at_world_spawn(host, trip.conn);
+                        // The move to the world spawn ends the player's move
+                        // from the level they left.
+                        if let Some(left) = trip.left
+                            && let Some(t) = self.server_trips.iter_mut().find(|t| t.is(trip.conn))
+                        {
+                            t.left = Some(left);
+                        }
                         continue;
                     }
                 }
@@ -565,7 +604,10 @@ impl Game<'_> {
                 match self.search_spawn(suggestion, &mut trip.finder) {
                     // The respawn already put the player on this column:
                     // vanilla teleports once, so no second move.
-                    Ok(at) if host.hub.guests[i].position == [at.x, at.y, at.z] => continue,
+                    Ok(at) if host.hub.guests[i].position == [at.x, at.y, at.z] => {
+                        self.tell_mods_changed_dimension(host, trip.conn, trip.left, trip.dim);
+                        continue;
+                    }
                     Ok(at) => (at, yaw),
                     Err(chunk) => {
                         self.spawn_wait.push(chunk);
@@ -590,7 +632,11 @@ impl Game<'_> {
                     None => self.end_arrival(trip.target, &mut trip.finder),
                 };
                 match arrival {
-                    Ok(Some((at, turned))) => (at, turned.unwrap_or(yaw)),
+                    Ok(Some((at, turned))) => {
+                        // EndPortalBlock.getPortalDestination: PLACE_PORTAL_TICKET.
+                        self.place_portal_ticket(Self::chunk_of(at));
+                        (at, turned.unwrap_or(yaw))
+                    }
                     Ok(None) => {
                         self.server_trips.insert(k, trip);
                         k += 1;
@@ -632,6 +678,7 @@ impl Game<'_> {
             } else {
                 host.hub.teleport(i, Some(at));
             }
+            self.tell_mods_changed_dimension(host, trip.conn, trip.left, trip.dim);
         }
     }
 
@@ -670,6 +717,9 @@ impl Game<'_> {
                 continue;
             };
             let source = self.dim;
+            if t.dim != source {
+                drop_hook(host, t.conn);
+            }
             if let Err(e) = self.enter_level(Some(host), t.dim) {
                 log::error!("could not open {}: {e}", t.dim.id());
                 continue;
@@ -700,11 +750,34 @@ impl Game<'_> {
                 world_spawn: false,
                 finder: None,
                 placed: true,
+                left: Some(source),
             });
             if let Err(e) = self.enter_level(Some(host), source) {
                 log::error!("could not reopen {}: {e}", source.id());
             }
         }
+    }
+
+    /// `native_player_changed_dimension` for a guest who has ended a move
+    /// from the level `left` to the one in place, `to`, with their state
+    /// swapped in so that the helpers reach them. Nothing is heard when they
+    /// did not leave a level, or ended where they started.
+    pub(super) fn tell_mods_changed_dimension(
+        &mut self,
+        host: &mut LanHost,
+        conn: u32,
+        left: Option<Dim>,
+        to: Dim,
+    ) {
+        let Some(from) = left.filter(|from| *from != to) else {
+            return;
+        };
+        let Some((uuid, name)) = host.hub.guest(conn).map(|g| (g.uuid, g.name.clone())) else {
+            return;
+        };
+        self.as_guest(host, conn, |g| {
+            g.native_player_changed_dimension(uuid, &name, from.id(), to.id());
+        });
     }
 
     /// The hub's view of the server for packets sent outside its own tick.
@@ -725,6 +798,7 @@ impl Game<'_> {
             tick_steps: self.clock.step_state(),
             collision: Some(self.collision),
             border: &self.border,
+            streaming: Some(&self.streaming),
         }
     }
 }

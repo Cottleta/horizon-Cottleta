@@ -188,14 +188,18 @@ impl Poses {
     /// and every equipment layer each frame.
     pub fn reset(&mut self, model: &Part) {
         fn walk(p: &Part, table: &mut PoseTable) {
-            let entry = PoseEntry {
-                generation: table.generation,
-                present: true,
-                pose: p.pose,
-                skipped: false,
-                hidden: false,
-            };
-            table.set(p.id, entry);
+            // ModelPart.createPartLookup fills its map with putIfAbsent: the first
+            // part of a name keeps it.
+            if table.current(p.id).is_none() {
+                let entry = PoseEntry {
+                    generation: table.generation,
+                    present: true,
+                    pose: p.pose,
+                    skipped: false,
+                    hidden: false,
+                };
+                table.set(p.id, entry);
+            }
             for c in &p.children {
                 walk(c, table);
             }
@@ -268,6 +272,10 @@ impl Poses {
     pub fn skips(&self, part: &Part) -> bool {
         self.table.current(part.id).is_some_and(|e| e.skipped)
     }
+    /// `skips` by the part's name.
+    pub fn skips_named(&self, name: &str) -> bool {
+        self.entry(name).is_some_and(|e| e.skipped)
+    }
     pub fn has(&self, name: &str) -> bool {
         self.entry(name).is_some_and(|e| e.present)
     }
@@ -290,6 +298,10 @@ impl Poses {
     }
     pub fn is_hidden(&self, part: &Part) -> bool {
         self.table.current(part.id).is_some_and(|e| e.hidden)
+    }
+    /// `is_hidden` by the part's name.
+    pub fn is_hidden_named(&self, name: &str) -> bool {
+        self.entry(name).is_some_and(|e| e.hidden)
     }
     /// Poses for the named parts, all zero (tests).
     #[cfg(test)]
@@ -323,6 +335,10 @@ pub struct State {
     pub baby: bool,
     pub partial: f32,
 }
+/// `WalkAnimationState.position(partial)`: babies' legs move 3 times as far.
+pub fn walk_position(m: &Mob, alpha: f32) -> f32 {
+    (m.limb_position - m.limb_speed * (1.0 - alpha)) * if m.is_baby() { 3.0 } else { 1.0 }
+}
 pub fn state(m: &Mob, alpha: f32) -> State {
     let body = m.previous_body_yaw + wrap(m.body_yaw - m.previous_body_yaw) * alpha;
     let head = m.previous_head_yaw + wrap(m.head_yaw - m.previous_head_yaw) * alpha;
@@ -335,8 +351,7 @@ pub fn state(m: &Mob, alpha: f32) -> State {
     let walking = m.alive() && !m.extra.passenger;
     State {
         pos: if walking {
-            // WalkAnimationState.position(partial): babies' legs move 3 times as far.
-            (m.limb_position - m.limb_speed * (1.0 - alpha)) * if m.is_baby() { 3.0 } else { 1.0 }
+            walk_position(m, alpha)
         } else {
             0.0
         },
@@ -382,12 +397,20 @@ pub enum ArmPose {
     CrossbowCharge,
     /// Raising a trident to throw it (or to launch with Riptide).
     ThrowTrident,
+    /// Playing a goat horn.
+    TootHorn,
     /// A spear held out (`HumanoidModel.ArmPose.SPEAR`), at rest or charging.
     Spear,
+    /// A brush being used (`HumanoidModel.ArmPose.BRUSH`).
+    Brush,
 }
 /// HumanoidModel.setupAnim with empty hands (endermen).
-pub fn humanoid_pub(p: &mut Poses, s: &State, _m: &Mob) {
-    humanoid(p, s, &Hum::new(ArmPose::Empty, ArmPose::Empty));
+/// Passes `isPassenger` so a seated enderman keeps the humanoid riding pose
+/// (vanilla EndermanModel.setupAnim calls super first, then halves/clamps xRot).
+pub fn humanoid_pub(p: &mut Poses, s: &State, m: &Mob) {
+    let mut h = Hum::new(ArmPose::Empty, ArmPose::Empty);
+    h.passenger = m.extra.passenger;
+    humanoid(p, s, &h);
 }
 /// `AnimationUtils.swingWeaponDown`: the main arm swings down, the other
 /// one hangs and bobs.
@@ -516,6 +539,12 @@ fn pose_arm(p: &mut Poses, pose: ArmPose, right: bool, h: &Hum) {
             p.xrot(arm, x * 0.5 - PI / 10.0);
             p.yrot(arm, 0.0);
         }
+        // Vanilla's BRUSH case: the ITEM pose with twice the drop.
+        ArmPose::Brush => {
+            let x = p.get(arm)[3];
+            p.xrot(arm, x * 0.5 - PI / 5.0);
+            p.yrot(arm, 0.0);
+        }
         ArmPose::Block => {
             let x = p.get(arm)[3] * 0.5 - 0.942_477_9 + hx.clamp(-1.396_263_4, 0.436_332_32);
             p.xrot(arm, x);
@@ -534,6 +563,10 @@ fn pose_arm(p: &mut Poses, pose: ArmPose, right: bool, h: &Hum) {
             let x = p.get(arm)[3];
             p.xrot(arm, x * 0.5 - PI);
             p.yrot(arm, 0.0);
+        }
+        ArmPose::TootHorn => {
+            p.xrot(arm, hx.clamp(-1.2, 1.2) - 1.483_529_8);
+            p.yrot(arm, hy + if right { -FRAC_PI_6 } else { FRAC_PI_6 });
         }
         ArmPose::CrossbowHold => crossbow_hold(p, hx, hy, right),
         ArmPose::CrossbowCharge => crossbow_charge(p, h.charge.0, h.charge.1, right),
@@ -899,6 +932,7 @@ pub fn setup(
                 ArmPose::Empty
             };
             let using_main = m.extra.using_item > 0 && !m.extra.using_off_hand;
+            let using_off = m.extra.using_item > 0 && m.extra.using_off_hand;
             // AvatarRenderer.getArmPose: an arm holding a spear (at rest too).
             let spear_in = |hand: &Option<std::sync::Arc<str>>| {
                 hand.as_deref()
@@ -912,12 +946,14 @@ pub fn setup(
                     Some(_) if using_main && m.extra.blocking => ArmPose::Block,
                     Some("minecraft:bow") if using_main => ArmPose::Bow,
                     Some("minecraft:trident") if using_main => ArmPose::ThrowTrident,
+                    Some("minecraft:goat_horn") if using_main => ArmPose::TootHorn,
                     Some("minecraft:crossbow") if using_main && !m.extra.charged => {
                         ArmPose::CrossbowCharge
                     }
                     Some("minecraft:crossbow") if m.extra.charged && s.swing == 0.0 => {
                         ArmPose::CrossbowHold
                     }
+                    Some("minecraft:brush") if using_main => ArmPose::Brush,
                     Some(_) if main_spear.is_some() => ArmPose::Spear,
                     Some(_) => ArmPose::Item,
                     None => ArmPose::Empty,
@@ -928,8 +964,12 @@ pub fn setup(
             let off = if player && m.extra.off_hand.is_some() && !pose.affects_offhand() {
                 if off_spear.is_some() {
                     ArmPose::Spear
-                } else if m.extra.using_item > 0 && m.extra.using_off_hand && m.extra.blocking {
+                } else if using_off && m.extra.blocking {
                     ArmPose::Block
+                } else if using_off && m.extra.off_hand.as_deref() == Some("minecraft:goat_horn") {
+                    ArmPose::TootHorn
+                } else if using_off && m.extra.off_hand.as_deref() == Some("minecraft:brush") {
+                    ArmPose::Brush
                 } else {
                     ArmPose::Item
                 }
@@ -968,18 +1008,7 @@ pub fn setup(
             }
             humanoid(p, s, &h);
             if player {
-                // PlayerModel.setupAnim: the layers the player hid (PlayerModelPart).
-                let hidden = m.extra.hidden_model_parts;
-                for (bit, part) in [
-                    (1, "jacket"),
-                    (2, "left_sleeve"),
-                    (3, "right_sleeve"),
-                    (4, "left_pants"),
-                    (5, "right_pants"),
-                    (6, "hat"),
-                ] {
-                    p.visible(part, hidden & (1 << bit) == 0);
-                }
+                player_model_visibility(p, m.extra.hidden_model_parts, m.extra.spectator);
             }
             if m.ai.aggressive && !bow {
                 // SkeletonModel melee pose.
@@ -994,6 +1023,10 @@ pub fn setup(
                 p.xrot("left_arm", -PI / 2.0 - (s2 * 1.2 - s1 * 0.4));
                 bob(p, "right_arm", s.age, 1.0);
                 bob(p, "left_arm", s.age, -1.0);
+            }
+            // BoggedModel.setupAnim: the mushrooms on the head come off once sheared.
+            if m.species() == super::Species::Bogged {
+                p.visible("mushrooms", !m.extra.sheared);
             }
         }
         Anim::Witch => super::witch::anim(m, s, p),
@@ -1015,6 +1048,11 @@ pub fn setup(
                 for part in ["left_chest", "right_chest"] {
                     p.visible(part, false);
                 }
+            }
+            // EquineSaddleModel.setupAnim: the reins show only while ridden
+            // (`isRidden` is `Entity.isVehicle`: a player or a mob rides it).
+            for part in ["left_saddle_line", "right_saddle_line"] {
+                p.visible(part, m.rider.is_some() || m.extra.rider.is_some());
             }
         }
         Anim::Hoglin => super::piglin::hoglin_anim(m, s, p),
@@ -1069,12 +1107,51 @@ pub fn setup(
     }
 }
 
+/// `PlayerModel.setupAnim`'s visibility: a spectator shows only its head (`showBody`), and the
+/// skin layers the player hid (`PlayerModelPart`, bit set = hidden) are off.
+fn player_model_visibility(p: &mut Poses, hidden: u8, spectator: bool) {
+    for part in ["body", "right_arm", "left_arm", "right_leg", "left_leg"] {
+        p.visible(part, !spectator);
+    }
+    for (bit, part) in [
+        (1, "jacket"),
+        (2, "left_sleeve"),
+        (3, "right_sleeve"),
+        (4, "left_pants"),
+        (5, "right_pants"),
+        (6, "hat"),
+    ] {
+        p.visible(part, hidden & (1 << bit) == 0);
+    }
+}
 #[cfg(test)]
 mod flight_pose_tests {
     use super::*;
     use horizon_core::geometry::Vec3;
     use std::sync::Arc;
 
+    #[test]
+    fn spectators_show_only_the_head_and_its_hat() {
+        let mut p = Poses::with_names(&[
+                "head",
+                "hat",
+                "body",
+                "jacket",
+                "right_arm",
+                "left_arm",
+                "right_leg",
+                "left_leg",
+            ]);
+        player_model_visibility(&mut p, 0, true);
+        for part in ["body", "right_arm", "left_arm", "right_leg", "left_leg"] {
+            assert!(p.is_hidden_named(part), "{part}");
+        }
+        assert!(!p.is_hidden_named("head") && !p.is_hidden_named("hat"));
+        // Back in another mode they all show, but for the layers the player hid.
+        player_model_visibility(&mut p, 1 << 6, false);
+        assert!(!p.is_hidden_named("body") && !p.is_hidden_named("left_leg"));
+        assert!(p.is_hidden_named("hat"));
+    }
     #[test]
     fn blocking_arm_follows_the_head_with_limits_in_both_hands() {
         for right in [false, true] {
@@ -1102,6 +1179,64 @@ mod flight_pose_tests {
             }
         }
     }
+    /// EndermanModel.setupAnim (#4565): humanoid_pub forwards isPassenger so the
+    /// riding leg y/z survive; only xRot is halved and clamped to ±0.4 after.
+    #[test]
+    fn a_seated_enderman_keeps_the_riding_leg_twist() {
+        use super::super::enderman;
+        use super::super::{Mob, Species};
+        use horizon_core::geometry::Vec3;
+        use std::sync::Arc;
+        let mut kind = (*crate::mobs::sensor_scan_tests::kind()).clone();
+        kind.species = Species::Enderman;
+        let mut seated = Mob::new(1, Arc::new(kind), Vec3::ZERO, 0.0);
+        seated.extra.passenger = true;
+        let state = State {
+            pos: 0.0,
+            speed: 0.0,
+            age: 0.0,
+            y_rot: 0.0,
+            x_rot: 0.0,
+            swing: 0.0,
+            baby: false,
+            partial: 0.0,
+        };
+        let mut poses = Poses::with_names(&[
+                "head",
+                "hat",
+                "body",
+                "right_arm",
+                "left_arm",
+                "right_leg",
+                "left_leg",
+            ]);
+        enderman::anim(&seated, &state, &mut poses);
+        let right = *poses.get("right_leg");
+        let left = *poses.get("left_leg");
+        assert!((right[3] - (-0.4)).abs() < 1e-5, "right xRot {}", right[3]);
+        assert!((left[3] - (-0.4)).abs() < 1e-5, "left xRot {}", left[3]);
+        assert!(
+            (right[4] - PI / 10.0).abs() < 1e-5,
+            "right yRot {}",
+            right[4]
+        );
+        assert!(
+            (left[4] - (-PI / 10.0)).abs() < 1e-5,
+            "left yRot {}",
+            left[4]
+        );
+        assert!(
+            (right[5] - 0.078_539_82).abs() < 1e-5,
+            "right zRot {}",
+            right[5]
+        );
+        assert!(
+            (left[5] - (-0.078_539_82)).abs() < 1e-5,
+            "left zRot {}",
+            left[5]
+        );
+    }
+
     #[test]
     fn flight_slows_limbs_and_sets_the_head_pose() {
         let state = State {
@@ -1218,6 +1353,19 @@ mod flight_pose_tests {
         assert_eq!(dry.get("head")[3], 30.0f32.to_radians());
     }
 
+    #[test]
+    fn walk_position_triples_for_babies() {
+        // WalkAnimationState.position(partial) = (position - speed * (1 - partial)) * scale.
+        let mut m = player();
+        m.limb_position = 2.0;
+        m.limb_speed = 0.5;
+        assert!(!m.is_baby());
+        assert_eq!(walk_position(&m, 0.5), 1.75);
+        m.extra.age = -100;
+        assert!(m.is_baby());
+        assert_eq!(walk_position(&m, 0.5), 5.25);
+    }
+
     /// A player: a humanoid model with a shield in its main hand.
     fn player() -> Mob {
         let mut kind = crate::mobs::sensor_scan_tests::kind();
@@ -1258,5 +1406,77 @@ mod flight_pose_tests {
         let mut p = Poses::with_names(&["head", "right_arm", "left_arm"]);
         setup(&m, &state, &mut p, &HashMap::new());
         assert!((p.get("right_arm")[3] + PI / 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_brush_being_used_sweeps_the_arm_lower_than_a_plain_item() {
+        // AvatarRenderer.getArmPose: a brush being used is the BRUSH pose, and
+        // HumanoidModel.poseRightArm drops that arm twice as far as ITEM
+        // (#4273: brushing had no third-person arm pose at all).
+        let state = State {
+            pos: 0.0,
+            speed: 0.0,
+            age: 0.0,
+            y_rot: 0.0,
+            x_rot: 0.0,
+            swing: 0.0,
+            baby: false,
+            partial: 0.0,
+        };
+        let make = || Poses::with_names(&["head", "right_arm", "left_arm"]);
+        let mut m = player();
+        m.extra.main_hand = Some("minecraft:brush".into());
+        m.extra.using_item = 20;
+        let mut p = make();
+        setup(&m, &state, &mut p, &HashMap::new());
+        // HumanoidModel.setupAnim's BRUSH pose.
+        assert!((p.get("right_arm")[3] + PI / 5.0).abs() < 1e-6);
+        assert_eq!(p.get("right_arm")[4], 0.0);
+        // An item with no use animation keeps the ITEM pose: BRUSH cannot leak.
+        let mut m = player();
+        m.extra.main_hand = Some("minecraft:stick".into());
+        m.extra.using_item = 20;
+        let mut p = make();
+        setup(&m, &state, &mut p, &HashMap::new());
+        assert!((p.get("right_arm")[3] + PI / 10.0).abs() < 1e-6);
+        assert_eq!(p.get("right_arm")[4], 0.0);
+        // AvatarRenderer.getArmPose builds the pose per hand: brushing with the
+        // brush in the off hand is BRUSH on the left arm, and the main hand
+        // keeps its ITEM pose (the two must not swap).
+        let mut m = player();
+        m.extra.main_hand = Some("minecraft:stick".into());
+        m.extra.off_hand = Some("minecraft:brush".into());
+        m.extra.using_item = 20;
+        m.extra.using_off_hand = true;
+        let mut p = make();
+        setup(&m, &state, &mut p, &HashMap::new());
+        assert!((p.get("left_arm")[3] + PI / 5.0).abs() < 1e-6);
+        assert_eq!(p.get("left_arm")[4], 0.0);
+        assert!((p.get("right_arm")[3] + PI / 10.0).abs() < 1e-6);
+        assert_eq!(p.get("right_arm")[4], 0.0);
+    }
+
+    /// ModelPart.createPartLookup fills the name map with putIfAbsent, so of two
+    /// parts sharing a name the first registered keeps it, not the last.
+    #[test]
+    fn a_name_two_parts_share_belongs_to_the_first() {
+        let child = |xrot: f32| Part {
+            id: crate::mobs::part_id("leg"),
+            uid: crate::mobs::new_part_uid(),
+            name: "leg".into(),
+            pose: [0.0, 0.0, 0.0, xrot, 0.0, 0.0, 1.0, 1.0, 1.0],
+            polygons: Vec::new(),
+            children: Vec::new(),
+        };
+        let root = Part {
+            id: crate::mobs::part_id("root"),
+            uid: crate::mobs::new_part_uid(),
+            name: "root".into(),
+            pose: [0.0; 9],
+            polygons: Vec::new(),
+            children: vec![child(0.5), child(-0.5)],
+        };
+        let mut p = Poses::new(&root);
+        assert_eq!(p.get("leg")[3], 0.5);
     }
 }

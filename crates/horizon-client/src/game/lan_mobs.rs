@@ -95,7 +95,9 @@ pub(super) fn acts_on_player(e: &MobEvent) -> bool {
     matches!(
         e,
         MobEvent::AttackPlayer(..)
+            | MobEvent::CubeHurtPlayer { .. }
             | MobEvent::AttackPlayerWithEffect { .. }
+            | MobEvent::StingPlayer { .. }
             | MobEvent::DamagePlayer { .. }
             | MobEvent::SonicBoom {
                 target: Who::Player,
@@ -223,6 +225,20 @@ impl Game<'_> {
                 ([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z])
             })
             .collect()
+    }
+    /// The same guests' cast fishing hooks, for `GameLevel::trigger_projectiles`.
+    pub(super) fn lan_hook_triggers(&self, out: &mut Vec<(Aabb, bool)>) {
+        let Some(host) = self.lan.as_ref() else {
+            return;
+        };
+        out.extend(
+            host.hub
+                .guests
+                .iter()
+                .filter(|g| host.hub.here(g) && g.loaded && !g.dead && !g.spectator())
+                .filter_map(|g| host.play.get(&g.conn)?.hook.as_ref())
+                .map(|hook| (hook.bounds(), hook.applies_block_effects())),
+        );
     }
     /// The same guests' feet and whether they stand on the ground, for the
     /// blocks that also ask that (`BigDripleafBlock.canEntityTilt`).
@@ -440,6 +456,7 @@ mod tests {
             sleeping: false,
             sleep_timer: 0,
             passenger: false,
+            vehicle: None,
         }
     }
 

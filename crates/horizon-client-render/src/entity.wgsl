@@ -22,7 +22,15 @@ struct Globals {
     outline_params: vec4<f32>,
     // Horizon Extras' dynamic lights: camera-relative position and level (dynamic_light.rs).
     dynamic_lights: array<vec4<f32>, 16>,
+    colored_lights: array<vec4<f32>, 32>,
+    colored_count: vec4<u32>,
+    emissive_layers: array<vec4<u32>, 128>,
+    emissive_count: vec4<u32>,
     sunrise_fan: array<vec4<f32>, 32>,
+    filtering: vec4<f32>,
+    // HDR output's tier windows (hdr.rs `Hdr::windows`): x..w low to very bright,
+    // [0] where the lift starts, [1] where it is full.
+    hdr_windows: array<vec4<f32>, 2>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
@@ -53,7 +61,8 @@ struct Out {
     @location(9) light_color: vec4<f32>,
     @location(10) @interpolate(flat) weather_rect: vec4<f32>,
     // The `GLINT_TEXTURING` sample for overlay 7 (item foil), or the model UV
-    // `ARMOR_ENTITY_GLINT_TEXTURING` scrolls for overlay 36 (armour).
+    // `ARMOR_ENTITY_GLINT_TEXTURING` scrolls for overlay 36 (armour), or the
+    // dissolve mask's atlas UV for overlay 38.
     @location(11) glint_uv: vec2<f32>,
     // 1 drops the quad's back-facing pixels (Vertex::normal w = 1), like a culling render type.
     @location(12) @interpolate(flat) cull: u32,
@@ -89,6 +98,15 @@ fn dynamic_block_light(pos: vec3<f32>) -> f32 {
     }
     return level * 16.0;
 }
+fn native_colored_light(pos: vec3<f32>) -> vec3<f32> {
+    var rgb = vec3(0.0);
+    for (var i = 0u; i < min(globals.colored_count.x, 16u); i++) {
+        let at = globals.colored_lights[i * 2u];
+        let color = globals.colored_lights[i * 2u + 1u];
+        rgb += color.rgb * max(0.0, 1.0 - distance(pos, at.xyz) / at.w) * color.a;
+    }
+    return min(rgb, vec3(1.0));
+}
 fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     overlay: u32, color: vec4<f32>, light: vec4<u32>, normal: vec4<f32>) -> Out {
     var out: Out;
@@ -102,6 +120,9 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     let unlit = overlay == 2u || overlay == 4u || overlay == 6u || overlay == 9u || overlay == 10u
         || overlay == 11u || overlay == 12u;
     out.light_color = select(lm, vec4(1.0), unlit);
+    if globals.colored_count.x > 0u && !unlit {
+        out.light_color = vec4(min(out.light_color.rgb + native_colored_light(position), vec3(1.0)), out.light_color.a);
+    }
     // Overlay 6 (beacon beams): the light bytes carry the sprite's v range; 11 and 12
     // (cracks): the destroy stage sprite's origin.
     out.wrap = vec2(f32(light.x | (light.y << 8u)), f32(light.z | (light.w << 8u))) / 65535.0;
@@ -131,7 +152,7 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     @location(5) normal: vec4<f32>, @location(6) glint_uv: vec2<f32>) -> Out {
     var out = entity_vertex(position, uv, overlay & 0xffffu, color, light, normal);
     out.glint_uv = glint_uv;
-    out.tier = overlay >> 16u;
+    out.tier = (overlay >> 16u) & 0xffu;
     return out;
 }
 // The sun and moon after solid terrain (gfx.rs late sky): at the far plane, behind it.
@@ -150,7 +171,9 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
 @vertex fn vs_lightning(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>,
     @location(2) overlay: u32, @location(3) color: vec4<f32>, @location(4) light: vec4<u32>, @location(5) normal: vec4<f32>,
     @location(7) offset: vec3<f32>) -> Out {
-    return entity_vertex(offset + position, uv, overlay, color, light, normal);
+    var out = entity_vertex(offset + position, uv, overlay & 0xffffu, color, light, normal);
+    out.tier = (overlay >> 16u) & 0xffu;
+    return out;
 }
 struct CloudInfo {
     offset: vec4<f32>,
@@ -234,13 +257,24 @@ fn crumbling_uv(uv: vec2<f32>, packed_origin: vec2<f32>, sprite_size: vec2<f32>,
 }
 // CRUMBLING_UV_END
 @fragment fn fs_entity(in: Out, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return entity_color(in, front);
+}
+fn entity_color(in: Out, front: bool) -> vec4<f32> {
     var uv = in.uv;
     if in.overlay == 6u { uv.y = in.wrap.x + fract(in.uv.y) * in.wrap.y; }
     if in.overlay == 11u || in.overlay == 12u {
         // Each crack's stage sprite origin comes in its light bytes (breaking::stage_light).
         uv = crumbling_uv(in.uv, in.wrap, globals.crumbling_sprite.zw, textureDimensions(atlas));
     }
-    var color = textureSample(atlas, atlas_sampler, uv) * select(in.back_color, in.color, front);
+    let texel = textureSample(atlas, atlas_sampler, uv);
+    var tint = select(in.back_color, in.color, front);
+    if in.overlay == 38u {
+        // RenderPipelines.ENTITY_CUTOUT_DISSOLVE (entity.fsh's DISSOLVE): gone where the vertex
+        // alpha is below the mask's (its atlas UV in glint_uv), the rest drawn opaque.
+        if tint.a < textureSampleLevel(atlas, atlas_sampler, in.glint_uv, 0.0).a { discard; }
+        tint.a = 1.0;
+    }
+    var color = texel * tint;
     if in.overlay == 9u || in.overlay == 10u {
         // rendertype_end_portal: end_sky and PORTAL_LAYERS (15 for portals, 16
         // for gateways) layers of end_portal.png projected from the screen.
@@ -281,6 +315,9 @@ fn crumbling_uv(uv: vec2<f32>, packed_origin: vec2<f32>, sprite_size: vec2<f32>,
 // rendertype_entity_shadow.fsh: the shadow texture times the vertex colour,
 // then fog, with no alpha cutout, so a faint shadow in dim light still draws.
 @fragment fn fs_entity_shadow(in: Out) -> @location(0) vec4<f32> {
+    return shadow_color(in);
+}
+fn shadow_color(in: Out) -> vec4<f32> {
     var color = textureSample(atlas, atlas_sampler, in.uv) * in.color;
     color *= in.light_color;
     let f = max(linear_fog(in.spherical, globals.fog.x, globals.fog.y),
@@ -297,11 +334,41 @@ fn crumbling_uv(uv: vec2<f32>, packed_origin: vec2<f32>, sprite_size: vec2<f32>,
 // way terrain.wgsl marks a light source's, drawn again after the entities with
 // only alpha written, so its colour stays as blended.
 @fragment fn fs_hdr_mark(in: Out) -> @location(0) vec4<f32> {
-    if in.tier == 0u || textureSample(atlas, atlas_sampler, in.uv).a < 0.1 { discard; }
-    return vec4(0.0, 0.0, 0.0, 0.7 * f32(4u - min(in.tier, 4u)) / 4.0);
+    // Beams wrap their v in the sprite as fs_entity does: sample where they draw.
+    var uv = in.uv;
+    if in.overlay == 6u { uv.y = in.wrap.x + fract(in.uv.y) * in.wrap.y; }
+    let texel = textureSample(atlas, atlas_sampler, uv);
+    if in.tier == 0u || texel.a < 0.1 { discard; }
+    return vec4(0.0, 0.0, 0.0, hdr_mark(in.tier, brightness(texel.rgb * in.color.rgb)));
+}
+fn brightness(c: vec3<f32>) -> f32 {
+    let l = pow(max(c, vec3(0.0)), vec3(2.2));
+    return 0.5 * (dot(l, vec3(0.2126, 0.7152, 0.0722)) + max(l.r, max(l.g, l.b)));
+}
+// HDR output's mark (hdr.wgsl): the frame's alpha below 0.75, a band of 0.175 per
+// tier (1 low .. 4 very bright, from 0.525 down to 0) and in it how much the pixel
+// lifts, from its own brightness `y` before lighting through the tier's window.
+fn hdr_mark(tier: u32, y: f32) -> f32 {
+    let t = clamp(tier, 1u, 4u) - 1u;
+    let lift = smoothstep(globals.hdr_windows[0][t], globals.hdr_windows[1][t], y);
+    return 0.175 * f32(3u - t) + 0.165 * (1.0 - lift);
+}
+
+// The hand in HDR output (gfx.rs "HDR hand marks"): where it drew, what the world kept there
+// no longer shines; fs_hdr_mark then marks the light sources it holds.
+@fragment fn fs_hdr_hand_unmark(in: Out) -> @location(0) vec4<f32> {
+    if textureSample(atlas, atlas_sampler, in.uv).a < 0.1 { discard; }
+    return vec4(0.0, 0.0, 0.0, 1.0);
 }
 
 fn celestial_color(in: Out) -> vec4<f32> {
+    // RenderPipelines.DRAGON_RAYS / rendertype_lightning.fsh: untextured
+    // vertex colour, with fog fading both RGB and alpha before additive blending.
+    if in.overlay == 37u {
+        let fog = max(linear_fog(in.spherical, globals.fog.x, globals.fog.y),
+                      linear_fog(in.cylindrical, globals.fog.z, globals.fog.w));
+        return in.color * (1.0 - fog);
+    }
     return textureSample(atlas, atlas_sampler, in.uv) * in.color * in.light_color;
 }
 @fragment fn fs_celestial(in: Out) -> @location(0) vec4<f32> {
@@ -309,28 +376,38 @@ fn celestial_color(in: Out) -> vec4<f32> {
 }
 
 // The sky's celestial pass (sun, moon, the End sky): fs_celestial's light,
-// premultiplied for an additive (one, one) blend, and as alpha how much of it
-// the texel adds, which the blend takes off the frame's alpha. HDR output
-// (hdr.wgsl) lifts only where that left it low: the sun's and moon's discs, not
-// the dark rest of their quads or the dim End sky.
+// premultiplied for an additive (one, one) blend. Where a texel adds light, its
+// alpha leaves the sky's 1 at HDR output's mark (hdr_mark) for the brightest
+// tier, so the sun's and moon's discs shine; the dark rest of their quads and
+// the dim End sky stay unmarked.
 @fragment fn fs_sky_celestial(in: Out) -> @location(0) vec4<f32> {
     let color = celestial_color(in);
     let added = color.rgb * color.a;
-    return vec4(added, smoothstep(0.1, 0.3, max(added.r, max(added.g, added.b))));
+    // The sun at the brightest tier, the moon at its own (in.tier); geometry that sets
+    // none (the End sky, the End flash) stays brightest.
+    let keep = 1.0 - hdr_mark(select(in.tier, 4u, in.tier == 0u), brightness(added));
+    return vec4(added, keep * smoothstep(0.1, 0.3, max(added.r, max(added.g, added.b))));
 }
 
 // RenderPipelines.ENERGY_SWIRL (entity.fsh with EMISSIVE and NO_OVERLAY): the sprite, scrolled by
 // the UV and repeated within itself, times the layer colour 0xFF808080, unlit; the pipeline adds
 // it to the frame. The light bytes carry the sprite's origin and the colour bytes its size, both
 // as breaking::stage_light packs them.
-@fragment fn fs_energy_swirl(in: Out) -> @location(0) vec4<f32> {
+fn energy_swirl_base(in: Out) -> vec4<f32> {
     let bytes = round(in.color * 255.0);
     let size = vec2(bytes.x + bytes.y * 256.0, bytes.z + bytes.w * 256.0) / 65535.0;
     let color = textureSample(atlas, atlas_sampler, crumbling_uv(in.uv, in.wrap, size, textureDimensions(atlas)));
     if color.a < 0.1 { discard; }
+    return vec4(color.rgb * (128.0 / 255.0), color.a);
+}
+fn energy_swirl_fog(in: Out) -> f32 {
     let f = max(linear_fog(in.spherical, globals.fog.x, globals.fog.y),
                 linear_fog(in.cylindrical, globals.fog.z, globals.fog.w));
-    return vec4(mix(color.rgb * (128.0 / 255.0), globals.fog_color.rgb, f * globals.fog_color.a), color.a);
+    return f * globals.fog_color.a;
+}
+@fragment fn fs_energy_swirl(in: Out) -> @location(0) vec4<f32> {
+    let color = energy_swirl_base(in);
+    return vec4(mix(color.rgb, globals.fog_color.rgb, energy_swirl_fog(in)), color.a);
 }
 
 // RenderPipelines.WATER_MASK: depth only (the pipeline masks the colour off).
@@ -459,6 +536,9 @@ struct WeatherTime { values: vec4<f32> }
     return out;
 }
 @fragment fn fs_weather(in: Out) -> @location(0) vec4<f32> {
+    return weather_color(in);
+}
+fn weather_color(in: Out) -> vec4<f32> {
     // Repeat within this sprite, never across the atlas. The atlas uses nearest
     // filtering and no mipmaps, so fractional UVs have no seam derivatives.
     let texel = weather_texel(in.uv, in.weather_rect, textureDimensions(atlas));

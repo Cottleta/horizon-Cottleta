@@ -11,12 +11,12 @@ ConnectScreen.connect	port	crates/horizon-client/src/net.rs::Session::connect	ba
 ConnectScreen.tick	port	crates/horizon-client/src/game/remote.rs::Game::tick_remote	ticks the pending session while it opens; game.rs tick sends remote sessions here
 ConnectScreen.init	missing		player: no Cancel button while connecting, only the status line; unsure whether Escape aborts the join
 ConnectScreen.extractRenderState	port	crates/horizon-client/src/game/remote.rs::Game::remote_overlay	gap: minor: also draws the address line, vanilla draws only the status
-CreateBuffetWorldScreen.init	missing		minor: the buffet biome picker is not in Horizon's create-world flow
-CreateBuffetWorldScreen.repositionElements	missing		minor: layout of the buffet biome picker, which Horizon lacks
-CreateBuffetWorldScreen.updateButtonValidity	missing		minor: Done needs a biome in the buffet picker, which Horizon lacks
-CreateBuffetWorldScreen.BiomeList.filterEntries	missing		minor: biome search of the buffet picker, which Horizon lacks
-CreateBuffetWorldScreen.BiomeList.setSelected	missing		minor: biome selection of the buffet picker, which Horizon lacks
-CreateBuffetWorldScreen.BiomeList.Entry.extractContent	missing		minor: biome row of the buffet picker, which Horizon lacks
+CreateBuffetWorldScreen.init	port	crates/horizon-client/src/title/buffet.rs::State::new	title, the 200x15 search box, the biome list and the footer's Done and Cancel; the list is drawn each frame
+CreateBuffetWorldScreen.repositionElements	skip:ui		layout only; the list is laid out each frame in buffet.rs::list_area
+CreateBuffetWorldScreen.updateButtonValidity	inline	crates/horizon-client/src/title/buffet.rs::buttons	Done needs a selected biome, that is one the search text still shows
+CreateBuffetWorldScreen.BiomeList.filterEntries	port	crates/horizon-client/src/title/buffet.rs::State::rows	rows sorted by display name; the search text keeps the names that contain it, case-folded; gap: minor: a locale collator's order is approximated by case-folded name then id
+CreateBuffetWorldScreen.BiomeList.setSelected	port	crates/horizon-client/src/title/buffet.rs::click	a press on a row fixes its biome and refreshes Done
+CreateBuffetWorldScreen.BiomeList.Entry.extractContent	port	crates/horizon-client/src/title/buffet.rs::draw	the name at contentX + 5, contentY + 2; gap: minor: the row's highlight is a plain fill
 CreateFlatWorldScreen.setConfig	port	crates/horizon-client/src/title/flat.rs::State::apply_share	applies the preset or typed share text as the layers; gap: minor: the rows are not rebuilt separately
 CreateFlatWorldScreen.init	port	crates/horizon-client/src/title/flat.rs::buttons	Remove Layer, Presets, Done and Cancel buttons
 CreateFlatWorldScreen.repositionElements	skip:ui		layout only; the list is laid out each frame in flat.rs::list_area
@@ -92,8 +92,8 @@ OutOfMemoryScreen.init	missing		minor: unsure: no out-of-memory screen; Horizon 
 PauseScreen.added	skip:service		friend list listener on the pause screen (social)
 PauseScreen.init	port	crates/horizon-client/src/game/screens.rs::pause_buttons	button layout; the title is drawn in draw_pause_menu
 PauseScreen.createPauseMenu	port	crates/horizon-client/src/game/screens.rs::pause_buttons	gap: player: Report Bugs, Feedback and Player Reporting icons are inactive, and no Mods button
-PauseScreen.getCustomAdditions	port	crates/horizon-client/src/game/screens.rs::pause_buttons	the server links row (links flag); gap: minor: only the server links dialog, the pause_screen_additions tag is not read
-PauseScreen.addCustomDialogButtons	port	crates/horizon-client/src/game/screens.rs::Game::pause_click	Server Links button (id 11) opens the links screen
+PauseScreen.getCustomAdditions	port	crates/horizon-client/src/game/screens.rs::Game::pause_screen_additions	the pause_screen_additions tag: one dialog, else minecraft:custom_options, else the server links row
+PauseScreen.addCustomDialogButtons	port	crates/horizon-client/src/game/screens.rs::Game::pause_click	one full-width button in row 3 (id 14), labelled by computeExternalTitle; the server links fallback opens the links screen (id 11)
 PauseScreen.extractRenderState	port	crates/horizon-client/src/game/screens.rs::Game::draw_pause_menu	gap: minor: no now-playing toast and no draft-report badge
 PauseScreen.rendersNowPlayingToast	missing		minor: unsure: no check of the music-toast option on the pause screen
 PauseScreen.openScreenButton	inline	crates/horizon-client/src/game/screens.rs::Game::pause_click	the Advancements, Stats, Options and World Options actions

@@ -212,7 +212,7 @@ fn operating_system() -> String {
     } else if cfg!(target_os = "macos") {
         command_output("sw_vers", &["-productVersion"]).map(|v| format!("macOS {v}"))
     } else if cfg!(windows) {
-        command_output("cmd", &["/C", "ver"])
+        horizon_telemetry::system::windows_version()
     } else {
         None
     };
@@ -227,14 +227,11 @@ fn operating_system() -> String {
 pub fn cpu() -> String {
     let threads = std::thread::available_parallelism().map_or(0, |n| n.get());
     let name = if cfg!(target_os = "linux") {
-        read("/proc/cpuinfo").and_then(|t| {
-            t.lines()
-                .find(|l| l.starts_with("model name"))
-                .and_then(|l| l.split_once(':'))
-                .map(|(_, v)| v.trim().to_owned())
-        })
+        read("/proc/cpuinfo").and_then(|t| horizon_telemetry::system::linux_cpu_name(&t))
     } else if cfg!(target_os = "macos") {
         command_output("sysctl", &["-n", "machdep.cpu.brand_string"])
+    } else if cfg!(windows) {
+        horizon_telemetry::system::windows_cpu()
     } else {
         std::env::var("PROCESSOR_IDENTIFIER").ok()
     };
@@ -296,8 +293,9 @@ fn memory() -> String {
     }
 }
 
-/// The report's details: Horizon's and the machine's, then what the game set as it ran.
-pub fn system_details() -> Vec<(String, String)> {
+/// The report's details: Horizon's and the machine's, then what the game set as it ran. A dedicated
+/// server renders nothing: it leaves out the render settings it read from options.txt.
+pub fn system_details(side: &str) -> Vec<(String, String)> {
     let mut out = vec![
         ("Horizon Version".to_owned(), version()),
         (
@@ -308,17 +306,29 @@ pub fn system_details() -> Vec<(String, String)> {
         ("CPU".to_owned(), cpu()),
         ("Memory".to_owned(), memory()),
     ];
-    out.extend(details().into_iter().map(|(k, v)| (k.to_owned(), v)));
+    out.extend(
+        details()
+            .into_iter()
+            .filter(|(k, _)| side != "server" || *k != "Render Settings")
+            .map(|(k, v)| (k.to_owned(), v)),
+    );
     out
 }
 
-fn thread_name() -> String {
+/// The thread's name as vanilla's reports say it: the main thread is the client's "Render thread"
+/// and the dedicated server's "Server thread".
+fn thread_name(side: &str) -> String {
     let current = std::thread::current();
     match current.name() {
+        Some("main") | None if side == "server" => "Server thread".into(),
         Some("main") | None => "Render thread".into(),
         Some(name) => name.into(),
     }
 }
+
+/// What starts the stderr line naming a saved report, the path follows: the Launch API's
+/// promise to launchers (docs/api/launch.md), so it never changes within a line of that API.
+pub const SAVED_LINE: &str = "Horizon: crash report saved to ";
 
 /// Writes the report and tells where it is; the log gets the error too.
 fn deliver(home: &Path, report: Report) -> Option<PathBuf> {
@@ -341,9 +351,10 @@ fn deliver(home: &Path, report: Report) -> Option<PathBuf> {
     );
     crate::logging::flush();
     crate::telemetry::keep_crash(home, &report);
-    match report.save(home) {
+    // A player of a shared game folder (`--player-dir`) finds the report beside its own log.
+    match report.save(crate::logging::player_dir_override().unwrap_or(home)) {
         Ok(path) => {
-            eprintln!("Horizon: crash report saved to {}", path.display());
+            eprintln!("{SAVED_LINE}{}", path.display());
             Some(path)
         }
         Err(e) => {
@@ -365,12 +376,36 @@ pub fn report_watchdog(home: &Path, side: &'static str, message: String) -> Opti
             description: "Watching Server".into(),
             error: format!("{message} (Watching Server)"),
             stack: String::new(),
-            thread: thread_name(),
+            thread: thread_name(side),
             side,
-            details: system_details(),
+            details: system_details(side),
             log: crate::logging::recent_lines(),
         },
     )
+}
+
+/// The report for a game that went over the player's RAM limit (`ram_limit`), written by the
+/// watcher thread: it says nothing about where the memory went, so it carries no stack. The player
+/// chose this limit, so it is no bug to send (`telemetry::keep_crash`), and leaving that out ends
+/// the game seconds sooner: it keeps running, over its limit, until the report is written.
+pub fn report_memory_limit(home: &Path, side: &'static str, message: String) {
+    if REPORTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let report = Report {
+        time: Local::now(),
+        description: "RAM limit reached".into(),
+        error: message,
+        stack: String::new(),
+        thread: thread_name(side),
+        side,
+        details: system_details(side),
+        log: crate::logging::recent_lines(),
+    };
+    match report.save(home) {
+        Ok(path) => eprintln!("{SAVED_LINE}{}", path.display()),
+        Err(e) => eprintln!("Horizon: could not save a crash report: {e}"),
+    }
 }
 
 fn payload_text(payload: &(dyn std::any::Any + Send)) -> String {
@@ -476,15 +511,31 @@ pub fn panic_report(info: &std::panic::PanicHookInfo, side: &'static str) -> Rep
             &std::backtrace::Backtrace::force_capture().to_string(),
             true,
         ),
-        thread: thread_name(),
+        thread: thread_name(side),
         side,
-        details: system_details(),
+        details: system_details(side),
         log: crate::logging::recent_lines(),
     }
 }
 
+/// Whether `name` is one of the streaming pool's threads, vanilla's `Util` worker threads.
+fn is_worker_thread(name: Option<&str>) -> bool {
+    name.is_some_and(|n| n.starts_with("horizon-worker-"))
+}
+
+/// `Util.onThreadException`: a panic on a worker thread is made a report titled "Exception on
+/// worker thread", with the thread's name, as `BlockableEventLoop.relayDelayCrash` hands it to
+/// the main thread.
+pub fn worker_panic_report(info: &std::panic::PanicHookInfo, side: &'static str) -> Report {
+    Report {
+        description: "Exception on worker thread".into(),
+        ..panic_report(info, side)
+    }
+}
+
 /// Reports panics: on the main thread a crash report (the panic then ends the game, exit code
-/// 101); on other threads the error goes to the log, as vanilla's uncaught exception handler
+/// 101); on a worker thread (`Util.onThreadException`) a crash report too, and the game ends
+/// with it; on other threads the error goes to the log, as vanilla's uncaught exception handler
 /// does. The default hook still prints the panic. A panic inside `contain` is only logged.
 pub fn install(home: PathBuf, side: &'static str) {
     let default = std::panic::take_hook();
@@ -496,10 +547,14 @@ pub fn install(home: PathBuf, side: &'static str) {
         let main = std::thread::current().name() == Some("main");
         if main {
             deliver(&home, panic_report(info, side));
+        } else if is_worker_thread(std::thread::current().name()) {
+            deliver(&home, worker_panic_report(info, side));
+            // The crash ends the game, as the relayed report does on vanilla's main thread.
+            std::process::exit(101);
         } else {
             log::error!(
                 "Caught previously unhandled exception in thread {}: {}",
-                thread_name(),
+                thread_name(side),
                 panic_message(info)
             );
         }
@@ -548,9 +603,9 @@ pub fn report_error(
                 description: DebugCrash::MESSAGE.into(),
                 error: DebugCrash::MESSAGE.into(),
                 stack: debug.stack.clone(),
-                thread: thread_name(),
+                thread: thread_name(side),
                 side,
-                details: system_details(),
+                details: system_details(side),
                 log: crate::logging::recent_lines(),
             },
         );
@@ -568,9 +623,9 @@ pub fn report_error(
             description: "Fatal error".into(),
             error: message,
             stack: String::new(),
-            thread: thread_name(),
+            thread: thread_name(side),
             side,
-            details: system_details(),
+            details: system_details(side),
             log: crate::logging::recent_lines(),
         },
     )
@@ -669,6 +724,26 @@ mod tests {
     }
 
     #[test]
+    fn a_dedicated_servers_report_names_its_server_thread_and_no_render_settings() {
+        let unnamed = |side: &'static str| {
+            std::thread::spawn(move || thread_name(side))
+                .join()
+                .unwrap()
+        };
+        assert_eq!(unnamed("server"), "Server thread");
+        assert_eq!(unnamed("client"), "Render thread");
+        set_detail("Render Settings", "render distance 12");
+        let has = |side| {
+            system_details(side)
+                .iter()
+                .any(|(k, _)| k == "Render Settings")
+        };
+        assert!(has("client"));
+        assert!(!has("server"));
+        clear_detail("Render Settings");
+    }
+
+    #[test]
     fn stacks_start_at_the_panicking_frame() {
         let bt = format!(
             "   0: horizon_client::crash::panic_report\n             at {root}/src/crash.rs:296:16\n   1: std::panicking::panic_with_hook\n             at /rustc/abc/library/std/src/panicking.rs:823:13\n   2: core::panicking::panic_fmt\n             at /rustc/abc/library/core/src/panicking.rs:80:14\n   3: horizon_client::crash::debug_crash_tick\n             at {root}/src/crash.rs:359:9\n   4: winit::dispatch\n             at /home/someone/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/event_loop.rs:642:56\n   5: main\n",
@@ -699,6 +774,13 @@ mod tests {
         // The stack starts where the crash was raised (DebugCrash::new, in this file).
         let first = debug.stack.lines().next().unwrap();
         assert!(first.contains("crash.rs"), "{}", debug.stack);
+    }
+
+    #[test]
+    fn worker_threads_are_the_streaming_pool() {
+        assert!(is_worker_thread(Some("horizon-worker-3")));
+        assert!(!is_worker_thread(Some("main")));
+        assert!(!is_worker_thread(None));
     }
 
     #[test]

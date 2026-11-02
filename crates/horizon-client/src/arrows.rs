@@ -32,8 +32,8 @@ use horizon_world::{
 use std::{collections::HashSet, fmt};
 
 /// `EntityType.ARROW` (and tipped/spectral arrows): 0.5 x 0.5, eyes at 0.13.
-const WIDTH: f32 = 0.5;
-const HEIGHT: f32 = 0.5;
+pub const WIDTH: f32 = 0.5;
+pub const HEIGHT: f32 = 0.5;
 const EYE_HEIGHT: f32 = 0.13;
 
 /// `AbstractArrow.Pickup`.
@@ -93,6 +93,13 @@ pub enum ArrowEvent {
         kind: ArrowParticle,
         position: Vec3,
         velocity: Vec3,
+    },
+    /// `Level.broadcastEntityEvent(arrow, 0)`: a tipped arrow stuck for 600
+    /// ticks. The clients burst its particles (`Arrow.handleEntityEvent`);
+    /// the arrow itself is a plain one from now on.
+    PotionPuff {
+        id: u32,
+        color: u32,
     },
     Sound {
         sound: ArrowSound,
@@ -186,6 +193,8 @@ pub struct ArrowState {
     /// The arrow's own random (`Entity.random`).
     pub random: LegacyRandom,
     pub events: Vec<ArrowEvent>,
+    /// The speed (`deltaMovement.length()`) it hit a block at, before it stuck.
+    pub hit_speed: f64,
 }
 impl fmt::Debug for ArrowState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -230,7 +239,14 @@ impl ArrowState {
             removed: false,
             random,
             events: Vec::new(),
+            hit_speed: 0.0,
         }
+    }
+    /// `Arrow.getColor` of the server's own arrow: the colour of the potion on
+    /// its pickup item, None for a plain arrow (`PotionContents.EMPTY`).
+    pub fn potion_color(&self) -> Option<u32> {
+        let potion = self.pickup_item.potion()?;
+        Some(crate::brewing::potion_color(Some(potion)))
     }
     /// The `AbstractArrow` constructor's `pickupItemStack`: the drawn ammo
     /// (one item). Ammo drawn without being used up (`INTANGIBLE_PROJECTILE`)
@@ -375,6 +391,66 @@ impl ArrowScene<'_, '_> {
         true
     }
 }
+/// `AbstractArrow.tick`'s block phase for a thrown trident: the zero-width
+/// `level().clip(new ClipContext(position(), position().add(movement),
+/// ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, this))`, then
+/// `AbstractArrow.onHitBlock`'s `position().subtract(signum * 0.05)`. Returns
+/// the position to stop at (pull-back included), the block that was hit and
+/// the normal of the face it was hit on.
+pub fn clip_block_stop(
+    world: &World,
+    facts: &BlockFacts,
+    collision: &BlockCollisionRegistry<'_>,
+    from: Vec3,
+    movement: Vec3,
+) -> Option<(Vec3, BlockPos, [i32; 3])> {
+    let to = Vec3::new(
+        from.x + movement.x,
+        from.y + movement.y,
+        from.z + movement.z,
+    );
+    let mut scene = SceneCollisions {
+        world,
+        binding: collision,
+        subject: None,
+    };
+    let hit = horizon_core::geometry::traverse_blocks(from, to, 1024, |p: BlockPos| {
+        let state = world.block(p.x, p.y, p.z);
+        if facts.is_air(state) {
+            return None;
+        }
+        let shape = collision
+            .collision_shape(&mut scene, state, [p.x, p.y, p.z])
+            .ok()?;
+        shape.clip(from, to, p)
+    })
+    .ok()
+    .flatten()?;
+    Some((
+        back_off(hit.location, movement),
+        hit.block,
+        hit.direction.normal(),
+    ))
+}
+/// `AbstractArrow.onHitBlock`'s back-off: vanilla scales `(double) 0.05f` by
+/// `Math.signum` per axis, whose value at zero is zero (not Rust's -1.0).
+pub fn back_off(location: Vec3, movement: Vec3) -> Vec3 {
+    fn signum(v: f64) -> f64 {
+        if v > 0.0 {
+            1.0
+        } else if v < 0.0 {
+            -1.0
+        } else {
+            0.0
+        }
+    }
+    let offset = f64::from(0.05f32);
+    Vec3::new(
+        location.x - signum(movement.x) * offset,
+        location.y - signum(movement.y) * offset,
+        location.z - signum(movement.z) * offset,
+    )
+}
 fn bounds(at: Vec3) -> Aabb {
     // EntityDimensions.makeBoundingBox: half the float width.
     let w = f64::from(WIDTH / 2.0);
@@ -407,7 +483,7 @@ pub fn blocks_inside(from: Vec3, to: Vec3) -> Vec<BlockPos> {
     inside
 }
 /// `Projectile.lerpRotation`.
-fn lerp_rotation(mut old: f32, new: f32) -> f32 {
+pub fn lerp_rotation(mut old: f32, new: f32) -> f32 {
     while new - old < -180.0 {
         old -= 360.0;
     }
@@ -434,19 +510,37 @@ fn signum(v: f64) -> f64 {
 /// entity stops there and is not kept: the game hands it to
 /// `finish_entity_hit` once it has hurt the entity.
 pub fn tick(p: &mut Projectile, scene: &ArrowScene, targets: &[(Who, Aabb)]) -> (bool, Hit) {
+    tick_with(p, scene, targets, true)
+}
+/// One arrow tick whose hit is canceled (`ProjectileImpactEvent`): the arrow
+/// moves on to where it would have hit, as `AbstractArrow.stepMoveAndHit` leaves
+/// it when the event is canceled, and flies on: not stuck, nothing hurt, no hit.
+pub fn tick_through(
+    p: &mut Projectile,
+    scene: &ArrowScene,
+    targets: &[(Who, Aabb)],
+) -> (bool, Hit) {
+    tick_with(p, scene, targets, false)
+}
+fn tick_with(
+    p: &mut Projectile,
+    scene: &ArrowScene,
+    targets: &[(Who, Aabb)],
+    impact: bool,
+) -> (bool, Hit) {
     let Some(mut st) = p.arrow.take() else {
         return (false, Hit::None);
     };
     // Entity.setOldPosAndRot: the renderer interpolates from here, in flight
     // and stuck alike; ServerLevel.tickNonPassenger counts the tick.
-    p.previous = p.position;
+    p.set_old_pos_and_rot();
     p.age += 1;
     let hit = Ticker {
         p,
         st: &mut st,
         scene,
     }
-    .tick(targets);
+    .tick(targets, impact);
     p.stuck = st.in_ground;
     let keep = !st.removed && !matches!(hit, Hit::Entity { .. });
     p.arrow = Some(st);
@@ -529,7 +623,7 @@ impl Ticker<'_, '_, '_, '_> {
     fn trident(&self) -> bool {
         matches!(self.p.kind, ProjectileKind::Trident)
     }
-    fn tick(&mut self, targets: &[(Who, Aabb)]) -> Hit {
+    fn tick(&mut self, targets: &[(Who, Aabb)], impact: bool) -> Hit {
         // ThrownTrident.tick.
         if self.trident() && self.st.in_ground_time > 4 {
             self.st.dealt_damage = true;
@@ -575,6 +669,19 @@ impl Ticker<'_, '_, '_, '_> {
             if !self.st.removed {
                 let at = self.position();
                 self.apply_effects_from_blocks(at, at);
+            }
+            // Arrow.tick on the server: a tipped arrow stuck for 600 ticks sends
+            // entity event 0 (the clients' burst of particles in its colour,
+            // `handleEntityEvent`) and turns into a plain arrow. The flight
+            // and ground particles are the clients' own (`Level.isClientSide`).
+            if self.st.in_ground_time >= 600
+                && let Some(color) = self.st.potion_color()
+            {
+                self.st.events.push(ArrowEvent::PotionPuff {
+                    id: self.p.id,
+                    color,
+                });
+                self.st.pickup_item = crate::items::ItemStack::new("minecraft:arrow", 1);
             }
             return Hit::None;
         }
@@ -627,7 +734,7 @@ impl Ticker<'_, '_, '_, '_> {
             original.z + movement.z,
         );
         if physics {
-            hit = self.step_move_and_hit(original, end, targets);
+            hit = self.step_move_and_hit(original, end, targets, impact);
             if matches!(hit, Hit::Entity { .. }) {
                 return hit;
             }
@@ -645,8 +752,8 @@ impl Ticker<'_, '_, '_, '_> {
         if !self.st.was_touching_water {
             self.p.velocity = self.p.velocity.scale(f64::from(0.99f32));
         }
-        if physics && !self.st.in_ground {
-            // Entity.applyGravity: AbstractArrow.getDefaultGravity.
+        if physics && !self.st.in_ground && !self.p.no_gravity {
+            // Entity.applyGravity: AbstractArrow.getDefaultGravity, none with NoGravity.
             self.add_velocity(-0.05);
         }
         // Projectile.tick, then Entity.baseTick's fluid and fire phases.
@@ -664,7 +771,7 @@ impl Ticker<'_, '_, '_, '_> {
         if !self.st.first_tick && self.st.fluids.is_in_fluid(&Tags, LAVA) {
             self.st.fall_distance *= 0.5;
         }
-        if self.position().y < f64::from(crate::chunk::MIN_Y - 64) {
+        if self.position().y < f64::from(self.scene.world.bottom_y() - 64) {
             self.st.removed = true;
         }
         self.st.first_tick = false;
@@ -711,7 +818,13 @@ impl Ticker<'_, '_, '_, '_> {
     /// `AbstractArrow.stepMoveAndHit`: the nearest entity on the way, else the
     /// block. A piercing arrow that hits an entity here goes on from it next
     /// tick (`finish_entity_hit`); vanilla's loop goes on within the same tick.
-    fn step_move_and_hit(&mut self, from: Vec3, to: Vec3, targets: &[(Who, Aabb)]) -> Hit {
+    fn step_move_and_hit(
+        &mut self,
+        from: Vec3,
+        to: Vec3,
+        targets: &[(Who, Aabb)],
+        impact: bool,
+    ) -> Hit {
         let block = self.scene.clip(from, to);
         let end = block.map_or(to, |b| b.0);
         // findHitEntities: ProjectileUtil.computeMargin and the search box.
@@ -744,6 +857,10 @@ impl Ticker<'_, '_, '_, '_> {
         self.p.position = next;
         self.apply_effects_from_blocks(from, next);
         if let Some((who, at, _)) = best {
+            // A canceled impact ends the search, the arrow where it would have hit.
+            if !impact {
+                return Hit::None;
+            }
             // AbstractArrow.onHitEntity: past pierce level + 1 entities the
             // arrow is discarded before it hurts the next one.
             if self.st.pierce > 0 {
@@ -763,6 +880,9 @@ impl Ticker<'_, '_, '_, '_> {
         }
         let state = self.scene.block(pos);
         if self.scene.is_air(state) {
+            return Hit::None;
+        }
+        if !impact {
             return Hit::None;
         }
         self.on_hit_block(pos, state);
@@ -848,6 +968,8 @@ impl Ticker<'_, '_, '_, '_> {
     /// it moved on, stop, and stick.
     fn on_hit_block(&mut self, pos: BlockPos, state: BlockStateId) {
         self.st.last_state = Some(state);
+        // BlockState.onProjectileHit still sees the deltaMovement it hit at.
+        self.st.hit_speed = self.p.velocity.length();
         // Projectile.onHitBlock: BlockState.onProjectileHit.
         if self.st.on_fire()
             && let Some(reaction) = self.block_reaction(state)
@@ -985,6 +1107,15 @@ impl Ticker<'_, '_, '_, '_> {
             }
             effects.advance(step);
             let name = &*self.scene.facts.get(state).name;
+            crate::block_contact::emit(crate::block_contact::Event::Inside(
+                crate::block_contact::Contact {
+                    entity: self.p.id as i32,
+                    kind: self.p.kind.id(),
+                    block: name,
+                    state,
+                    position: p,
+                },
+            ));
             if matches!(name, "minecraft:fire" | "minecraft:soul_fire") {
                 // BaseFireBlock.entityInside (its inFire hurt does nothing to arrows).
                 effects.apply(Effect::ClearFreeze);
@@ -1159,10 +1290,10 @@ impl FluidInteractionWorld for Ticker<'_, '_, '_, '_> {
         Ok(self.scene.world.chunks.contains_key(&(x, z)).then_some(()))
     }
     fn chunk_sections(&mut self, _: ()) -> Result<FluidSections<'_>, Error> {
-        static SECTIONS: [bool; crate::chunk::SECTIONS] = [true; crate::chunk::SECTIONS];
+        let layout = self.scene.world.layout();
         Ok(FluidSections {
-            minimum_section_y: crate::chunk::MIN_Y >> 4,
-            has_fluid: &SECTIONS,
+            minimum_section_y: layout.min_y() >> 4,
+            has_fluid: crate::chunk::every_section(layout),
         })
     }
     fn bounding_box_min_y(&self) -> f64 {

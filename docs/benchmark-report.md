@@ -57,9 +57,9 @@ one (histogram edges included) makes it 2.
 **`app`.** What was measured: `name` (`horizon-client`, `horizon-launcher`, `minecraft`), `version`,
 optionally `commit` (Horizon builds) and `mods` (`[{ "name", "version" }]`, vanilla with mods).
 
-**`hardware`.** `os` (`macos`, `linux`, `windows`), `os_version`, `arch`, `cpu` (brand string),
-`cpu_threads`, `cpu_cores` (physical), `cpu_base_mhz` and `cpu_boost_mhz` (where the OS gives them; not on
-Apple silicon), `ram_mb`, `storage` (the drive under the game folder: `nvme`, `ssd`, `hdd`), `form` (`laptop`,
+**`hardware`.** `os` (`macos`, `linux`, `windows`), `os_version`, `arch`, `cpu` (brand string; on Windows
+without one in the registry, `PROCESSOR_IDENTIFIER`), `cpu_threads`, `cpu_cores` (physical), `cpu_base_mhz` and
+`cpu_boost_mhz` (where the OS gives them; not on Apple silicon), `ram_mb`, `storage` (the drive under the game folder: `nvme`, `ssd`, `hdd`), `form` (`laptop`,
 `desktop`); `gpu` (`name`, `vendor`, `driver`, `backend`: `metal`, `vulkan`, `dx12`, `gl`;
 `kind`: `integrated`, `discrete`, `virtual`, `cpu`, `other`; `vram_mb`, a discrete GPU's own memory) and
 `display` (the screen the window was on: `width`, `height` in physical pixels, `scale`, `refresh_hz`) when
@@ -69,8 +69,9 @@ known. Any field can be missing. On mains or battery is `conditions.power`.
 `render_distance`, `simulation_distance`, `window` (`[width, height]` actually rendered), `vsync`,
 `fps_cap` (absent: unlimited), `offscreen` (rendered without presenting: not a player number), `repeats`,
 `warmup_s`, `power` (`ac`, `battery`), `load_avg_1m` (before the run; above about 1 the machine was busy),
-`backend` (when forced). Readers compare reports only with equal `scenario`, distances, `window`, `vsync`,
-`fps_cap` and `offscreen`.
+`backend` (when forced). Readers compare reports only with equal `scenario`, `seed`, distances, `window`, `vsync`,
+`fps_cap` and `offscreen`. `tools/perf_bench.py --table` refuses a comparison when these values differ or a required
+value is unknown; an absent `fps_cap` means unlimited. A single report can still be shown without comparison.
 
 **`metrics`.** Scalar measurements, by name; each is a summary over the run's repeats: `n`, `mean`,
 `stdev` (sample standard deviation, null when `n` is 1), `min`, `max`, `ci95` (half-width of the 95%

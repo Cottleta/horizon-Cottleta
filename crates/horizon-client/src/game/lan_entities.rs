@@ -12,6 +12,15 @@ use horizon_client::lan::{
 use horizon_protocol::entity_data::{Value, serializer};
 use horizon_world::{nbt::Tag, registry::BlockStateId};
 
+/// Allocate once: a native summon may need its id before the tracking tick.
+pub(super) fn assign_entity_id(next: &mut u32, id: &mut u32) -> u32 {
+    if *id == 0 {
+        *next += 1;
+        *id = *next;
+    }
+    *id
+}
+
 fn state(id: u32, kind: &str, position: [f64; 3], yaw: f32, on_ground: bool) -> EntityState {
     EntityState {
         id: id as i32,
@@ -31,6 +40,8 @@ fn state(id: u32, kind: &str, position: [f64; 3], yaw: f32, on_ground: bool) -> 
         precise: false,
         needs_sync: false,
         leash: None,
+        spectator: false,
+        watching: false,
     }
 }
 
@@ -72,6 +83,42 @@ fn stand_poses(a: &horizon_client::entities::ArmorStand) -> Vec<(u8, i32, Value)
 }
 
 impl Game<'_> {
+    /// The entities players started and stopped tracking since the last
+    /// tick, told to the mods in order with the hub back in `self.lan` and
+    /// no player's state swapped in (`ServerEntity.addPairing` and
+    /// `removePairing`).
+    pub(super) fn run_native_tracking(&mut self) {
+        let batches = match self.lan.as_mut() {
+            Some(host) => std::mem::take(&mut host.hub.native_tracking),
+            None => return,
+        };
+        if self.remote.is_some() || self.options.execution_role.is_client() {
+            return;
+        }
+        for batch in batches {
+            for e in batch.events {
+                let (id, kind) = (e.entity as u32, &*e.tracked.kind);
+                if e.start {
+                    self.native_player_start_tracking(
+                        batch.player,
+                        &batch.name,
+                        id,
+                        e.tracked.uuid,
+                        kind,
+                    );
+                } else {
+                    self.native_player_stop_tracking(
+                        batch.player,
+                        &batch.name,
+                        id,
+                        e.tracked.uuid,
+                        kind,
+                    );
+                }
+            }
+        }
+    }
+
     /// Who rides what (`Entity.getPassengers`): mobs on mobs, and the
     /// host in its boat or minecart.
     pub(super) fn lan_riding(
@@ -103,18 +150,37 @@ impl Game<'_> {
         hub: &mut Hub,
         out: &mut States,
     ) {
+        let guests: Vec<(u128, i32)> = hub
+            .guests
+            .iter()
+            .filter(|g| hub.here(g))
+            .map(|g| (g.uuid, g.entity_id))
+            .collect();
         for b in &self.boats {
             let p = b.position;
             let mut e = state(b.id, &b.entity_type(), [p.x, p.y, p.z], b.yaw, b.on_ground);
+            // Leashable.setLeashedTo / dropLeash: who holds the boat's lead.
+            e.leash = self.boat_leash_link(b, host_entity, &guests);
             e.velocity = [b.velocity.x, b.velocity.y, b.velocity.z];
             e.meta = vehicle_meta(b.hurt_time, b.hurt_dir, b.damage);
             // AbstractBoat.DATA_ID_PADDLE_LEFT and DATA_ID_PADDLE_RIGHT.
+            // Omitted false values must reset clients that saw a true value,
+            // including when the controlling passenger dismounts mid-stroke.
             for (k, paddling) in b.paddling.iter().enumerate() {
+                e.defaults
+                    .push((11 + k as u8, serializer::BOOLEAN, Value::Bool(false)));
                 if *paddling {
                     e.meta
                         .push((11 + k as u8, serializer::BOOLEAN, Value::Bool(true)));
                 }
             }
+            // AbstractBoat.DATA_ID_BUBBLE_TIME, back to 0 once the boat is off
+            // the column.
+            if b.bubble_time != 0 {
+                e.meta
+                    .push((13, serializer::INT, Value::Int(b.bubble_time)));
+            }
+            e.defaults.push((13, serializer::INT, Value::Int(0)));
             out.push(e);
         }
         for c in &self.carts {
@@ -133,14 +199,25 @@ impl Game<'_> {
                 }
                 // MinecartCommandBlock.DATA_ID_COMMAND_NAME.
                 super::minecarts::CartKind::CommandBlock => {
-                    if let Some(Tag::String(command)) =
-                        self.persist.raw.get(&c.id).and_then(|t| t.get("Command"))
-                    {
-                        let command = command.to_string_lossy();
-                        if !command.is_empty() {
-                            e.meta
-                                .push((13, serializer::STRING, Value::String(command)));
-                        }
+                    // and DATA_ID_LAST_OUTPUT (a component, defaults empty).
+                    let empty = Tag::String("".into());
+                    e.defaults
+                        .push((13, serializer::STRING, Value::String(String::new())));
+                    e.defaults
+                        .push((14, serializer::COMPONENT, Value::Text(empty.clone())));
+                    if !c.synced_command.is_empty() {
+                        e.meta.push((
+                            13,
+                            serializer::STRING,
+                            Value::String(c.synced_command.clone()),
+                        ));
+                    }
+                    if !c.synced_output.is_empty() {
+                        e.meta.push((
+                            14,
+                            serializer::COMPONENT,
+                            Value::Text(Tag::String(c.synced_output.as_str().into())),
+                        ));
                     }
                 }
                 _ => {}
@@ -303,7 +380,9 @@ impl Game<'_> {
             e.meta.push((
                 8,
                 serializer::ITEM_STACK,
-                Value::Item(hub.stack(&Some(o.item.clone()))),
+                Value::Item(
+                    hub.stack(&Some(o.item.clone()).filter(|i| &*i.item != "minecraft:air")),
+                ),
             ));
             out.push(e);
         }
@@ -408,6 +487,10 @@ impl Game<'_> {
                 Some(horizon_client::mobs::leash::Holder::Knot(p)) => Some(p),
                 _ => None,
             })
+            .chain(self.boats.iter().filter_map(|b| match b.leash {
+                Some(horizon_client::mobs::leash::Holder::Knot(p)) => Some(p),
+                _ => None,
+            }))
             .collect();
         self.knot_ids.retain(|p, _| knots.contains(p));
         for p in knots {
@@ -418,10 +501,7 @@ impl Game<'_> {
         }
         let next = &mut self.next_entity;
         let mut give = |id: &mut u32| {
-            if *id == 0 {
-                *next += 1;
-                *id = *next;
-            }
+            assign_entity_id(next, id);
         };
         self.tnts.iter_mut().for_each(|t| give(&mut t.id));
         self.falling.iter_mut().for_each(|f| give(&mut f.id));
@@ -623,6 +703,9 @@ impl Game<'_> {
         for c in self.crystals.iter().filter(|c| c.id != 0) {
             let mut e = state(c.id, "minecraft:end_crystal", at(c.position), 0.0, false);
             // EndCrystal.DATA_BEAM_TARGET and DATA_SHOW_BOTTOM (true by default).
+            // The beam's default is listed so that clearing it (the respawn
+            // sequence ending) is sent to the guests instead of leaving the old beam.
+            e.defaults = vec![(8, serializer::OPTIONAL_BLOCK_POS, Value::OptPos(None))];
             if c.beam.is_some() {
                 e.meta
                     .push((8, serializer::OPTIONAL_BLOCK_POS, Value::OptPos(c.beam)));
@@ -655,8 +738,12 @@ impl Game<'_> {
             if b.waiting() {
                 e.meta.push((9, serializer::BOOLEAN, Value::Bool(true)));
             }
+            // The hub is out of `self.lan` while these states are built, so
+            // the particle must be encoded through the hub passed in: going
+            // through `network_particle` would drop it and leave the client
+            // on the default white particle.
             let particle = match &b.potion {
-                Some(p) => self.network_particle(&p.particle(), None),
+                Some(p) => Self::hub_particle(hub, &p.particle(), None),
                 None => breath.clone(),
             };
             if let Some(p) = &particle {
@@ -696,6 +783,22 @@ fn arrow_meta(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summoned_ids_are_unique_and_survive_the_tracking_pass() {
+        let mut next = 40;
+        let mut roots = [0; 3];
+        let returned = roots.each_mut().map(|id| assign_entity_id(&mut next, id));
+        assert_eq!(returned, [41, 42, 43]);
+        // Tracking sees the same roots plus an unrelated deferred entity.
+        for id in &mut roots {
+            assign_entity_id(&mut next, id);
+        }
+        let mut later = 0;
+        assert_eq!(assign_entity_id(&mut next, &mut later), 44);
+        assert_eq!(roots, returned);
+        assert_eq!(next, 44);
+    }
 
     #[test]
     fn armor_stand_poses_send_only_what_differs() {

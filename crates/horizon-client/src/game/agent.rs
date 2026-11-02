@@ -3,11 +3,11 @@
 //! like a player (walk, look, break, place, use, click buttons). Actions that
 //! take time run as a task advanced every frame and reply when they finish or
 //! time out, so `horizon-ctl break 10 64 3` returns what the block dropped.
+use super::event_loop::EventLoopCtl;
 use super::{Game, Screen};
 use horizon_client::{
     Result,
     block_entity_anim::Ticker,
-    chunk::{MIN_Y, SECTIONS},
     items::ItemStack,
     mobs::{
         Species,
@@ -24,10 +24,8 @@ use std::{
     time::{Duration, Instant},
 };
 use winit::{
-    application::ApplicationHandler,
     dpi::PhysicalPosition,
     event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
-    event_loop::ActiveEventLoop,
     keyboard::KeyCode,
 };
 
@@ -419,11 +417,15 @@ impl Game<'_> {
             Screen::Advancements => "advancements",
             Screen::WorldOptions => "world-options",
             Screen::Friends => "friends",
+            Screen::Social => "social",
             Screen::ServerLinks => "server-links",
             Screen::ConfirmLink => "confirm-link",
             Screen::DialogWarning => "dialog-warning",
             Screen::CommandBlock => "command-block",
+            Screen::BlockEditor => "block-editor",
             Screen::Win => "win",
+            Screen::DebugOptions => "debug-options",
+            Screen::Mod => "mod",
         }
     }
     pub(super) fn inventory_counts(&self) -> BTreeMap<String, i64> {
@@ -498,7 +500,7 @@ impl Game<'_> {
         json!({
             "dialog": self.dialog_status(),
             "screen": self.screen_label(),
-            "menu": self.title.as_ref().map(|_| self.title_value()),
+            "menu": (self.title.is_some() || self.split_profiles_open()).then(|| self.title_value()),
             "world": (self.title.is_none()).then(|| match &self.integrated {
                 Some(server) => server.world_name.clone(),
                 None => self.level.name.clone(),
@@ -528,8 +530,16 @@ impl Game<'_> {
         })
     }
 
+    /// Splitscreen's profile page, a joining player's (`split_profiles`).
+    fn split_profiles_open(&self) -> bool {
+        self.screen == Screen::Options
+            && self.ui.options.page() == horizon_client::options_ui::Page::SplitProfiles
+    }
     fn title_value(&self) -> Value {
         use horizon_client::title::Mode;
+        if self.split_profiles_open() {
+            return self.ui.options.split_profiles.state();
+        }
         let Some(title) = &self.title else {
             return Value::Null;
         };
@@ -549,7 +559,7 @@ impl Game<'_> {
                 selected,
             } => json!({
                 "mode": "select-world",
-                "worlds": list.iter().map(|w| json!({ "folder": w.folder, "name": w.name, "creative": w.game_mode == 1 })).collect::<Vec<_>>(),
+                "worlds": list.iter().map(|w| json!({ "folder": w.folder, "name": w.name, "creative": w.game_mode == 1, "corrupted": w.corrupted })).collect::<Vec<_>>(),
                 "selected": selected,
             }),
             Mode::Create {
@@ -587,6 +597,11 @@ impl Game<'_> {
                     "height": layer.height,
                 })).collect::<Vec<_>>(),
             }),
+            Mode::CreateBuffet { buffet, .. } => json!({
+                "mode": "customize-single-biome",
+                "biome": buffet.biome(),
+                "query": buffet.query(),
+            }),
             Mode::Edit {
                 world,
                 name,
@@ -603,6 +618,28 @@ impl Game<'_> {
             Mode::BackupBeforeUpgrade { world, .. } => {
                 json!({ "mode": "backup-before-upgrade", "folder": world.folder, "name": world.name })
             }
+            Mode::OptimizeConfirm {
+                world, erase_cache, ..
+            } => {
+                json!({ "mode": "optimize-world-confirm", "folder": world.folder, "name": world.name, "erase_cache": erase_cache })
+            }
+            Mode::Optimize { world } => {
+                json!({ "mode": "optimize-world", "folder": world.folder, "name": world.name })
+            }
+            Mode::LowDiskSpace { world } => {
+                json!({ "mode": "low-disk-space", "folder": world.folder, "name": world.name })
+            }
+            Mode::Recover { world, issues } => {
+                let issue = |i: &Option<horizon_client::save::DatIssue>| match i {
+                    None => json!(null),
+                    Some(horizon_client::save::DatIssue::Missing) => json!("missing file"),
+                    Some(horizon_client::save::DatIssue::Unreadable(why)) => json!(why),
+                };
+                json!({ "mode": "recover-world", "folder": world.folder, "level_dat": issue(&issues[0]), "level_dat_old": issue(&issues[1]) })
+            }
+            Mode::Recovered { world, success } => {
+                json!({ "mode": "recovery-done", "folder": world.folder, "success": success })
+            }
             Mode::Error { message, .. } => {
                 json!({ "mode": "world-operation-error", "message": message })
             }
@@ -615,6 +652,8 @@ impl Game<'_> {
             Mode::MultiplayerWarning { check } => {
                 json!({ "mode": "multiplayer-warning", "check": check })
             }
+            Mode::Onboarding(_) => json!({ "mode": "accessibility-onboarding" }),
+            Mode::BanNotice(_) => json!({ "mode": "ban-notice" }),
         }
     }
 
@@ -635,7 +674,9 @@ impl Game<'_> {
                 list.push((d, v));
             }
         };
-        for m in self.mobs.iter().filter(|m| m.alive()) {
+        // CAN_BE_PICKED's isPickable (`!isRemoved`): a dead-but-tracked mob
+        // — a fake player the server keeps at health 0 — is still here.
+        for m in self.mobs.iter().filter(|m| !m.removed) {
             let mut v = json!({ "id": m.id, "kind": "mob", "health": m.health, "baby": m.is_baby(), "hurt_time": m.hurt_time });
             // VillagerData as this game knows it: on a client, what the
             // server's synched data says.
@@ -663,7 +704,7 @@ impl Game<'_> {
             push(
                 [orb.position.x, orb.position.y, orb.position.z],
                 "minecraft:experience_orb",
-                json!({ "kind": "orb", "value": orb.value }),
+                json!({ "kind": "orb", "value": orb.value, "velocity": [orb.velocity.x, orb.velocity.y, orb.velocity.z] }),
             );
         }
         list.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -701,7 +742,7 @@ impl Game<'_> {
             v["chat_input"] = json!(chat.input.value);
             v["chat_suggestions"] = json!(chat.suggestions_visible());
         }
-        if self.title.is_some() {
+        if self.title.is_some() || self.split_profiles_open() {
             v["menu"] = self.title_value();
         }
         if self.screen == Screen::Inventory && self.title.is_none() {
@@ -930,7 +971,7 @@ impl Game<'_> {
     /// Synthesize the pointer moving to GUI pixel (x, y) and a click there.
     pub(super) fn synth_click(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn EventLoopCtl,
         x: f32,
         y: f32,
         button: MouseButton,
@@ -941,7 +982,7 @@ impl Game<'_> {
     /// the others and a release at the last (one point is a click).
     fn synth_drag(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn EventLoopCtl,
         points: &[(f32, f32)],
         button: MouseButton,
     ) -> Result<()> {
@@ -954,7 +995,7 @@ impl Game<'_> {
         let device_id = DeviceId::dummy();
         for (i, &(x, y)) in points.iter().enumerate() {
             let position = PhysicalPosition::new(f64::from(x * scale), f64::from(y * scale));
-            self.window_event(
+            self.handle_window_event(
                 event_loop,
                 id,
                 WindowEvent::CursorMoved {
@@ -963,7 +1004,7 @@ impl Game<'_> {
                 },
             );
             if i == 0 {
-                self.window_event(
+                self.handle_window_event(
                     event_loop,
                     id,
                     WindowEvent::MouseInput {
@@ -974,7 +1015,7 @@ impl Game<'_> {
                 );
             }
         }
-        self.window_event(
+        self.handle_window_event(
             event_loop,
             id,
             WindowEvent::MouseInput {
@@ -1008,7 +1049,7 @@ impl Game<'_> {
         words: &[&str],
         line: &str,
         reply: &Sender<String>,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn EventLoopCtl,
     ) -> Result<Handled> {
         let name = words[0];
         let a = parse_args(&words[1..]);
@@ -1088,7 +1129,9 @@ impl Game<'_> {
                                 .world
                                 .chunks
                                 .get(&(x >> 4, z >> 4))
-                                .filter(|_| (MIN_Y..MIN_Y + SECTIONS as i32 * 16).contains(&y))
+                                .filter(|_| {
+                                    (self.world.bottom_y()..self.world.top_y()).contains(&y)
+                                })
                                 .map(|c| c.light(x & 15, y, z & 15));
                             let digit = |v: u8| char::from_digit(u32::from(v), 16).unwrap_or('.');
                             sky.push(packed.map_or('.', |v| digit(v >> 4)));
@@ -1532,7 +1575,7 @@ impl Game<'_> {
                     .ok_or("no renderer yet")?;
                 let device_id = DeviceId::dummy();
                 let position = PhysicalPosition::new(f64::from(x * scale), f64::from(y * scale));
-                self.window_event(
+                self.handle_window_event(
                     event_loop,
                     id,
                     WindowEvent::CursorMoved {
@@ -1541,7 +1584,7 @@ impl Game<'_> {
                     },
                 );
                 for _ in 0..steps.abs() as u32 {
-                    self.window_event(
+                    self.handle_window_event(
                         event_loop,
                         id,
                         WindowEvent::MouseWheel {
@@ -1562,6 +1605,22 @@ impl Game<'_> {
                 };
                 self.synth_click(event_loop, x, y, button)?;
                 ok(json!({ "ok": true, "screen": self.screen_label() }))
+            }
+            // Splitscreen's profile page, over a joining player's title screen.
+            "type" if self.split_profiles_open() => {
+                let text = line
+                    .trim_start()
+                    .strip_prefix("type")
+                    .unwrap_or("")
+                    .strip_prefix(' ')
+                    .unwrap_or("");
+                let page = &mut self.ui.options.split_profiles;
+                if text == "\\b" {
+                    page.key(winit::keyboard::KeyCode::Backspace, None);
+                } else {
+                    page.type_text(text);
+                }
+                ok(json!({ "ok": true, "menu": self.title_value() }))
             }
             "type" if self.title.is_some() => {
                 // type [--field name|seed] [--replace] TEXT on the title screens.

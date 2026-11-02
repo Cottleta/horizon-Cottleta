@@ -1,8 +1,9 @@
 # Horizon launcher
 
 A small desktop app that installs Horizon builds, prepares them from your own copy of
-Minecraft, and starts the client or a dedicated server. Built with [GPUI](https://www.gpui.rs),
-Zed's UI framework; it has its own Cargo workspace and is not part of the game's builds.
+Minecraft, and starts the client or a dedicated server. Built with [GPUI Fast](https://github.com/longbridge/gpui-fast),
+a fork of Zed's UI framework [GPUI](https://www.gpui.rs) that draws unchanged views from the last frame;
+it has its own Cargo workspace and is not part of the game's builds.
 
 ![Play](docs/play.png)
 
@@ -38,11 +39,10 @@ The opening, then Play ([clip](docs/opening.webm)):
   starts the game. With no install on the computer the Play page offers the download alone and the
   Minecraft folder row says none is needed. Without an owner,
   the Play page asks to sign in first. `horizon-launcher prepare --download`.
-- **Mods**: search Modrinth (CurseForge support is coming soon) for resource
-  packs and modpacks, each marked Works, Partly or Doesn't run in
-  Horizon; Java mod jars are never offered. Install puts a pack and what it needs in
-  `resourcepacks/` only after its SHA-512 matches, and a
-  modpack goes to the Modpacks page; installed packs show their source and checksum, with Update,
+- **Mods**: **Mods** and **Shader packs** search Horizon's own registry (a Java instance's mods
+  come from Modrinth), **Resource packs** searches Modrinth, each marked Works, Partly or Doesn't
+  run in Horizon; Modrinth's data packs aren't usable yet and have no tab. Install puts a file in the game folder only after its checksum matches, and a
+  modpack (the sidebar's +) goes to the Modpacks page; installed packs show their source and checksum, with Update,
   **Update all** and Remove ([docs/mod-browser.md](../docs/mod-browser.md)).
 - **Modpacks**: import a Java modpack (a Modrinth `.mrpack`, a CurseForge zip, or a Prism,
   MultiMC or CurseForge instance folder) and see its coverage report: per mod, ported, partial,
@@ -96,7 +96,7 @@ The opening, then Play ([clip](docs/opening.webm)):
   from the window or `horizon-launcher play` adds to it (`instance list` shows it too). Each
   instance plays the launcher's version, which follows updates, unless the Play page's version
   picker keeps it on another installed one (to keep an old world on the version it was made
-  with); picking the version marked "follows updates" lets it follow again.
+  with); picking the version marked "auto-update" lets it follow again.
 - **Export**: Home's Instance row has **Export…**: the selected instance (or a port) as a `.mrpack`
   (Modrinth's modpack format: resource packs the browser installed from Modrinth are listed by
   their download, the rest is in `overrides/`) or a `.zip` of the game folder's layout, with the
@@ -114,6 +114,9 @@ The opening, then Play ([clip](docs/opening.webm)):
   pack into the selected instance. A data pack is pointed at the world rows, and the Packs section
   and the world rows keep taking their own drops. A note in the corner says what happened.
   `horizon-launcher instance import <file>`.
+- **Maximum memory**: a row on Home, per instance: a slider and a box that takes `4096`, `4gb`, or nothing
+  for no limit (the default), saved at once. For Horizon it goes to the game as
+  `HORIZON_MEMORY_LIMIT_MB` ([what it does](../docs/native-client.md#ram-limit)); a Java instance's sets `-Xmx`.
 - **Launch options**: Home's Instance row has **Launch…**: per instance, a shell command run in its
   folder before the game (the game starts only if it succeeds), a wrapper the game runs through
   (`nice -n 5`), and environment variables (`NAME=value OTHER="two words"`), kept in
@@ -182,9 +185,9 @@ The opening, then Play ([clip](docs/opening.webm)):
   `datapacks/` under its row: what is there (and which the game has turned off), **Add data pack…**,
   and **Remove** (to the trash); a data pack `.zip` dropped on a world goes into it. The game turns
   a new one on when the world opens. From the command line: `horizon-launcher worlds
-  datapack-list|datapack-add|datapack-remove <world> …`. The Mods page's **Data packs** tab finds
-  them on Modrinth and installs one into the world picked there (`mods search --kind datapack`,
-  `mods install <pack> --world <world>`), saying what of it runs in Horizon.
+  datapack-list|datapack-add|datapack-remove <world> …`. `horizon-launcher mods search --kind datapack`
+  finds them on Modrinth and `mods install <pack> --world <world>` installs one, saying what of it
+  runs in Horizon.
 - **Packs**: Home lists the selected instance's resource packs and shader packs, each with a switch.
   The choice is the game's own: `resourcePacks` in options.txt (a pack turned on goes on top, as
   the game's Resource Packs screen does) and `pickedShaderPack` in `horizon-graphics.txt` (one shader
@@ -263,11 +266,29 @@ minimize, maximize/restore and close; macOS and Linux keep their system title ba
 The launcher looks for a newer Nightly when it starts and every 30 minutes while it is open, and
 shows a small "available, Install" line on Play.
 
+Release lists and commits come from GitHub's API, which allows 60 anonymous calls an hour per
+address: players behind a shared one (a school, a dorm, a carrier's NAT) spend them together.
+So each answer is kept in `cache/github/` in the data folder and used again for 5 minutes without
+asking, then revalidated with its ETag. When GitHub answers with its rate limit, or not at all,
+Horizon's own releases are read through Kira's read-only mirror
+(`https://mcp.playhorizon.dev/github/public`; `HORIZON_GITHUB_MIRROR` replaces it, empty turns it
+off); when both fail the last saved answer is used, else the error names both. The release files
+themselves come from their download links, which that limit doesn't cover.
+
 It also updates itself from GitHub releases tagged `launcher@X.Y.Z` (the game's are `nightly`, and
 `vX.Y.Z` before 2026-10-28; neither is ever taken for the other). Before 0.2 they were `launcher-vX.Y.Z` and `vYYYY.MM.DD`:
 every 0.2 tag counts as newer than all of those (docs/versioning.md). It downloads the new build, replaces its
 own binary, and offers "Restart" in the footer. Development builds and
 `HORIZON_LAUNCHER_NO_SELF_UPDATE=1` never replace themselves.
+
+On Linux the release also comes as an AppImage, `horizon-launcher-linux-x86_64.AppImage`: one file
+to download, make executable and run, with no installation and no `libfuse2` (its runtime mounts
+the image where FUSE 2 is there and unpacks it where it is not). It is the same binary as the
+`.tar.gz`, with the libraries GPUI needs beside it; glibc, the graphics drivers and the session's
+D-Bus stay the machine's, so it needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and
+newer). A launcher running from one replaces the AppImage itself when it updates
+(`$APPIMAGE`), and the menu entry it writes starts the AppImage rather than the copy inside the
+image, which is gone when the launcher exits.
 
 On Linux a release build that starts writes its applications-menu entry only when there is
 none, or when the program the entry starts (its `TryExec`, else its `Exec`) no longer exists.
@@ -282,11 +303,25 @@ set `HORIZON_LAUNCHER_NO_SELF_UPDATE=1` to keep launcher updates with the packag
 Launcher releases are automatic (docs/release-flow.md in the repository): when main changes the
 launcher, `horizon-prepare` or `horizon-theme`, the `launcher` workflow builds Linux, macOS and
 Windows and publishes `launcher-vX.Y.Z` (the next patch, or the next minor after a pull request
-labelled `feature`) with `horizon-launcher-linux-x86_64.tar.gz`, `horizon-launcher-macos-arm64.zip`
-and `horizon-launcher-windows-x64.zip`, never marked latest. The version is built in from the tag
+labelled `feature`) with `horizon-launcher-linux-x86_64.tar.gz`,
+`horizon-launcher-linux-x86_64.AppImage`, `horizon-launcher-macos-arm64.zip`,
+`horizon-launcher-macos-x64.zip` (Intel Macs) and `horizon-launcher-windows-x64.zip`, never marked latest. The version is built in from the tag
 (`HORIZON_LAUNCHER_VERSION`); `Cargo.toml`'s version is only what local builds report.
 
 ## Command line
+
+Generate shell completions without opening the window:
+
+```sh
+horizon-launcher completions bash > horizon-launcher.bash
+horizon-launcher completions zsh > _horizon-launcher
+horizon-launcher completions fish > horizon-launcher.fish
+```
+
+Elvish and PowerShell are also supported (`completions elvish` and
+`completions powershell`). Source the generated script from your shell configuration,
+or install it in your shell’s completion directory. Packagers can generate these
+files at build time and install them in the corresponding system directories.
 
 The same binary is a command-line tool; without a subcommand it opens the window. On Windows it
 is a windowed program, so a desktop start opens no terminal; a subcommand writes to the terminal
@@ -341,7 +376,7 @@ and don't set `%ERRORLEVEL%` / `$LASTEXITCODE`. Scripts that need the exit code 
     horizon-launcher mods remove <pack>
     horizon-launcher servers [list]                 the servers hosted from the launcher, and whether they run
     horizon-launcher servers create [--name N] [--seed S | --copy-world DIR] [--mode M] [--difficulty D]
-                     [--max-players N] [--open] [--check-accounts] [--player NAME]... --accept-eula
+                     [--max-players N] [--open] [--offline] [--player NAME]... --accept-eula
     horizon-launcher servers set-up [--version <tag>]   copy a prepared version's programs and game files for servers
     horizon-launcher servers run <server> -- <horizon-server command>   for example: servers run "My server" -- start
     horizon-launcher servers forget <server>        take it off the list (its folder stays)
@@ -406,9 +441,12 @@ Play, with the token renewal; with no network the last answer stands, and a "doe
 at once. The account also plays online-mode servers under your own name and skin; offline names
 play LAN and offline-mode servers beside it. The game binary started directly (`horizon-client`,
 `horizon-ctl launch`), the harnesses and the servers don't go through this check. Tokens live in the system keychain (Keychain,
-Credential Manager, or the Secret Service on Linux), never in a file, a log or the command line;
-`accounts.json` in the data folder keeps only names and UUIDs. Without a keychain you stay signed
-in until the launcher closes. When the game starts, it gets the session in a private file it
+Credential Manager, or the Secret Service on Linux), never in a log or the command line;
+`accounts.json` in the data folder keeps only names and UUIDs. On Linux without a keychain they go
+to `account-secrets.json` in the data folder, encrypted and readable by you only, and back to the keychain once it
+answers; on macOS and Windows without one you stay signed in until the launcher closes. The
+Tailscale access token never goes to that file: without a keychain it lasts until the launcher
+closes. When the game starts, it gets the session in a private file it
 deletes as soon as it has read it. Sign out removes the tokens.
 
 Sign-in needs Horizon's own Azure app registration: its client ID is built in from
@@ -461,7 +499,9 @@ On Windows, `cargo test --bin horizon-launcher desktop_list_renders_the_viewport
     cargo build --release
 
 On NixOS, `nix-shell` in this folder provides the libraries GPUI links to (Wayland, X11,
-xkbcommon, Vulkan, fontconfig). macOS needs Xcode's command line tools. The `launcher`
+xkbcommon, Vulkan, fontconfig) and the ALSA and libudev files a native mod build looks up, so
+start the launcher from that shell to build native mods as well (#5248). macOS needs Xcode's
+command line tools. The `launcher`
 workflow builds all three platforms on every push to the `launcher` branch (or a
 `launcher-*` one), then installs the latest Horizon into a temporary folder and checks that the
 client starts (`--help`) and that the binaries import only system libraries (Windows).

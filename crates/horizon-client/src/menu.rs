@@ -122,6 +122,8 @@ pub enum Kind {
     /// `CreativeModeInventoryScreen.ItemPickerMenu`: an item tab's 45
     /// display slots, then the hotbar.
     ItemPicker,
+    /// A content mod's menu type: its slots, then the inventory.
+    Mod(&'static crate::containers::ModMenuType),
 }
 
 impl Kind {
@@ -218,6 +220,12 @@ enum Role {
     /// An `ArmorSlot` of a mount for this `EquipmentSlot` ("saddle" or
     /// "body"): `isEquippableInSlot` for `Menu::mount`, one item.
     MountEquip(&'static str),
+    /// A mod menu type's slot.
+    Mod,
+    /// A mod menu type's result (`results`): players only take from it.
+    ModResult,
+    /// A slot the mod's screen leaves out: no click reaches it.
+    Hidden,
 }
 
 #[derive(Clone, Copy)]
@@ -376,6 +384,28 @@ fn tidy(slot: &mut Option<ItemStack>) {
     }
 }
 
+/// Hook point for native mods (docs/native-mods.md, listed in `native-hooks.json`
+/// with the game's): container slot `slot` of the content mod menu type `menu`
+/// (`data/<id>/horizon/menu/`) is asked whether it takes `stack`
+/// (`Slot.mayPlace`) and how many of it it holds (`Slot.getMaxStackSize`).
+/// `may_place` and `max_stack` hold the type's own answer (false on one of its
+/// `results`, true elsewhere, and 99): change them for your own menu types.
+/// `max_stack` is kept to 1 to 99,
+/// and the item's own stack size still caps it. Asked on the server, for each
+/// click, drag and shift-click that puts an item in a slot, several times for
+/// one shift-click: answer from `stack` alone, and fast. API
+/// 130.
+#[inline(always)]
+pub fn native_menu_slot_rules(
+    menu: &str,
+    slot: usize,
+    stack: &ItemStack,
+    may_place: &mut bool,
+    max_stack: &mut u32,
+) {
+    let _ = (menu, slot, stack, may_place, max_stack);
+}
+
 /// An index outside the slot list: vanilla's `IndexOutOfBoundsException`.
 pub const OUT_OF_BOUNDS: &str = "IndexOutOfBoundsException";
 
@@ -459,6 +489,18 @@ impl Menu {
             Kind::Shulker => {
                 containers[MAIN] = vec![None; 27];
                 slots.extend(main(27, Role::Shulker));
+                player(&mut slots);
+            }
+            Kind::Mod(t) => {
+                containers[MAIN] = vec![None; t.slots];
+                slots.extend((0..t.slots).map(|index| Slot {
+                    container: MAIN,
+                    index,
+                    role: match t.results.contains(&index) {
+                        true => Role::ModResult,
+                        false => Role::Mod,
+                    },
+                }));
                 player(&mut slots);
             }
             Kind::Crafter | Kind::CrafterBlock => {
@@ -778,6 +820,13 @@ impl Menu {
             return;
         }
         self.data[id] = value;
+    }
+
+    /// Container slot `slot` of a mod menu type is left out by its screen.
+    pub fn hide_slot(&mut self, slot: usize) {
+        if matches!(self.kind, Kind::Mod(_)) && slot < self.slots.len() - 36 {
+            self.slots[slot].role = Role::Hidden;
+        }
     }
 
     /// `CrafterBlockEntity.setSlotState` (the slot state packet): only an
@@ -1255,6 +1304,8 @@ impl Menu {
                         .is_some_and(|m| i.equip_allowed.as_ref().is_none_or(|a| a.contains(m)))
             }),
             Role::Shulker => fits_inside_container_items(stack),
+            Role::Mod | Role::ModResult => self.mod_slot(s, stack).0,
+            Role::Hidden => false,
             Role::Fuel => Self::is_fuel(env, stack) || Self::is_bucket(stack),
             Role::Output | Role::CraftResult | Role::Inert => false,
             Role::CrafterIn => self.data.get(self.slots[s].index) != Some(&1),
@@ -1309,7 +1360,7 @@ impl Menu {
 
     fn may_pickup(&self, env: &Env, s: usize) -> bool {
         match self.slots[s].role {
-            Role::Inert => false,
+            Role::Inert | Role::Hidden => false,
             // AnvilMenu.mayPickup: the levels to pay, and a price.
             Role::CombineResult if self.kind == Kind::Anvil => {
                 (self.creative || self.levels >= self.data[0]) && self.data[0] > 0
@@ -1335,6 +1386,75 @@ impl Menu {
         }
     }
 
+    /// A result slot (`FurnaceResultSlot`, `ResultSlot`): nothing goes in, and
+    /// what's taken from it can't be put back.
+    pub fn is_result(&self, s: usize) -> bool {
+        matches!(self.slots[s].role, Role::Output | Role::CraftResult)
+    }
+
+    /// Slot `s` takes one more item of `stack` (`Slot.mayPlace`, and room).
+    pub fn takes_one(&self, env: &Env, s: usize, stack: &ItemStack) -> bool {
+        self.may_place(env, s, stack)
+            && self.slot(s).is_none_or(|have| {
+                have.same_item_same_components(stack) && have.count < self.slot_max(env, s, have)
+            })
+    }
+
+    /// The slots `quickMoveStack` would put slot `index`'s items in: one item
+    /// of a plain slot, the whole of a result slot, partial stacks first. Empty
+    /// when they don't all fit. This runs the move, so call it on a menu that
+    /// is thrown away afterwards.
+    pub fn quick_move_landing(&mut self, env: &Env, index: usize) -> Vec<usize> {
+        let Some(mut stack) = self.slot(index).cloned() else {
+            return Vec::new();
+        };
+        if !self.is_result(index) {
+            stack.count = 1;
+            let slot = self.slots[index];
+            self.containers[slot.container][slot.index] = Some(stack.clone());
+        }
+        let before: Vec<Option<ItemStack>> = (0..self.slots.len())
+            .map(|i| self.slot(i).cloned())
+            .collect();
+        self.quick_move(env, index);
+        let (mut partial, mut empty) = (Vec::new(), Vec::new());
+        let mut moved = 0;
+        for i in (0..self.slots.len()).filter(|&i| i != index && !self.is_result(i)) {
+            let had = before[i].as_ref().map_or(0, |b| b.count);
+            let got = self
+                .slot(i)
+                .filter(|now| now.same_item_same_components(&stack))
+                .map_or(0, |now| now.count.saturating_sub(had));
+            if got > 0 {
+                moved += got;
+                if had > 0 {
+                    partial.push(i);
+                } else {
+                    empty.push(i);
+                }
+            }
+        }
+        if moved < stack.count {
+            return Vec::new();
+        }
+        partial.extend(empty);
+        partial
+    }
+
+    /// A mod menu type's slot `s`: whether it takes `stack` (`Slot.mayPlace`:
+    /// anything but on a result) and how many it holds (`Slot.getMaxStackSize`),
+    /// then as the mods' hook says.
+    fn mod_slot(&self, s: usize, stack: &ItemStack) -> (bool, u32) {
+        let Kind::Mod(t) = self.kind else {
+            return (false, 0);
+        };
+        let mut may_place = self.slots[s].role == Role::Mod;
+        let mut max_stack = CONTAINER_MAX;
+        let index = self.slots[s].index;
+        native_menu_slot_rules(t.id, index, stack, &mut may_place, &mut max_stack);
+        (may_place, max_stack.clamp(1, CONTAINER_MAX))
+    }
+
     /// `Slot.getMaxStackSize(stack)`.
     fn slot_max(&self, env: &Env, s: usize, stack: &ItemStack) -> u32 {
         let own = match self.slots[s].role {
@@ -1346,6 +1466,7 @@ impl Menu {
             // The lectern's bookAccess holds one.
             Role::Plain if self.kind == Kind::Lectern && self.slots[s].container == MAIN => 1,
             Role::Fuel if Self::is_bucket(stack) => return 1,
+            Role::Mod | Role::ModResult => self.mod_slot(s, stack).1,
             _ => CONTAINER_MAX,
         };
         own.min(Self::max_stack(env, stack))
@@ -1854,8 +1975,16 @@ impl Menu {
                 if stack.count == 0 {
                     break;
                 }
+                // A mod menu's result (unless a mod's hook opens it) and a
+                // hidden slot get no top-up either, as a furnace's quick move
+                // never aims at its result.
+                let refuses = match self.slots[dest].role {
+                    Role::Hidden => true,
+                    Role::ModResult => !self.mod_slot(dest, stack).0,
+                    _ => false,
+                };
                 let max = match self.slot(dest) {
-                    Some(target) if target.same_item_same_components(stack) => {
+                    Some(target) if !refuses && target.same_item_same_components(stack) => {
                         self.slot_max(env, dest, target)
                     }
                     _ => continue,
@@ -1926,6 +2055,18 @@ impl Menu {
                         return None;
                     }
                 } else if !self.move_to(env, &mut stack, 0, 5, false) {
+                    return None;
+                }
+            }
+            // ChestMenu.quickMoveStack over the mod's slots.
+            Kind::Mod(t) => {
+                check_count = false;
+                let n = t.slots;
+                if index < n {
+                    if !self.move_to(env, &mut stack, n, total, true) {
+                        return None;
+                    }
+                } else if !self.move_to(env, &mut stack, 0, n, false) {
                     return None;
                 }
             }
@@ -2490,6 +2631,10 @@ impl Menu {
         }
         if self.quick_status != 0 {
             self.reset_quick_craft();
+            return Ok(());
+        }
+        // A slot the mod's screen leaves out takes no click.
+        if in_range(slot_index) && self.slots[slot_index as usize].role == Role::Hidden {
             return Ok(());
         }
         if matches!(input, Input::Pickup | Input::QuickMove) && (button == 0 || button == 1) {
@@ -3077,6 +3222,118 @@ pub(crate) mod tests {
         test(&env, &mut menu);
     }
 
+    /// The Mouse Tweaks wheel's targets: vanilla's routing of one item.
+    #[test]
+    fn quick_move_landing_routes_a_furnace_like_vanilla() {
+        with_menu(Kind::Furnace("smelting"), |env, menu| {
+            menu.creative = false;
+            // 0 input, 1 fuel, 2 output, 3..30 inventory, 30..39 hotbar.
+            let mut landing = |item, count, from| {
+                menu.set_slot(env, from, stack(item, count));
+                let to = menu.quick_move_landing(env, from);
+                menu.set_slot(env, from, None);
+                for &t in &to {
+                    menu.set_slot(env, t, None);
+                }
+                to
+            };
+            assert_eq!(landing("raw_iron", 5, 30), [0]);
+            assert_eq!(landing("coal", 5, 30), [1]);
+            // Neither: between the hotbar and the inventory, as a shift-click.
+            assert_eq!(landing("dirt", 5, 30), [3]);
+            assert_eq!(landing("dirt", 5, 3), [30]);
+            // Out of the fuel slot: moveItemStackTo(3, 39, false).
+            assert_eq!(landing("coal", 5, 1), [3]);
+        });
+    }
+
+    #[test]
+    fn quick_move_landing_never_fills_a_result() {
+        with_menu(Kind::Furnace("smelting"), |env, menu| {
+            menu.creative = false;
+            menu.set_slot(env, 2, stack("iron_ingot", 5));
+            menu.set_slot(env, 30, stack("iron_ingot", 5));
+            // An ingot with room in the output still goes elsewhere.
+            assert_eq!(menu.quick_move_landing(env, 30), [3]);
+            assert_eq!(menu.slot(2).map(|s| s.count), Some(5));
+        });
+        with_menu(Kind::Furnace("smelting"), |env, menu| {
+            menu.creative = false;
+            // The whole output moves: into the partial stack, then an empty slot.
+            menu.set_slot(env, 2, stack("iron_ingot", 5));
+            menu.set_slot(env, 20, stack("iron_ingot", 62));
+            assert_eq!(menu.quick_move_landing(env, 2), [20, 38]);
+        });
+        with_menu(Kind::Furnace("smelting"), |env, menu| {
+            menu.creative = false;
+            // A full inventory: the output stays, nothing to land on.
+            menu.set_slot(env, 2, stack("iron_ingot", 5));
+            for i in 3..39 {
+                menu.set_slot(env, i, stack("stone", 64));
+            }
+            assert!(menu.quick_move_landing(env, 2).is_empty());
+        });
+    }
+
+    #[test]
+    fn quick_move_landing_routes_a_crafting_table_like_vanilla() {
+        with_menu(Kind::Crafting, |env, menu| {
+            menu.creative = false;
+            // 0 result, 1..10 grid, 10..37 inventory, 37..46 hotbar.
+            menu.set_slot(env, 37, stack("oak_log", 2));
+            assert_eq!(menu.quick_move_landing(env, 37), [1]);
+        });
+        with_menu(Kind::Crafting, |env, menu| {
+            menu.creative = false;
+            menu.set_slot(env, 1, stack("oak_log", 1));
+            menu.settle(env);
+            assert_eq!(menu.slot(0).map(|s| s.count), Some(4));
+            assert_eq!(menu.quick_move_landing(env, 0), [45]);
+        });
+    }
+
+    #[test]
+    fn quick_move_landing_routes_plain_containers() {
+        for (kind, size) in [
+            (Kind::Hopper, 5),
+            (Kind::Dispenser, 9),
+            (Kind::Chest(3), 27),
+        ] {
+            with_menu(kind, |env, menu| {
+                menu.creative = false;
+                let hotbar = size + 27;
+                menu.set_slot(env, hotbar, stack("stone", 3));
+                assert_eq!(menu.quick_move_landing(env, hotbar), [0]);
+            });
+            with_menu(kind, |env, menu| {
+                menu.creative = false;
+                menu.set_slot(env, 0, stack("stone", 3));
+                assert_eq!(menu.quick_move_landing(env, 0), [size + 35]);
+            });
+        }
+    }
+
+    #[test]
+    fn takes_one_follows_the_slots_rules() {
+        with_menu(Kind::Furnace("smelting"), |env, menu| {
+            menu.creative = false;
+            let (coal, cobble) = (stack("coal", 1).unwrap(), stack("cobblestone", 1).unwrap());
+            let bucket = stack("bucket", 1).unwrap();
+            assert!(menu.takes_one(env, 0, &cobble), "the input takes anything");
+            assert!(menu.takes_one(env, 1, &coal));
+            assert!(!menu.takes_one(env, 1, &cobble), "not fuel");
+            assert!(!menu.takes_one(env, 2, &coal), "the output");
+            menu.set_slot(env, 1, Some(bucket.clone()));
+            assert!(
+                !menu.takes_one(env, 1, &bucket),
+                "one bucket in the fuel slot"
+            );
+            menu.set_slot(env, 1, stack("coal", 1));
+            assert!(!menu.takes_one(env, 1, &bucket), "another item");
+            assert!(menu.takes_one(env, 1, &coal));
+        });
+    }
+
     /// `HorseInventoryMenu`: a shift-click wears horse armour, then saddles,
     /// then fills the chest; the body slot takes only what the mount may wear.
     #[test]
@@ -3175,6 +3432,95 @@ pub(crate) mod tests {
             chest.click(env, 0, 0, Input::QuickMove).unwrap();
             assert!(chest.equipped.is_empty());
         });
+    }
+
+    /// A mod menu type: three slots, then a result (slot 3).
+    fn mod_menu() -> Kind {
+        Kind::Mod(Box::leak(Box::new(crate::containers::ModMenuType {
+            id: "test:press",
+            slots: 4,
+            data_slots: 0,
+            results: vec![3],
+        })))
+    }
+
+    /// A mod menu type's result takes nothing in by a click, a drag, a swap
+    /// or a shift-click (`Slot.mayPlace`), not even a top-up of its own item,
+    /// and gives what it holds. A slot its screen leaves out takes no click.
+    #[test]
+    fn a_mod_menu_result_is_take_only() {
+        // No game data: an item table of no items, each stacking to 64.
+        let root = std::env::temp_dir().join(format!("horizon-mod-menu-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("data/minecraft/recipe")).unwrap();
+        let items = Items::for_tests(Default::default());
+        let recipes = Recipes::load(&root, &items, &PackOverlay::NONE).unwrap();
+        let brewing = Brewing::load(&root, &items, &PackOverlay::NONE);
+        let _ = std::fs::remove_dir_all(&root);
+        let (banners, station_recipes) = (Banners::default(), Default::default());
+        let (enchantments, names) = (Default::default(), Default::default());
+        let env = &Env {
+            items: &items,
+            recipes: &recipes,
+            brewing: &brewing,
+            banners: &banners,
+            station_recipes: &station_recipes,
+            enchantments: &enchantments,
+            names: &names,
+            trade: None,
+            maps: None,
+        };
+        let menu = &mut Menu::new(mod_menu());
+        {
+            menu.creative = false;
+            let n = |s: Option<&ItemStack>| s.map(|s| s.count);
+            // 0..4 the mod's, 4..31 inventory, 31..40 hotbar.
+            menu.carried = stack("stick", 4);
+            menu.click(env, 3, 0, Input::Pickup).unwrap();
+            menu.click(env, 0, 0, Input::Pickup).unwrap();
+            assert_eq!((n(menu.slot(3)), n(menu.slot(0))), (None, Some(4)));
+            // The carried ingots take the result's one instead of going in.
+            menu.put(env, 3, stack("iron_ingot", 1));
+            menu.carried = stack("iron_ingot", 2);
+            menu.click(env, 3, 0, Input::Pickup).unwrap();
+            assert_eq!((n(menu.slot(3)), n(menu.carried.as_ref())), (None, Some(3)));
+            // A drag over 1 to 3 passes the result by.
+            menu.carried = stack("dirt", 4);
+            for (slot, button) in [(-999, 0), (1, 1), (2, 1), (3, 1), (-999, 2)] {
+                menu.click(env, slot, button, Input::QuickCraft).unwrap();
+            }
+            let held = |m: &Menu| [0, 1, 2, 3].map(|s| n(m.slot(s)));
+            assert_eq!(held(menu), [Some(4), Some(2), Some(2), None]);
+            // A shift-click from the hotbar tops up no result, and a hotbar
+            // key puts nothing in it but takes from it into an empty slot.
+            menu.put(env, 3, stack("iron_ingot", 1));
+            menu.set_player_item(0, stack("iron_ingot", 3));
+            menu.click(env, 31, 0, Input::QuickMove).unwrap();
+            menu.click(env, 3, 0, Input::Swap).unwrap();
+            assert_eq!(
+                (n(menu.slot(3)), n(menu.player_item(0))),
+                (Some(1), Some(3))
+            );
+            menu.click(env, 3, 1, Input::Swap).unwrap();
+            assert_eq!((n(menu.slot(3)), n(menu.player_item(1))), (None, Some(1)));
+            // F takes it into an empty off hand, and a double click collects from it.
+            menu.put(env, 3, stack("iron_ingot", 2));
+            menu.click(env, 3, 40, Input::Swap).unwrap();
+            assert_eq!((n(menu.slot(3)), n(menu.player_item(40))), (None, Some(2)));
+            menu.put(env, 3, stack("iron_ingot", 2));
+            menu.set_player_item(0, None);
+            menu.set_player_item(1, None);
+            menu.carried = stack("iron_ingot", 1);
+            menu.click(env, 4, 0, Input::PickupAll).unwrap();
+            assert_eq!((n(menu.slot(3)), n(menu.carried.as_ref())), (None, Some(3)));
+            // A hidden slot takes neither a click nor a shift-click.
+            menu.set_player_item(0, stack("iron_ingot", 3));
+            menu.put(env, 0, None);
+            menu.hide_slot(0);
+            menu.carried = stack("stone", 1);
+            menu.click(env, 0, 0, Input::Pickup).unwrap();
+            menu.click(env, 31, 0, Input::QuickMove).unwrap();
+            assert_eq!((n(menu.slot(0)), n(menu.player_item(0))), (None, Some(3)));
+        }
     }
 
     #[test]

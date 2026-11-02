@@ -14,18 +14,15 @@ const HISTORY: usize = 160;
 /// How often the numbers change.
 const REDRAW: Duration = Duration::from_millis(100);
 
-/// One frame's steps in milliseconds. `cpu` is `build`, `record`, `finish` and
-/// `submit`; `acquire` and `present` are the wait it leaves out.
+/// One frame's steps in milliseconds. `cpu` is `build` and `record`;
+/// `acquire` is the wait it leaves out.
 #[derive(Clone, Copy, Default)]
 pub struct Steps {
     /// Everything before the renderer: the world, entities and HUD.
     pub build: f32,
     /// Recording the frame's passes.
     pub record: f32,
-    pub finish: f32,
-    pub submit: f32,
     pub acquire: f32,
-    pub present: f32,
 }
 
 #[derive(Default)]
@@ -70,21 +67,18 @@ impl FrameGraph {
         let avg =
             |f: fn(&(f32, f32, f32, Steps)) -> f32| self.frames.iter().map(f).sum::<f32>() / n;
         let (frame, cpu, gpu) = (avg(|f| f.0), avg(|f| f.1), avg(|f| f.2));
-        let (build, record, finish, submit) = (
+        let (build, record, acquire) = (
             avg(|f| f.3.build),
             avg(|f| f.3.record),
-            avg(|f| f.3.finish),
-            avg(|f| f.3.submit),
+            avg(|f| f.3.acquire),
         );
-        let (acquire, present) = (avg(|f| f.3.acquire), avg(|f| f.3.present));
         let worst = self.frames.iter().map(|f| f.0).fold(0.0f32, f32::max);
         let lines = [
             format!("{:.0} fps", 1000.0 / frame.max(0.001)),
             format!("frame {frame:.3} ms  max {worst:.3}"),
             format!("cpu {cpu:.3}  gpu {gpu:.3} ms"),
             format!("build {build:.3}  record {record:.3}"),
-            format!("finish {finish:.3}  submit {submit:.3}"),
-            format!("acquire {acquire:.3}  present {present:.3}"),
+            format!("acquire {acquire:.3}"),
         ];
         let width = 120.0f32.max(
             lines

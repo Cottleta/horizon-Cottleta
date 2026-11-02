@@ -34,6 +34,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(super) mod events;
+mod management;
+mod report;
 mod status;
 
 /// What the tick loop tells `ServerWatchdog`: when the tick in progress was
@@ -164,6 +167,96 @@ pub(super) fn player_joined(id: u128, name: &str) {
     }
 }
 
+/// `server.toml`'s `[anticheat]`, beside server.properties when horizon-server runs the game; the
+/// default (on) without the file or the section, off (with an error logged) when the section is wrong.
+fn load_anticheat() -> horizon_anticheat::Config {
+    let Ok(text) = std::fs::read_to_string("server.toml") else {
+        return Default::default();
+    };
+    match horizon_anticheat::Config::from_server_toml(&text) {
+        Ok(config) => {
+            if config.enabled {
+                log(
+                    "INFO",
+                    "Anticheat on (server.toml [anticheat]; enabled = false turns it off)",
+                );
+            }
+            config
+        }
+        Err(e) => {
+            log(
+                "ERROR",
+                &format!("server.toml: {e}; the anticheat stays off"),
+            );
+            horizon_anticheat::Config {
+                enabled: false,
+                ..Default::default()
+            }
+        }
+    }
+}
+
+/// `server.toml`'s `[chat_filter]` (docs/chat-filter.md), like `[anticheat]`: on by default, off (with an
+/// error logged) when the section is wrong. The mutes are kept beside server.properties.
+fn load_chat_filter() -> Option<horizon_chat_filter::Guard> {
+    let text = std::fs::read_to_string("server.toml").unwrap_or_default();
+    let config = match horizon_chat_filter::Config::from_server_toml(&text) {
+        Ok(config) => config,
+        Err(e) => {
+            log(
+                "ERROR",
+                &format!("server.toml: {e}; the chat filter stays off"),
+            );
+            return None;
+        }
+    };
+    if !config.enabled {
+        return None;
+    }
+    let (guard, problem) = horizon_chat_filter::Guard::load(config, std::path::Path::new("."));
+    if let Some(problem) = problem {
+        log("WARN", &problem);
+    }
+    log(
+        "INFO",
+        &format!(
+            "Chat filter on: {} words (server.toml [chat_filter]; enabled = false turns it off)",
+            guard.filter.len()
+        ),
+    );
+    Some(guard)
+}
+
+/// The secret for Velocity's player information forwarding, from `forwarding.secret` beside server.properties.
+/// No file means no forwarding. A file that is empty or can't be read stops the start, because an empty secret
+/// would let anyone sign a login, and a typo must not leave a server open that was meant to be behind a proxy.
+fn forwarding_secret(online: bool) -> Result<Option<Vec<u8>>> {
+    const FILE: &str = "forwarding.secret";
+    if !std::path::Path::new(FILE).exists() {
+        return Ok(None);
+    }
+    if online {
+        log(
+            "WARN",
+            "forwarding.secret is ignored: the proxy authenticates the players, so set \"online-mode\" to \"false\".",
+        );
+        return Ok(None);
+    }
+    let text = std::fs::read(FILE).map_err(|e| format!("{FILE}: {e}"))?;
+    let secret = text.trim_ascii().to_vec();
+    if secret.is_empty() {
+        return Err(format!(
+            "{FILE} is empty: put the proxy's forwarding secret in it, or remove the file"
+        )
+        .into());
+    }
+    log(
+        "INFO",
+        "Velocity player information forwarding is on (forwarding.secret)",
+    );
+    Ok(Some(secret))
+}
+
 /// Log4j's console pattern: `[HH:mm:ss] [thread/LEVEL]: message`.
 pub(super) fn log(level: &str, message: &str) {
     log_from("Server thread", level, message);
@@ -251,6 +344,9 @@ pub(super) fn preflight(options: &mut Options) -> Result<bool> {
     for w in &props.warnings {
         log("WARN", w);
     }
+    // A dedicated server's tree: /op, /ban, /whitelist... (single player's
+    // server thread is an integrated one and never gets here).
+    horizon_client::command::vanilla::set_dedicated_commands(true);
     // Horizon's own commands are the owner's choice, off as on vanilla.
     if props
         .raw
@@ -311,6 +407,8 @@ pub(super) struct Lists {
     pub ip_bans: IpBanList,
     pub use_whitelist: bool,
     pub enforce_whitelist: bool,
+    /// `op-permission-level`: what `/op` grants (operatorUserPermissions).
+    pub op_level: i32,
 }
 impl Lists {
     fn load() -> Self {
@@ -321,6 +419,7 @@ impl Lists {
             ip_bans: IpBanList::new("banned-ips.json"),
             use_whitelist: false,
             enforce_whitelist: false,
+            op_level: 4,
         };
         // DedicatedPlayerList's constructor order and its LOGGER.warn lines.
         let warn = |what: &str, r: std::result::Result<(), String>| {
@@ -401,6 +500,11 @@ const LEGACY_PRESET_NAMES: [(&str, horizon_client::save::WorldPreset); 2] = [
     ),
 ];
 
+/// server.properties' line for `server.toml`'s `max_view_distance` (horizon-server writes it).
+const FAR_PROPERTY: &str = "horizon-max-view-distance";
+/// server.properties' line for `server.toml`'s `admin_feedback_to_ops` (horizon-server writes it).
+const ADMIN_FEEDBACK_PROPERTY: &str = "horizon-admin-feedback-to-ops";
+
 /// Identifier.tryParse: `namespace:path`, or a path in `minecraft`.
 fn parse_identifier(text: &str) -> Option<String> {
     let (namespace, path) = text.split_once(':').unwrap_or(("minecraft", text));
@@ -439,7 +543,7 @@ impl Game<'_> {
             });
         let flat = preset == horizon_client::save::WorldPreset::Flat;
         let settings = if flat {
-            let biomes = self.res.biomes();
+            let biomes = world_biomes!(self);
             let (settings, errors) = horizon_client::flatgen::settings_from_json(
                 &props.generator_settings,
                 |b| self.pack.assets.registry.default_state(b).is_some(),
@@ -457,7 +561,9 @@ impl Game<'_> {
             structures: props.generate_structures,
             bonus_chest: false,
         };
-        horizon_client::save::write_world_gen_settings_with(dir, props.seed, options, settings)
+        horizon_client::save::write_world_gen_settings_with(
+            dir, props.seed, options, settings, None,
+        )
     }
 }
 
@@ -503,8 +609,15 @@ struct ServerState {
     paused: bool,
     /// `broadcast-console-to-ops`.
     broadcast_console: bool,
+    /// `broadcast-rcon-to-ops` (`MinecraftServer.shouldRconBroadcast`).
+    broadcast_rcon: bool,
     /// `op-permission-level`: what `/op` grants (operatorUserPermissions).
     op_level: i32,
+    /// `horizon-report`: the ticks being recorded.
+    report: Option<report::Recording>,
+    /// View and simulation distance, and the player limit, for the report.
+    view: (u32, u32),
+    max_players: usize,
 }
 
 /// The dedicated-only commands' replies vanilla sends with `broadcast`
@@ -535,6 +648,7 @@ impl Game<'_> {
     pub(super) fn run_dedicated(&mut self) -> Result<()> {
         let result = self.run_dedicated_inner();
         if let Err(error) = &result {
+            self.native_players_leaving();
             self.native_lifecycle_world_failed(&error.to_string());
             self.native_lifecycle_close_failed(&error.to_string());
         }
@@ -654,10 +768,16 @@ impl Game<'_> {
         let mut lists = Lists::load();
         lists.use_whitelist = props.white_list;
         lists.enforce_whitelist = props.enforce_whitelist;
+        lists.op_level = props.op_permission_level;
         let lists = Arc::new(Mutex::new(lists));
+        self.server_lists = Some(lists.clone());
         log("INFO", &format!("Preparing level \"{level_name}\""));
         let folder = world_dir.to_string_lossy().into_owned();
+        // MinecraftServer.loadLevel's start: nothing is loaded yet.
+        self.native_server_about_to_start(true);
         self.native_lifecycle_open_started();
+        // The registries the server sends are read while the world prepares.
+        let sync = super::lan::preload_sync_data(&self.options.resources);
         self.load_world(WorldRequest::new(
             &folder,
             Some(&level_name),
@@ -671,8 +791,20 @@ impl Game<'_> {
         // The single-player host's state is not used: players have their own files.
         self.level.position = None;
         // DedicatedServer.initServer: worldData.setGameType; forceDifficulty.
+        // `load_world` restored difficulty from level.dat; server.properties wins
+        // (vanilla's forceDifficulty), including health_rules used for despawn (#4694).
         self.set_default_game_mode(game_mode);
-        self.ui.difficulty = props.difficulty as u8;
+        // MinecraftServer.setDifficulty: a hardcore world is always hard.
+        self.ui.difficulty = if self.level.hardcore {
+            3
+        } else {
+            props.difficulty as u8
+        };
+        self.level.set_difficulty(self.ui.difficulty);
+        self.sync_rules();
+        if self.ui.difficulty == 0 {
+            self.mobs.retain(|m| !m.hostile());
+        }
         // DedicatedServer.initServer: a legacy `announce-player-achievements`
         // sets the show_advancement_messages rule once, as the file is read.
         if let Some(announce) = props.announce_player_achievements {
@@ -695,9 +827,18 @@ impl Game<'_> {
             gate_lists.lock().unwrap().can_login(address, &user)
         });
         let bypass_lists = lists.clone();
+        // DedicatedServer's constructor: `enable-code-of-conduct` reads the
+        // `codeofconduct` folder, and a folder it can't read stops the start.
+        let code_of_conducts = if props.code_of_conduct {
+            horizon_client::lan::code_of_conduct::read(std::path::Path::new("codeofconduct"))?
+        } else {
+            Vec::new()
+        };
         let favicon = std::fs::read("server-icon.png")
             .ok()
             .filter(|b| png_size(b) == Some((64, 64)));
+        // Behind a Velocity proxy: `forwarding.secret` in the server folder, like the proxy's own file.
+        let forwarding_secret = forwarding_secret(online.is_some())?;
         let net = NetConfig {
             bind: (!props.server_ip.is_empty())
                 .then(|| props.server_ip.parse().ok())
@@ -725,14 +866,24 @@ impl Game<'_> {
             })),
             gate: Some(gate),
             online,
+            forwarding_secret,
             log: Some(NetLog {
                 write: Arc::new(log_from),
                 lang: Arc::new(horizon_client::net::load_language(&self.options.resources)),
                 log_ips: props.log_ips,
             }),
             resource_pack: props.resource_pack.clone(),
+            code_of_conducts,
             // DedicatedServer.serverLinks: `bug-report-link` as the only link
             // (ServerLinks.KnownLinkType.BUG_REPORT is id 0).
+            levels: self.level_shapes,
+            horizon_clients_only: props
+                .raw
+                .get(horizon_client::lan::HORIZON_CLIENTS_ONLY)
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("true")),
+            lod_distance: horizon_client::lod_net::distance_property(
+                props.raw.get(horizon_client::lod_net::PROPERTY),
+            ),
             server_links: if props.bug_report_link.is_empty() {
                 Vec::new()
             } else if super::server_links::valid_untrusted_uri(&props.bug_report_link) {
@@ -747,8 +898,10 @@ impl Game<'_> {
                 );
                 Vec::new()
             },
+            owner_profile: None,
         };
         let config = HubConfig {
+            allow_flight: props.allow_flight,
             default_game_mode: game_mode,
             guest_commands: true,
             force_game_mode: props.force_game_mode,
@@ -756,6 +909,7 @@ impl Game<'_> {
             view_distance: props.view_distance.clamp(2, 32),
             simulation_distance: props.simulation_distance.clamp(2, 32),
             dimension: self.dim.id().to_owned(),
+            levels: self.level_shapes,
             seed: self.level.seed,
             max_players: props.max_players.max(0) as usize,
             dedicated: true,
@@ -766,6 +920,9 @@ impl Game<'_> {
             guest_commands: true,
             force_game_mode: props.force_game_mode,
         };
+        if let Some(sync) = sync {
+            sync.adopt(&self.pack_files());
+        }
         if let Err(e) = self.lan_host(settings, net, config, None) {
             log("WARN", "**** FAILED TO BIND TO PORT!");
             log("WARN", &format!("The exception was: {e}"));
@@ -773,10 +930,34 @@ impl Game<'_> {
             return Ok(());
         }
         self.sync_ops(&lists);
+        let anticheat = load_anticheat();
+        let chat_filter = load_chat_filter();
+        // Horizon's far ring (docs/hosting.md): server.toml's `max_view_distance`.
+        let far = props
+            .raw
+            .get(FAR_PROPERTY)
+            .and_then(|v| v.trim().parse::<i32>().ok())
+            .unwrap_or(0)
+            .clamp(0, 32);
+        let (registry, biomes) = (self.pack.assets.registry, self.res.biomes().clone());
         if let Some(host) = self.lan.as_mut() {
+            if far > host.hub.config.view_distance {
+                host.hub.far = Some(horizon_client::lan::far::Far::new(far, registry, biomes));
+                log(
+                    "INFO",
+                    &format!("Sending saved chunks up to {far} chunks away (max_view_distance)"),
+                );
+            }
+            host.hub.set_anticheat(anticheat);
+            host.hub.set_chat_filter(chat_filter);
             host.hub.spawn_protection = props.spawn_protection;
             host.hub.chat_spam_threshold = props.chat_spam_threshold_seconds.wrapping_mul(20);
             host.hub.command_spam_threshold = props.command_spam_threshold_seconds.wrapping_mul(20);
+            // Off: an operator's commands reach no other player, only the log.
+            host.hub.admin_feedback_to_ops = props
+                .raw
+                .get(ADMIN_FEEDBACK_PROPERTY)
+                .is_none_or(|v| v.trim() != "false");
         }
         log(
             "INFO",
@@ -802,22 +983,40 @@ impl Game<'_> {
             ticks: Default::default(),
             paused: false,
             broadcast_console: props.broadcast_console_to_ops,
+            broadcast_rcon: props.broadcast_rcon_to_ops,
             op_level: props.op_permission_level,
+            report: None,
+            view: (
+                props.view_distance.clamp(2, 32) as u32,
+                props.simulation_distance.clamp(2, 32) as u32,
+            ),
+            max_players: props.max_players.max(0) as usize,
         };
         let pause_after = props.pause_when_empty_seconds * 20;
         let idle_timeout = props.player_idle_timeout;
         let mut next = Instant::now();
+        // The panic that ended the tick loop, when one did.
+        let mut crashed: Option<String> = None;
         self.fns.permission = Some(props.function_permission_level.clamp(0, 4) as u8);
         let watchdog = Watchdog::start(props.max_tick_time);
+        let mut braked = Instant::now();
         while !state.stop {
             let tick_start = Instant::now();
             if let Some(watchdog) = &watchdog {
                 watchdog.tick_due(next, self.clock.tick_duration());
             }
-            while let Ok(line) = state.console.try_recv() {
-                self.console_line(&mut state, &line);
+            // The console's lines and the control socket run in the tick too
+            // (`handleConsoleInputs`): a panic there is the same crash.
+            let prelude = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                while let Ok(line) = state.console.try_recv() {
+                    self.console_line(&mut state, &line);
+                }
+                self.poll_server_control(&mut state);
+            }));
+            if let Err(payload) = prelude {
+                crashed = Some(panic_message(payload.as_ref()));
+                break;
             }
-            self.poll_server_control(&mut state);
             let players = self.lan.as_ref().map_or(0, |h| h.hub.guests.len());
             if pause_after > 0 {
                 // A `/pregen` task keeps the server busy as a player would:
@@ -845,19 +1044,60 @@ impl Game<'_> {
                 self.ticks = self.ticks.max(1);
             }
             // MinecraftServer.tickServer: while paused only the connections run.
-            self.tick_server_timed(paused)?;
+            // `MinecraftServer.runServer` catches what the tick throws, writes the crash
+            // report and still stops the server (saves). A panic here does the same.
+            let ticked =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match &mut state.report {
+                        Some(recording) => self.tick_server_spans(paused, |wall, cpu, spans| {
+                            recording.add(wall, cpu, spans)
+                        }),
+                        None => self.tick_server_timed(paused),
+                    }
+                }));
+            match ticked {
+                Ok(result) => result?,
+                Err(payload) => {
+                    crashed = Some(panic_message(payload.as_ref()));
+                    break;
+                }
+            }
+            if state.report.as_ref().is_some_and(report::Recording::done)
+                && let Some(recording) = state.report.take()
+            {
+                self.finish_report(recording, state.view, state.max_players);
+            }
+            // DedicatedServer.sendLowDiskSpaceWarning: the operators hear of it
+            // (no window drains the toasts here).
+            if horizon_client::chunk_io::take().low_disk_space
+                && let Some(host) = self.lan.as_ref()
+            {
+                host.hub.send_low_disk_space_warning();
+            }
             if idle_timeout > 0 {
                 self.kick_idle(idle_timeout);
             }
             // MinecraftServer.tickServer records each tick's time, for /tick query (and the status).
             self.clock.record(tick_start.elapsed());
+            // The far ring's brake, once a second on the average tick.
+            if braked.elapsed() >= Duration::from_secs(1)
+                && let Some(host) = self.lan.as_mut()
+                && let Some(far) = host.hub.far.as_mut()
+            {
+                braked = Instant::now();
+                let mspt = self.clock.average_nanos() as f64 / 1e6;
+                far.brake(mspt, host.hub.config.view_distance);
+            }
             state.ticked(Instant::now());
             self.wait_for_next_server_tick(&mut next, paused);
         }
         if let Some(watchdog) = &watchdog {
             watchdog.running.store(false, Ordering::Relaxed);
         }
-        self.stop_dedicated()
+        match crashed {
+            Some(message) => self.stop_after_crash(&message),
+            None => self.stop_dedicated(),
+        }
     }
 
     /// A dedicated server of its own, not single player's server thread
@@ -909,11 +1149,12 @@ impl Game<'_> {
     /// nobody is online a dedicated server keeps none (vanilla has no spawn
     /// ticket), an integrated one the spawn chunk's.
     pub(super) fn update_dedicated_streaming(&mut self) {
+        let rule = self.ui.rules.bool("spectators_generate_chunks");
         let guest = self.lan.as_ref().and_then(|h| {
             h.hub
                 .guests
                 .iter()
-                .find(|g| h.hub.here(g))
+                .find(|g| h.hub.here(g) && super::game_mode::loads_chunks(rule, g.spectator()))
                 .map(|g| g.chunk())
         });
         if self.standalone_server() {
@@ -952,7 +1193,7 @@ impl Game<'_> {
     }
 
     /// Ops' permission levels for the hub (PlayerList.getProfilePermissions).
-    fn sync_ops(&mut self, lists: &Arc<Mutex<Lists>>) {
+    pub(super) fn sync_ops(&mut self, lists: &Arc<Mutex<Lists>>) {
         let Some(host) = self.lan.as_mut() else {
             return;
         };
@@ -968,7 +1209,7 @@ impl Game<'_> {
     }
 
     /// A player on the server, by name.
-    fn online_player(&self, name: &str) -> Option<NameAndId> {
+    pub(super) fn online_player(&self, name: &str) -> Option<NameAndId> {
         let hub = &self.lan.as_ref()?.hub;
         let g = hub
             .guests
@@ -984,7 +1225,18 @@ impl Game<'_> {
     /// service, else (offline) the offline player. None, told to the console:
     /// no such player.
     fn resolve(&self, name: &str) -> Option<NameAndId> {
-        let found = USER_CACHE.lock().unwrap().as_mut().and_then(|cache| {
+        let found = self.resolve_name(name);
+        if found.is_none() {
+            let unknown = Text::translate("argument.player.unknown", &[]);
+            log("INFO", &format!("System chat: {}", unknown.plain()));
+        }
+        found
+    }
+
+    /// `Services.nameToIdCache().get(name)`: the user cache, else the profile
+    /// service, else (offline) the offline player.
+    pub(super) fn resolve_name(&self, name: &str) -> Option<NameAndId> {
+        USER_CACHE.lock().unwrap().as_mut().and_then(|cache| {
             cache.get_by_name(name, |lower| {
                 let found = profiles::find_by_name(&profiles::discovery_url(), lower);
                 if found.is_none() {
@@ -992,12 +1244,7 @@ impl Game<'_> {
                 }
                 found
             })
-        });
-        if found.is_none() {
-            let unknown = Text::translate("argument.player.unknown", &[]);
-            log("INFO", &format!("System chat: {}", unknown.plain()));
-        }
-        found
+        })
     }
 
     /// MinecraftServer.sendSystemMessage: what the console is told; while
@@ -1016,10 +1263,24 @@ impl Game<'_> {
 
     /// One console line, then the operators' share of its feedback.
     fn console_line(&mut self, state: &mut ServerState, line: &str) {
-        self.console_broadcast = Some(state.broadcast_console);
+        self.console_line_telling(state, line, state.broadcast_console);
+    }
+
+    /// One console line run as `RconConsoleSource` runs an RCON command: the same console at level 4,
+    /// its source named `Rcon`, and the operators told when `broadcast-rcon-to-ops` is on.
+    fn rcon_line(&mut self, state: &mut ServerState, line: &str) {
+        self.rcon_source = true;
+        self.console_line_telling(state, line, state.broadcast_rcon);
+        self.rcon_source = false;
+    }
+
+    /// `console_line` with `inform` as `CommandSource.shouldInformAdmins`.
+    fn console_line_telling(&mut self, state: &mut ServerState, line: &str, inform: bool) {
+        self.console_broadcast = Some(inform);
         self.console_command(state, line);
         self.console_broadcast = None;
         if let Some(mut host) = self.lan.take() {
+            crash_fixture("hub", || host.hub.guests.iter().any(|g| g.placed));
             self.run_level_teleports(&mut host);
             self.send_admin_feedback(&mut host, None);
             self.lan = Some(host);
@@ -1042,6 +1303,33 @@ impl Game<'_> {
             "stop" => {
                 self.console_reply(Text::translate("commands.stop.stopping", &[]));
                 state.stop = true;
+            }
+            // Horizon's own, on the console only: a performance report (report.rs).
+            "horizon-report" => {
+                let seconds = match rest.first().map(|s| s.parse::<u32>()) {
+                    None => Ok(60),
+                    Some(Ok(s)) if (1..=report::MAX_SECONDS).contains(&s) => Ok(s),
+                    Some(_) => Err(()),
+                };
+                match (seconds, &state.report) {
+                    (Err(()), _) => log(
+                        "INFO",
+                        &format!(
+                            "horizon-report [SECONDS]: 1 to {} seconds, 60 by default",
+                            report::MAX_SECONDS
+                        ),
+                    ),
+                    (Ok(_), Some(_)) => {
+                        log("INFO", "A performance report is already being recorded")
+                    }
+                    (Ok(seconds), None) => {
+                        state.report = Some(report::Recording::start(seconds));
+                        log(
+                            "INFO",
+                            &format!("Recording a performance report for {seconds} s (reports/)"),
+                        );
+                    }
+                }
             }
             "save-all" => {
                 self.console_reply(Text::translate("commands.save.saving", &[]));
@@ -1137,6 +1425,16 @@ impl Game<'_> {
                 }
             }
             "whitelist" => self.console_whitelist(state, &rest),
+            // The chat filter's (game/chat_filter.rs), on servers that filter.
+            "unmute"
+                if rest.len() == 1 && self.lan.as_ref().is_some_and(|h| h.hub.chat_filter_on()) =>
+            {
+                if let Some(mut host) = self.lan.take() {
+                    let reply = self.unmute(&mut host, rest[0], "Server");
+                    self.lan = Some(host);
+                    self.console_reply(lit(&reply));
+                }
+            }
             "ban" if !rest.is_empty() => {
                 let Some(user) = self.resolve(rest[0]) else {
                     return;
@@ -1324,15 +1622,26 @@ impl Game<'_> {
                 // SayCommand from the console: an unsigned system chat
                 // message of type say_command, logged as not secure.
                 let message = rest.join(" ");
-                log("INFO", &format!("[Not Secure] [Server] {message}"));
+                // An RCON client's `say` is `[Rcon] message`, and its reply stays empty: the line is
+                // the console's own log, not a message to the source.
+                let name = if self.rcon_source { "Rcon" } else { "Server" };
+                let held = self.rcon_source.then(|| CAPTURE.take());
+                log("INFO", &format!("[Not Secure] [{name}] {message}"));
+                if let Some(held) = held {
+                    CAPTURE.set(held);
+                }
                 if let Some(h) = &self.lan {
-                    h.hub.say("Server", &message);
+                    h.hub.say(name, &message);
                 }
             }
             _ => {
                 // The game's dispatcher, captured for the console.
                 self.chat_capture = Some(Vec::new());
-                self.as_console(|g| g.run_command(line));
+                // A command a native mod registered goes to the mods first,
+                // looked up by the same first word the match above read.
+                if !self.perform_native_console_command(line.trim()) {
+                    self.as_console(|g| g.run_command(line));
+                }
                 for text in self.chat_capture.take().unwrap_or_default() {
                     self.console_reply(text);
                 }
@@ -1420,8 +1729,15 @@ impl Game<'_> {
         }
     }
 
+    /// `DedicatedServer.setUsingWhitelist`: the flag, and `white-list` in
+    /// server.properties.
+    pub(super) fn set_using_whitelist(&mut self, lists: &Arc<Mutex<Lists>>, on: bool) {
+        lists.lock().unwrap().use_whitelist = on;
+        self.store_property("white-list", on.to_string());
+    }
+
     /// DedicatedServerSettings.update: change one key and store the file.
-    fn store_property(&mut self, key: &str, value: String) {
+    pub(super) fn store_property(&mut self, key: &str, value: String) {
         let path = PathBuf::from("server.properties");
         if let Ok(p) = ServerProperties::from_file(&path, &mut SystemEntropy::default())
             && let Ok(p) = p.update(key, value)
@@ -1433,7 +1749,7 @@ impl Game<'_> {
     /// MinecraftServer.kickUnlistedPlayers: with `enforce-whitelist` and the
     /// whitelist on, whoever is online and not on the whitelist file is
     /// disconnected (operators are not spared here).
-    fn kick_unlisted_players(&mut self, lists: &Arc<Mutex<Lists>>) {
+    pub(super) fn kick_unlisted_players(&mut self, lists: &Arc<Mutex<Lists>>) {
         let unlisted: Vec<u128> = {
             let l = lists.lock().unwrap();
             let Some(host) = self.lan.as_ref() else {
@@ -1462,7 +1778,56 @@ impl Game<'_> {
         }
     }
 
-    fn kick_uuid(&mut self, uuid: u128, reason: Tag) {
+    /// The anticheat bans a player (`HostEvent::Ban`): `banned-players.json` gets it as `/ban` adds it,
+    /// with the anticheat as its source, and the player is sent away with the ban's message.
+    pub(super) fn anticheat_ban(
+        &mut self,
+        hub: &mut horizon_client::lan::hub::Hub,
+        uuid: u128,
+        name: &str,
+        reason: &str,
+    ) {
+        let Some(lists) = &self.server_lists else {
+            // No ban list to add to: the anticheat's kick, so a flagged cheater still doesn't stay.
+            log(
+                "WARN",
+                &format!("Can't ban {name} ({reason}): no ban list; kicked"),
+            );
+            let conns: Vec<u32> = hub
+                .guests
+                .iter()
+                .filter(|g| g.uuid == uuid)
+                .map(|g| g.conn)
+                .collect();
+            for conn in conns {
+                hub.anticheat_kick(conn);
+            }
+            return;
+        };
+        let user = NameAndId {
+            id: uuid,
+            name: name.to_owned(),
+        };
+        lists.lock().unwrap().bans.add(BanEntry::new(
+            user,
+            Some("Horizon anticheat".into()),
+            None,
+            Some(reason.to_owned()),
+        ));
+        log("INFO", &format!("Banned {name}: {reason}"));
+        let conns: Vec<u32> = hub
+            .guests
+            .iter()
+            .filter(|g| g.uuid == uuid)
+            .map(|g| g.conn)
+            .collect();
+        for conn in conns {
+            hub.kick(conn, translatable("multiplayer.disconnect.banned", &[]));
+        }
+        events::record("ban", name, uuid, serde_json::json!({ "reason": reason }));
+    }
+
+    pub(super) fn kick_uuid(&mut self, uuid: u128, reason: Tag) {
         if let Some(h) = self.lan.as_mut() {
             let conns: Vec<u32> = h
                 .hub
@@ -1473,6 +1838,14 @@ impl Game<'_> {
                 .collect();
             for conn in conns {
                 h.hub.kick(conn, reason.clone());
+                if let Some(g) = h.hub.guest(conn) {
+                    events::record(
+                        "kick",
+                        &g.name,
+                        uuid,
+                        serde_json::json!({ "reason": g.left_reason }),
+                    );
+                }
             }
         }
     }
@@ -1496,20 +1869,55 @@ impl Game<'_> {
         }
     }
 
+    /// `MinecraftServer.runServer`'s `finally`: a tick that panicked still saves. What the panic
+    /// interrupted is not trusted: a guest's turn (`as_guest`) holds the game's player state
+    /// swapped in, so its record is older than what the game holds, and writing it would put
+    /// back older data than the last autosave; that guest keeps the file it has. A hub that the
+    /// panic took with it (`self.lan.take()` was in progress) saves no players at all. The
+    /// levels, the scoreboard and the other state are saved as in a normal stop.
+    fn stop_after_crash(&mut self, message: &str) -> Result<()> {
+        log("ERROR", &format!("The server thread panicked: {message}"));
+        let acting = self.lan_acting;
+        let hub_lost = self.lan.is_none();
+        if let (Some(conn), Some(host)) = (acting, self.lan.as_mut())
+            && let Some(guest) = host.hub.guests.iter_mut().find(|g| g.conn == conn)
+        {
+            guest.placed = false;
+        }
+        if hub_lost {
+            log(
+                "WARN",
+                "The panic interrupted the network tick: players are not saved, only the world",
+            );
+        } else if acting.is_some() {
+            log(
+                "WARN",
+                "The panic interrupted a player's turn: that player keeps the last saved file",
+            );
+        }
+        self.native_lifecycle.begin_close();
+        log("INFO", "Saving worlds");
+        self.save_game()?;
+        self.log_saved_levels();
+        self.native_lifecycle_world_closed();
+        self.lan_close(false);
+        Err(format!("the server thread panicked: {message}").into())
+    }
+
     fn stop_dedicated(&mut self) -> Result<()> {
         // The close request starts before player and world saves.
         self.native_lifecycle.begin_close();
+        // MinecraftServer.stopServer's start: everyone is still here.
+        self.native_server_stopping(true);
         log("INFO", "Stopping server");
+        self.native_players_leaving();
         log("INFO", "Saving players");
-        if let Some(h) = self.lan.as_mut() {
-            for g in &h.hub.guests {
-                horizon_client::lan::playerdata::save(g, &self.world_root);
-            }
-        }
-        if let Some(h) = self.lan.as_ref() {
-            for g in &h.hub.guests {
-                self.save_guest_records(h, g);
-            }
+        if let Some(mut host) = self.lan.take() {
+            self.flush_native_net(&mut host);
+            // PlayerList.removeAll: each player's file, with the vehicle it
+            // alone rides, then its records.
+            self.save_leaving_guests(&mut host);
+            self.lan = Some(host);
         }
         if let Some(h) = self.lan.as_mut() {
             let conns: Vec<u32> = h.hub.guests.iter().map(|g| g.conn).collect();
@@ -1533,6 +1941,28 @@ impl Game<'_> {
     }
 }
 
+/// `tools/test_dedicated_crash_save.py`'s fixture: with `HORIZON_CRASH_FIXTURE` naming `point`
+/// (`guest`: during a placed guest's turn, `hub`: while a console line has the hub out and a
+/// player is in), the tick panics there, to see what `stop_after_crash` keeps.
+/// `armed` is asked only when the variable names `point`, so the tick pays one
+/// load of a `OnceLock` without it.
+pub(super) fn crash_fixture(point: &str, armed: impl FnOnce() -> bool) {
+    static FIXTURE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let fixture = FIXTURE.get_or_init(|| std::env::var("HORIZON_CRASH_FIXTURE").ok());
+    if fixture.as_deref() == Some(point) && armed() {
+        panic!("crash fixture at {point}");
+    }
+}
+
+/// The text of a panic payload (`panic!("..")` is a `&str`, a formatted one a `String`).
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_owned())
+}
+
 /// The width and height of a PNG (its IHDR chunk).
 fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" || &bytes[12..16] != b"IHDR" {
@@ -1545,13 +1975,26 @@ fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{capture_log, log, log_from};
+    use super::{capture_log, log, log_from, panic_message};
     use std::{
         fs,
         io::{self, BufRead, BufReader, Read, Write},
         process::{Command, Stdio},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    /// A `panic!("literal")` carries a `&str`, a formatted one a `String`; anything else is
+    /// named as unknown, so the crash line is never empty.
+    #[test]
+    fn a_panic_payload_is_read_as_text() {
+        let literal = std::panic::catch_unwind(|| panic!("a literal")).unwrap_err();
+        assert_eq!(panic_message(literal.as_ref()), "a literal");
+        let n = 3;
+        let formatted = std::panic::catch_unwind(|| panic!("tick {n}")).unwrap_err();
+        assert_eq!(panic_message(formatted.as_ref()), "tick 3");
+        let other = std::panic::catch_unwind(|| std::panic::panic_any(7_u8)).unwrap_err();
+        assert_eq!(panic_message(other.as_ref()), "unknown panic");
+    }
 
     const LOGIN: &str = "Player[/127.0.0.1:0] logged in with entity id 2 at (0.5, 115.0, 0.5)";
     const WARNING: &str = "Authentication warning";

@@ -624,33 +624,43 @@ impl Game<'_> {
         // `BeaconRenderer.shouldRender` culls at the render distance; far
         // terrain extends that to its own distance.
         let view = f64::from(self.terrain_distance() * 16);
+        // Beams change with ticks and blocks: the frames between don't look through every
+        // block entity again.
+        let scan = self
+            .renderer
+            .as_ref()
+            .map_or(0, |r| r.block_entity_revision());
+        let scan = Some((self.ticks, scan));
         let world = &self.world;
-        if self.lod.is_some() {
-            // The beam stays after its chunk unloads; once the chunk is back,
-            // its block entity decides whether the beam is still there.
-            self.far_beacons.retain(|&pos, _| {
-                let (x, _, z) = pos;
-                !world.chunks.contains_key(&(x >> 4, z >> 4))
-                    || world
-                        .block_entities
-                        .get(&pos)
-                        .is_some_and(|e| beam(e).is_some() || is_test_instance_beam(e))
-            });
-        } else {
-            self.far_beacons.clear();
-        }
-        let test_beams: Vec<_> = world
-            .block_entities
-            .iter()
-            .filter_map(|(k, e)| Some((*k, self.test_instance_beam(e)?)))
-            .collect();
-        for (k, e) in &world.block_entities {
-            if let Some(sections) = beam(e) {
-                self.far_beacons.insert(*k, sections.to_vec());
+        if self.beams_scanned != scan {
+            self.beams_scanned = scan;
+            if self.lod.is_some() {
+                // The beam stays after its chunk unloads; once the chunk is back,
+                // its block entity decides whether the beam is still there.
+                self.far_beacons.retain(|&pos, _| {
+                    let (x, _, z) = pos;
+                    !world.chunks.contains_key(&(x >> 4, z >> 4))
+                        || world
+                            .block_entities
+                            .get(&pos)
+                            .is_some_and(|e| beam(e).is_some() || is_test_instance_beam(e))
+                });
+            } else {
+                self.far_beacons.clear();
             }
-        }
-        for (k, sections) in test_beams {
-            self.far_beacons.insert(k, sections);
+            let test_beams: Vec<_> = world
+                .block_entities
+                .iter()
+                .filter_map(|(k, e)| Some((*k, self.test_instance_beam(e)?)))
+                .collect();
+            for (k, e) in &world.block_entities {
+                if let Some(sections) = beam(e) {
+                    self.far_beacons.insert(*k, sections.to_vec());
+                }
+            }
+            for (k, sections) in test_beams {
+                self.far_beacons.insert(k, sections);
+            }
         }
         for (k, sections) in &self.far_beacons {
             let base = glam::DVec3::new(f64::from(k.0) + 0.5, f64::from(k.1), f64::from(k.2) + 0.5);

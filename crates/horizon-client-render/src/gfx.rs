@@ -4669,6 +4669,10 @@ impl Renderer {
             })
             .flat_map(|(_, blocks)| blocks)
     }
+    /// Whether `visible_block_entities` may leave some out for now, as a section fades in.
+    pub fn block_entities_fading(&self, fade_seconds: f32) -> bool {
+        self.sections_fading_in(fade_millis(fade_seconds), std::time::Instant::now())
+    }
     /// Whether a section may still be fading in over `fade_ms` (vanilla's chunk fade): one was
     /// uploaded more recently than that. Otherwise every section is whole.
     fn sections_fading_in(&self, fade_ms: u64, now: std::time::Instant) -> bool {

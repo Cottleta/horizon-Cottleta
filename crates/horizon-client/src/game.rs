@@ -2359,6 +2359,10 @@ struct Game<'a> {
     /// Beacon beam sections kept after their chunk unloads, so far terrain
     /// LOD still draws their beams (`beacon_geometry` refreshes them).
     far_beacons: HashMap<(i32, i32, i32), Vec<(u32, i32)>>,
+    /// The tick and block entity list `beacon_geometry` last looked for beams in.
+    beams_scanned: Option<(u64, u64)>,
+    /// The block entities with a renderer (`refresh_drawn_block_entities`).
+    drawn_block_entities: DrawnBlockEntities,
     /// The detail revision, centre and radius `Lod::update` last had covered for.
     lod_covered_at: Option<(u64, (i32, i32), i32)>,
     /// Whether the view's columns have all arrived, and how new it is: large
@@ -10870,6 +10874,38 @@ impl Game<'_> {
         self.entity_motion.borrow_mut().push((start as u32, id));
     }
     /// ItemEntityRenderer: items bob and spin; blocks render as small cubes.
+    /// Keeps `drawn_block_entities` current: the list changes with chunks and blocks, not
+    /// with the frame, and asking each of a lobby's thousands per frame was most of it. While
+    /// a section fades in, what shows changes without the list, so it's made each frame.
+    fn refresh_drawn_block_entities(&mut self) {
+        let Some(r) = &self.renderer else {
+            return;
+        };
+        let fading = r.block_entities_fading(self.settings.chunk_fade);
+        let revision = r.block_entity_revision();
+        let drawn = &mut self.drawn_block_entities;
+        if !fading && drawn.revision == Some(revision) {
+            return;
+        }
+        drawn.revision = (!fading).then_some(revision);
+        drawn.blocks.clear();
+        drawn.off_screen.clear();
+        let render = self.res.block_entity_render();
+        for block in r.visible_block_entities(self.settings.chunk_fade) {
+            if render.renders(block.1) {
+                drawn.blocks.push(*block);
+                // Beams and structure outlines reach far outside their block
+                // (BlockEntityRenderer.shouldRenderOffScreen): never culled.
+                drawn.off_screen.push(matches!(
+                    &*self.res.facts().get(BlockStateId(block.1)).name,
+                    "minecraft:beacon"
+                        | "minecraft:end_gateway"
+                        | "minecraft:structure_block"
+                        | "minecraft:test_instance_block"
+                ));
+            }
+        }
+    }
     fn entity_geometry(
         &mut self,
         camera: glam::DVec3,
@@ -11113,6 +11149,7 @@ impl Game<'_> {
             }
         }
         laps.lap("eg_shadows");
+        self.refresh_drawn_block_entities();
         // Block entities (BlockEntityRenderers): chests, shulker boxes, banners, skulls...
         if let Some(r) = &self.renderer {
             let lid = |p: [i32; 3]| self.chest_lid(p, alpha as f32);
@@ -11142,18 +11179,6 @@ impl Game<'_> {
             // Block entities outside the view frustum are skipped (with a
             // block of margin for models larger than their block).
             let view = self.view_frustum;
-            // Beams and structure outlines reach far outside their block
-            // (BlockEntityRenderer.shouldRenderOffScreen): never culled.
-            let off_screen = |state: u32| {
-                let name = &*self.res.facts().get(BlockStateId(state)).name;
-                matches!(
-                    name,
-                    "minecraft:beacon"
-                        | "minecraft:end_gateway"
-                        | "minecraft:structure_block"
-                        | "minecraft:test_instance_block"
-                )
-            };
             let in_view = |p: &[i32; 3]| {
                 view.is_none_or(|v| {
                     let o = (glam::DVec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2]))
@@ -11162,45 +11187,49 @@ impl Game<'_> {
                     v.intersects(o - glam::Vec3::ONE, o + glam::Vec3::splat(2.0))
                 })
             };
-            let visible =
-                r.visible_block_entities(self.settings.chunk_fade)
-                    .filter(|(p, state)| {
-                        self.res.block_entity_render().renders(*state)
-                            && (off_screen(*state) || in_view(p))
-                    });
+            let drawn = &self.drawn_block_entities;
+            let visible = drawn
+                .blocks
+                .iter()
+                .zip(&drawn.off_screen)
+                .filter(|(block, off_screen)| **off_screen || in_view(&block.0));
             if self.entity_culler.is_some()
                 || self.async_entity_culler.is_some()
                 || self.pack_ids.is_some()
             {
-                for block in visible {
+                for (block, off_screen) in visible {
                     let start = out.len();
                     self.mark_block_entity(start, block.1);
                     self.res
                         .block_entity_render()
                         .render(&scene, std::iter::once(block), &mut out);
-                    if !off_screen(block.1)
+                    if !off_screen
                         && (self.entity_culler.is_some() || self.async_entity_culler.is_some())
                     {
                         self.cull_entity_vertices(&mut out, start);
                     }
                 }
             } else {
-                self.res
-                    .block_entity_render()
-                    .render(&scene, visible, &mut out);
+                self.res.block_entity_render().render(
+                    &scene,
+                    visible.map(|(block, _)| block),
+                    &mut out,
+                );
             }
             // Mod block entities: their mods draw them (`native_block_entity_submit`),
             // culled by the bounds they give.
-            let mods = r
-                .visible_block_entities(self.settings.chunk_fade)
-                .filter(|(_, state)| !self.res.block_entity_render().renders(*state));
-            let untemplated = self.untemplated_mod_block_entities(camera);
-            self.mod_block_entity_geometry(
-                mods.chain(untemplated.iter()),
-                camera,
-                alpha as f32,
-                &mut out,
-            );
+            if self.world.block_entities.has_mods() {
+                let mods = r
+                    .visible_block_entities(self.settings.chunk_fade)
+                    .filter(|(_, state)| !self.res.block_entity_render().renders(*state));
+                let untemplated = self.untemplated_mod_block_entities(camera);
+                self.mod_block_entity_geometry(
+                    mods.chain(untemplated.iter()),
+                    camera,
+                    alpha as f32,
+                    &mut out,
+                );
+            }
             self.mark_stage(out.len(), "DESTROY");
             for &(pos, stage) in &cracks {
                 let state = self.world.block(pos[0], pos[1], pos[2]);
@@ -16888,6 +16917,16 @@ impl Game<'_> {
         }
     }
 }
+/// The block entities with a renderer, in the renderer's order.
+#[derive(Default)]
+struct DrawnBlockEntities {
+    /// The renderer's list this was made from; none while sections fade in.
+    revision: Option<u64>,
+    blocks: Vec<([i32; 3], u32)>,
+    /// For each of `blocks`, whether it draws outside its block.
+    off_screen: Vec<bool>,
+}
+
 impl ApplicationHandler for Game<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -18641,6 +18680,8 @@ impl<'a> Game<'a> {
             lod: None,
             lod_source_attempted: false,
             far_beacons: HashMap::new(),
+            beams_scanned: None,
+            drawn_block_entities: Default::default(),
             lod_observe: Default::default(),
             lod_covered_at: None,
             view_arrival: Default::default(),

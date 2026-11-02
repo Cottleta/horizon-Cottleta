@@ -17884,12 +17884,16 @@ impl Game<'_> {
                                 ms(cpu),
                                 r.gpu_times.last().copied(),
                                 {
-                                    let [acquire, _, _, _] = r.last_steps.map(ms);
+                                    let [acquire, finish, submit, present] = r.last_steps.map(ms);
                                     let encode = ms(r.last_encode);
                                     horizon_client::perf_overlay::Steps {
                                         build: ms(cpu) - encode,
-                                        record: encode,
+                                        record: (encode - ms(r.last_inline)).max(0.0),
+                                        finish,
+                                        submit,
                                         acquire,
+                                        present,
+                                        wait: ms(r.last_held),
                                     }
                                 },
                             );

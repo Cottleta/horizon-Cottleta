@@ -759,8 +759,12 @@ pub struct Renderer {
     /// CPU time of the last `render`, waits excluded.
     pub last_encode: std::time::Duration,
     /// Of the last frame: acquiring the image, closing the command encoder,
-    /// submitting and presenting (`last_wait` is the first and last together).
+    /// submitting and presenting, the middle three on the submit thread when it took them.
     pub last_steps: [std::time::Duration; 4],
+    /// The part of `last_encode` that closed the encoder and submitted on this thread.
+    pub last_inline: std::time::Duration,
+    /// The part of `last_wait` that waited for the previous frame and the submit thread.
+    pub last_held: std::time::Duration,
     /// What the system says about the window's display, watched only while HDR output
     /// is on; before `window`, so it's dropped first.
     display: DisplayWatch,
@@ -3685,6 +3689,8 @@ impl Renderer {
             last_wait: std::time::Duration::ZERO,
             last_encode: std::time::Duration::ZERO,
             last_steps: [std::time::Duration::ZERO; 4],
+            last_inline: std::time::Duration::ZERO,
+            last_held: std::time::Duration::ZERO,
             window,
             device,
             reuse,
@@ -8307,7 +8313,14 @@ impl Renderer {
                     self.deferred = Some(offscreen);
                     // The frame's waits for the previous one on the submit thread.
                     self.last_wait += self.queue.take_waited();
-                    self.last_encode = started.elapsed().saturating_sub(self.last_wait);
+                    // `started` came after the wait for the previous frame.
+                    self.last_encode = started
+                        .elapsed()
+                        .saturating_sub(self.last_wait.saturating_sub(landed));
+                    let [finish, submit, present] = self.queue.thread_steps();
+                    self.last_steps[1..].copy_from_slice(&[finish, submit, present]);
+                    self.last_inline = std::time::Duration::ZERO;
+                    self.last_held = self.last_wait.saturating_sub(self.last_steps[0]);
                     self.visible = visible;
                     self.visible_lods = visible_lods;
                     self.shadow_visible = shadow_visible;
@@ -8318,12 +8331,16 @@ impl Renderer {
         } else {
             (encoder, surface_frame, None)
         };
+        let finish = Instant::now();
         let commands = crate::spans::time("encode", || encoder.finish());
+        self.last_steps[1] = finish.elapsed();
         if first_frame {
             startup_step(format_args!("submitting the first frame"));
             self.first_frame = FirstFrame::Drawn;
         }
+        let submit = Instant::now();
         let submission = crate::spans::time("submit", || self.queue.submit([commands]));
+        self.last_steps[2] = submit.elapsed();
         if let Some(read) = after {
             read();
         } else if let Some(read) = self.cull.as_mut().and_then(|c| c.submitted()) {
@@ -8404,10 +8421,18 @@ impl Renderer {
                 self.wait_in_flight();
             }
         }
-        self.last_wait += present.elapsed();
+        self.last_steps[3] = present.elapsed();
+        self.last_wait += self.last_steps[3];
         // Inside the present's time already.
         self.queue.take_waited();
-        self.last_encode = started.elapsed().saturating_sub(self.last_wait);
+        // `started` came after the wait for the previous frame.
+        self.last_encode = started
+            .elapsed()
+            .saturating_sub(self.last_wait.saturating_sub(landed));
+        self.last_inline = self.last_steps[1] + self.last_steps[2];
+        self.last_held = self
+            .last_wait
+            .saturating_sub(self.last_steps[0] + self.last_steps[3]);
         let _ = self.started;
         self.visible = visible;
         self.visible_lods = visible_lods;

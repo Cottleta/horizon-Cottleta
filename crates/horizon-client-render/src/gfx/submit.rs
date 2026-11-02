@@ -8,7 +8,7 @@
 //! submissions keep the order they had on one thread.
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 /// Whether frames go to the submit thread, unless `HORIZON_SUBMIT_THREAD` says (`0` off, `1` on):
@@ -54,6 +54,8 @@ pub struct Queue {
     /// Nanoseconds the window's thread waited for the submit thread since the last
     /// [`take_waited`](Self::take_waited): the GPU or the display holding a frame back, not work.
     waited: AtomicU64,
+    /// Nanoseconds the submit thread took on its last frame: finishing, submitting, presenting.
+    steps: Arc<[AtomicU64; 3]>,
 }
 
 impl Queue {
@@ -65,6 +67,7 @@ impl Queue {
             pending: AtomicBool::new(false),
             landing: Mutex::new(None),
             waited: AtomicU64::new(0),
+            steps: Arc::default(),
         };
         if !threaded {
             return this;
@@ -72,17 +75,28 @@ impl Queue {
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done) = mpsc::channel();
         let queue = this.queue.clone();
+        let steps = this.steps.clone();
         let spawned = std::thread::Builder::new()
             .name("Render submit".into())
             .spawn(move || {
                 for job in job_rx {
+                    let timed = |step: usize, started: Instant| {
+                        let nanos = u64::try_from(started.elapsed().as_nanos());
+                        steps[step].store(nanos.unwrap_or(u64::MAX), Ordering::Relaxed);
+                    };
+                    let started = Instant::now();
                     let commands = job.encoder.finish();
+                    timed(0, started);
+                    let started = Instant::now();
                     let submission = queue.submit([commands]);
+                    timed(1, started);
                     if let Some(after) = job.after {
                         after();
                     }
                     if let Some(surface) = job.surface {
+                        let started = Instant::now();
                         queue.present(surface);
+                        timed(2, started);
                     }
                     if done_tx.send(submission).is_err() {
                         break;
@@ -152,6 +166,10 @@ impl Queue {
     /// queue (uploads in the frame's first half too), and that is waiting, not the frame's work.
     pub fn take_waited(&self) -> Duration {
         Duration::from_nanos(self.waited.swap(0, Ordering::Relaxed))
+    }
+    /// What the submit thread took on its last frame: finishing, submitting, presenting.
+    pub fn thread_steps(&self) -> [Duration; 3] {
+        [0, 1, 2].map(|i| Duration::from_nanos(self.steps[i].load(Ordering::Relaxed)))
     }
     /// The submission of the frame [`submit_later`](Self::submit_later) took, once it is
     /// made; `None` if it was taken already.

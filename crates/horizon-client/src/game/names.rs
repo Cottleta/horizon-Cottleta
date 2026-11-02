@@ -18,8 +18,8 @@ use horizon_client::{
 };
 
 /// Which tag's lines: the entity, whether it's a player, and whether it's near
-/// enough for the score below its name.
-pub(super) type TagKey = (u32, bool, bool);
+/// enough for the score below its name, and whether the name shows or only a description.
+pub(super) type TagKey = (u32, bool, bool, bool);
 /// `tag_lines`' tags of this tick: the tick, then each tag's lines.
 pub(super) type TagLines = (
     u64,
@@ -229,16 +229,25 @@ impl Game<'_> {
             // crosshair; players (LivingEntityRenderer) need neither.
             // `ClientMannequin.belowNameDisplay`: the description is `scoreText`, drawn
             // within the below-name distance (10) whether the name shows or not.
-            let description = (m.species() == horizon_client::mobs::Species::Mannequin
-                && distance_sqr < 10.0 * 10.0)
-                .then(|| m.extra.description.component())
-                .flatten()
-                .map(|tag| horizon_client::entity_nbt::name_text(&tag).resolve_legacy());
+            let near = distance_sqr < 10.0 * 10.0;
+            let description = || {
+                (m.species() == horizon_client::mobs::Species::Mannequin && near)
+                    .then(|| m.extra.description.component())
+                    .flatten()
+                    .map(|tag| horizon_client::entity_nbt::name_text(&tag).resolve_legacy())
+            };
             let name_shown = sb::name_shown(team, viewer, view)
                 && (player || m.name_visible || Some(m.id) == target)
                 && (player || m.custom_name.is_some());
             if !name_shown {
-                if let Some(text) = description {
+                let lines = if m.species() == horizon_client::mobs::Species::Mannequin && near {
+                    self.tag_lines((m.id, player, near, false), || {
+                        description().map(|text| (text, 0.0)).into_iter().collect()
+                    })
+                } else {
+                    Default::default()
+                };
+                if !lines.is_empty() {
                     let l = self.world.light(
                         m.position.x.floor() as i32,
                         (m.position.y + f64::from(m.height())).floor() as i32,
@@ -246,7 +255,7 @@ impl Game<'_> {
                     );
                     tags.push(NameTag {
                         at: p,
-                        lines: vec![(text, 0.0)].into(),
+                        lines,
                         light: l,
                         discrete,
                     });
@@ -255,8 +264,7 @@ impl Game<'_> {
             }
             // The text of a tag changes with a server's packets, not with the frame,
             // and a team's prefix and suffix are components to convert: once a tick.
-            let near = distance_sqr < 10.0 * 10.0;
-            let lines = self.tag_lines((m.id, player, near), || {
+            let lines = self.tag_lines((m.id, player, near, true), || {
             // getDisplayName: the name in the team's prefix, suffix and colour.
             let member = if player {
                 Text::literal(&name)
@@ -277,7 +285,7 @@ impl Game<'_> {
             // below-name distance (10), under the name.
             let mut lift = 0.0;
             if m.species() == horizon_client::mobs::Species::Mannequin {
-                if let Some(text) = description {
+                if let Some(text) = description() {
                     lines.push((text, 0.0));
                     lift = f64::from(9.0f32 * 1.15 * 0.025);
                 }
@@ -335,7 +343,7 @@ impl Game<'_> {
                 continue;
             }
             let near = distance_sqr < 10.0 * 10.0;
-            let lines = self.tag_lines((a.id, false, near), || {
+            let lines = self.tag_lines((a.id, false, near, true), || {
             let shown = match team {
                 Some(t) => t.formatted_name(name.clone()),
                 None => name.clone(),

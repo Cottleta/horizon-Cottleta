@@ -4150,6 +4150,11 @@ impl ParticleEngine {
             * Quat::from_rotation_x(-pitch.to_radians());
         // Particles bunch up, and the light of a block doesn't change within a frame.
         let mut lights = [([i32::MIN; 3], 0u8); 32];
+        // Most particles don't roll: one rotation of the quad's corners for them all.
+        const CORNERS: [(f32, f32); 4] = [(1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0)];
+        let base_corners = CORNERS.map(|(x, y)| base * FVec3::new(x, y, 0.0));
+        // Terrain particles mostly come in bursts of one block's sprite.
+        let mut last_named: Option<(&str, Option<(Rect, bool)>)> = None;
         for p in &self.particles {
             if p.no_render {
                 continue;
@@ -4169,10 +4174,17 @@ impl ParticleEngine {
                     self.rects.get(*i as usize).copied().flatten(),
                     p.ty.translucent_layer(),
                 ),
-                Sprite::Named(name) => match self.atlas.get(name) {
-                    Some(&(rect, translucent)) => (Some(rect), translucent),
-                    None => (None, false),
-                },
+                Sprite::Named(name) => {
+                    let found = match last_named {
+                        Some((last, found)) if last == name => found,
+                        _ => self.atlas.get(name).copied(),
+                    };
+                    last_named = Some((name, found));
+                    match found {
+                        Some((rect, translucent)) => (Some(rect), translucent),
+                        None => (None, false),
+                    }
+                }
             };
             let Some(r) = rect else { continue };
             let a = f64::from(partial);
@@ -4277,23 +4289,24 @@ impl ParticleEngine {
                 r.u0 + du * p.uv[2],
                 r.v0 + dv * p.uv[3],
             );
+            let layer = if layer {
+                crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY
+            } else {
+                0
+            } | u32::from(hdr_tier(p.ty)) << 16;
             for rotation in rotations.into_iter().flatten() {
-                for (n, uv) in [
-                    ((1.0, -1.0), [u1, v1]),
-                    ((1.0, 1.0), [u1, v0]),
-                    ((-1.0, 1.0), [u0, v0]),
-                    ((-1.0, -1.0), [u0, v1]),
-                ] {
-                    let v = center + rotation * FVec3::new(n.0, n.1, 0.0) * size;
+                let corners = if rotation == base {
+                    base_corners
+                } else {
+                    CORNERS.map(|(x, y)| rotation * FVec3::new(x, y, 0.0))
+                };
+                for (corner, uv) in corners.into_iter().zip([[u1, v1], [u1, v0], [u0, v0], [u0, v1]]) {
+                    let v = center + corner * size;
                     out.push(Vertex {
                         normal: [0; 4],
                         pos: v.to_array(),
                         uv,
-                        layer: if layer {
-                            crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY
-                        } else {
-                            0
-                        } | u32::from(hdr_tier(p.ty)) << 16,
+                        layer,
                         color,
                         light,
 

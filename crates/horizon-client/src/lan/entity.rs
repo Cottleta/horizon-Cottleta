@@ -47,6 +47,9 @@ pub struct EntityState {
     pub head_yaw: f32,
     pub on_ground: bool,
     pub velocity: [f64; 3],
+    /// NewMinecartBehavior steps drained from the simulation since its last
+    /// export. None selects the ordinary entity movement packets.
+    pub minecart_steps: Option<Vec<play::MinecartStep>>,
     /// ClientboundAddEntityPacket.data (item frame direction, block state ...).
     pub data: i32,
     /// SynchedEntityData entries that differ from the defaults.
@@ -80,6 +83,9 @@ pub struct EntityState {
     /// `ServerPlayer.getCamera() != this`: a spectator watching through
     /// another entity is shown to nobody (`ServerPlayer.broadcastToPlayer`).
     pub watching: bool,
+    /// A player a native mod hid (`native_hide_player`): only clients whose
+    /// player has at least this permission level track it.
+    pub hidden: Option<u8>,
 }
 
 impl EntityState {
@@ -95,6 +101,7 @@ impl EntityState {
         (self.yaw, self.pitch, self.head_yaw) = (0.0, 0.0, 0.0);
         self.on_ground = false;
         self.velocity = [0.0; 3];
+        self.minecart_steps = None;
         self.data = 0;
         self.meta.clear();
         self.defaults.clear();
@@ -107,6 +114,7 @@ impl EntityState {
         self.leash = None;
         self.spectator = false;
         self.watching = false;
+        self.hidden = None;
     }
 }
 
@@ -232,6 +240,8 @@ struct ServerEntity {
     head: i8,
     /// lastSentMovement.
     velocity: [f64; 3],
+    /// NewMinecartBehavior.lerpSteps accumulated across tracking intervals.
+    minecart_steps: Vec<play::MinecartStep>,
     /// trackedDataValues: the entity data the clients hold.
     meta: Vec<(u8, i32, Value)>,
     equipment: Vec<(u8, Option<Stack>)>,
@@ -247,7 +257,8 @@ struct ServerEntity {
     /// The lead's holder the clients were told of.
     leash: Option<i32>,
     /// The level tick it was last seen in, its place in that tick's list, and
-    /// whether it was added in it (its first update is the next tick's).
+    /// whether it was added in it (its first update is the next tick's, but
+    /// for one in `Entities::synced`).
     seen: u32,
     index: usize,
     added: bool,
@@ -259,6 +270,8 @@ struct ServerEntity {
     spectator: bool,
     /// Likewise for a spectator who watches through a camera.
     watching: bool,
+    /// Likewise for a player a native mod hid.
+    hidden: Option<u8>,
 }
 
 /// SectionPos.of(entity).
@@ -307,6 +320,7 @@ impl ServerEntity {
             rotation: (pack_degrees(e.pitch), pack_degrees(e.yaw)),
             head: pack_degrees(e.head_yaw),
             velocity: e.velocity,
+            minecart_steps: e.minecart_steps.clone().unwrap_or_default(),
             meta: e.meta.clone(),
             equipment: e.equipment.clone(),
             attributes: e.attributes.clone(),
@@ -322,6 +336,7 @@ impl ServerEntity {
             section: section_of(e.position),
             spectator: e.spectator,
             watching: e.watching,
+            hidden: e.hidden,
         }
     }
 
@@ -384,6 +399,11 @@ impl ServerEntity {
     /// full position sync every 400 or when the entity lands or leaves the
     /// ground), velocity for types that track it, changed data at once.
     fn send_changes(&mut self, e: &EntityState, riding: &Riding, out: &mut Vec<play::Clientbound>) {
+        if let Some(steps) = &e.minecart_steps {
+            self.minecart_steps.extend_from_slice(steps);
+        } else {
+            self.minecart_steps.clear();
+        }
         let passengers = riding.passengers(e.id);
         if passengers != self.passengers.as_slice() {
             out.push(riding.set_passengers(e.id));
@@ -423,6 +443,14 @@ impl ServerEntity {
                 self.base = e.position;
                 self.was_riding = true;
                 self.send_dirty(e, dirty, out);
+                self.send_head(e, out);
+                self.tick += 1;
+                self.send_equipment(e, out);
+                return;
+            }
+            if e.minecart_steps.is_some() {
+                self.send_dirty(e, dirty, out);
+                self.send_minecart(e, rotation, rotate, out);
                 self.send_head(e, out);
                 self.tick += 1;
                 self.send_equipment(e, out);
@@ -525,6 +553,49 @@ impl ServerEntity {
         }
         self.tick += 1;
         self.send_equipment(e, out);
+    }
+
+    /// ServerEntity.handleMinecartPosRot: send every recorded substep in order.
+    /// Only an empty queue uses the fallback endpoint (e.g. a stationary cart
+    /// teleported by a command); this never replaces a curved track's steps.
+    fn send_minecart(
+        &mut self,
+        e: &EntityState,
+        rotation: (i8, i8),
+        rotate: bool,
+        out: &mut Vec<play::Clientbound>,
+    ) {
+        if self.minecart_steps.is_empty() {
+            let distance: f64 = (0..3).map(|k| (e.position[k] - self.base[k]).powi(2)).sum();
+            let motion: f64 = (0..3)
+                .map(|k| (e.velocity[k] - self.velocity[k]).powi(2))
+                .sum();
+            if distance >= 7.629_394_531_25e-6
+                || self.tick.is_multiple_of(60)
+                || rotate
+                || motion > 1.0e-7
+            {
+                self.minecart_steps.push(play::MinecartStep {
+                    position: e.position,
+                    movement: e.velocity,
+                    yaw: rotation.1,
+                    pitch: rotation.0,
+                    weight: 1.0,
+                });
+            }
+        }
+        if !self.minecart_steps.is_empty() {
+            out.push(play::Clientbound::MoveMinecartAlongTrack(
+                play::MoveMinecartAlongTrack {
+                    id: e.id,
+                    steps: std::mem::take(&mut self.minecart_steps),
+                },
+            ));
+        }
+        // Vanilla updates these even when no packet was needed; its
+        // lastSentMovement is deliberately unchanged in this branch.
+        self.rotation = rotation;
+        self.base = e.position;
     }
 
     /// ServerEntity.sendDirtyEntityData: the changed entity data, then the
@@ -691,6 +762,9 @@ pub struct Viewer<'a> {
     pub entity_id: i32,
     /// Its player is in spectator mode: it tracks the other spectators too.
     pub spectator: bool,
+    /// Its player's permission level: players a native mod hid from lower
+    /// levels are not tracked by it.
+    pub permission: u8,
     /// It accepted a move since the last tick (ChunkMap.move): every pair
     /// of it is checked again.
     pub moved: bool,
@@ -717,17 +791,20 @@ struct Probe {
     chunk: u32,
     spectator: bool,
     watching: bool,
+    hidden: Option<u8>,
 }
 
 /// `ServerPlayer.broadcastToPlayer` (`Entity`'s is `true`): to a spectator,
 /// a player is shown only while its camera is itself; to anyone else, a
-/// spectator is hidden.
-fn broadcast_to_player(viewer_spectator: bool, p: &Probe) -> bool {
-    if viewer_spectator {
+/// spectator is hidden. A player a native mod hid is shown only to players
+/// of at least its level.
+fn broadcast_to_player(v: &Viewer, p: &Probe) -> bool {
+    let shown = if v.spectator {
         !p.watching
     } else {
         !p.spectator
-    }
+    };
+    shown && p.hidden.is_none_or(|level| v.permission >= level)
 }
 
 /// TrackedEntity.updatePlayer: within the type's range (capped by the view
@@ -740,7 +817,7 @@ fn broadcast_to_player(viewer_spectator: bool, p: &Probe) -> bool {
 fn sees(v: &Viewer, p: &Probe, chunks: &[(i32, i32)], held: &mut [u8]) -> bool {
     let range = f64::from(p.range.min(v.view_distance * 16));
     let (dx, dz) = (v.position[0] - p.x, v.position[2] - p.z);
-    dx * dx + dz * dz <= range * range && broadcast_to_player(v.spectator, p) && {
+    dx * dx + dz * dz <= range * range && broadcast_to_player(v, p) && {
         let held = &mut held[p.chunk as usize];
         if *held == 0 {
             *held = 1 + u8::from(v.chunks.contains(&chunks[p.chunk as usize]));
@@ -755,6 +832,14 @@ pub struct Entities {
     /// `entity-broadcast-range-percentage` (None: 100), which scales every
     /// type's tracking range (MinecraftServer.getScaledTrackingDistance).
     pub range_percent: Option<i32>,
+    /// ServerLevel.tick runs ChunkMap.tick after the block ticks, the raids
+    /// and ServerChunkCache.tickChunks' spawning and thunder, and before the
+    /// entities: an entity that joined the level by then (ids in these
+    /// ranges, each from after its first number up to its second; a player
+    /// aside) has its first update in the pass that pairs it, before it
+    /// moves. One the entities' own ticks added waits for the next pass, as
+    /// vanilla's waits for the next tick.
+    pub synced: Vec<(i32, i32)>,
     states: crate::fast_hash::FxHashMap<i32, ServerEntity>,
     /// The level tick, stamped on every entity still in the level.
     tick: u32,
@@ -799,6 +884,58 @@ impl Entities {
         self.states.is_empty()
     }
 
+    /// Whether the entity `id` is tracked (it was in the last tick's pass).
+    pub fn tracks(&self, id: i32) -> bool {
+        self.states.contains_key(&id)
+    }
+
+    /// ChunkMap.addEntity tracks an entity as it joins the level, so its
+    /// clients are paired with it as it was then. An entity the game added
+    /// after the last tick's states were taken is first seen a tick later:
+    /// it starts from the state it joined with (`joined`), not from where
+    /// its first tick took it. Of the joined states, those of entities still
+    /// in the level and not tracked yet are kept, with what this tick's own
+    /// state carries for this tick alone (the minecart steps drained into it,
+    /// `needs_sync`).
+    pub fn joined_states(
+        &self,
+        entities: &[&EntityState],
+        mut joined: Vec<EntityState>,
+    ) -> crate::fast_hash::FxHashMap<i32, EntityState> {
+        if joined.is_empty() {
+            return Default::default();
+        }
+        let now: crate::fast_hash::FxHashMap<i32, &EntityState> = entities
+            .iter()
+            .filter(|e| !self.tracks(e.id))
+            .map(|e| (e.id, *e))
+            .collect();
+        joined
+            .drain(..)
+            .filter_map(|mut j| {
+                let e = now.get(&j.id)?;
+                j.minecart_steps.clone_from(&e.minecart_steps);
+                j.needs_sync = e.needs_sync;
+                Some((j.id, j))
+            })
+            .collect()
+    }
+
+    /// Puts the `joined_states` in place of this tick's own.
+    pub fn starting_from<'a>(
+        entities: &mut [&'a EntityState],
+        joined: &'a crate::fast_hash::FxHashMap<i32, EntityState>,
+    ) {
+        if joined.is_empty() {
+            return;
+        }
+        for e in entities.iter_mut() {
+            if let Some(j) = joined.get(&e.id) {
+                *e = j;
+            }
+        }
+    }
+
     /// One tick of ChunkMap.tick for the entities in the level now and the
     /// clients in it: each client first loses the entities that left its
     /// range or the level (one ClientboundRemoveEntitiesPacket), then each
@@ -840,10 +977,12 @@ impl Entities {
                 || section != s.section
                 || e.spectator != s.spectator
                 || e.watching != s.watching
+                || e.hidden != s.hidden
             {
                 s.section = section;
                 s.spectator = e.spectator;
                 s.watching = e.watching;
+                s.hidden = e.hidden;
                 self.moved.push(index);
                 self.is_moved[index] = true;
             }
@@ -870,6 +1009,7 @@ impl Entities {
                 chunk,
                 spectator: e.spectator,
                 watching: e.watching,
+                hidden: e.hidden,
             });
         }
         // TrackedEntity.getEffectiveRange: a vehicle is tracked as far as its
@@ -1014,7 +1154,15 @@ impl Entities {
                 continue;
             };
             self.packets.clear();
-            if !s.added {
+            // Paired as it joined, then its first changes go to everyone
+            // tracking it, those just paired with it included.
+            let synced = s.added
+                && e.kind != "minecraft:player"
+                && self
+                    .synced
+                    .iter()
+                    .any(|&(after, through)| e.id > after && e.id <= through);
+            if !s.added || synced {
                 s.send_changes(e, riding, &mut self.packets);
             }
             s.added = false;
@@ -1044,6 +1192,13 @@ impl Entities {
                         packets.iter().map(play::Clientbound::encode).collect()
                     });
                     v.out.extend(bodies.iter().cloned());
+                    if synced && !self.packets.is_empty() {
+                        if !encoded {
+                            encode_all(&self.packets, &mut self.bodies);
+                            encoded = true;
+                        }
+                        v.out.extend(self.bodies.iter().cloned());
+                    }
                     if v.tracker
                         .seen
                         .insert(e.id, Arc::clone(&s.tracked))
@@ -1077,6 +1232,7 @@ mod tests {
             head_yaw: 0.0,
             on_ground: true,
             velocity: [0.0; 3],
+            minecart_steps: None,
             data: 0,
             meta: Vec::new(),
             defaults: Vec::new(),
@@ -1089,6 +1245,7 @@ mod tests {
             leash: None,
             spectator: false,
             watching: false,
+            hidden: None,
         }
     }
 
@@ -1201,6 +1358,23 @@ mod tests {
                 play::Clientbound::SetEntityMotion(_),
                 play::Clientbound::MoveEntityPos(_)
             ]
+        ));
+    }
+
+    /// `ServerEntity.getRequiresPrecisePosition` is false for an item, so a
+    /// drop whose data has to be sent again still moves by a delta; only the
+    /// collision case takes the exact-position packet.
+    #[test]
+    fn an_item_that_needs_its_data_sent_again_still_moves_by_a_delta() {
+        let mut e = state(0.0);
+        e.kind = "minecraft:item".into();
+        e.position = [0.3, 64.0, 0.3];
+        let mut s = added(&e);
+        e.needs_sync = true;
+        e.position = [0.7, 64.0, 0.3];
+        assert!(matches!(
+            changes(&mut s, &e)[..],
+            [play::Clientbound::MoveEntityPos(_)]
         ));
     }
 
@@ -1514,6 +1688,7 @@ mod tests {
         positions: [[f64; 3]; 2],
         moved: [bool; 2],
         spectators: [bool; 2],
+        permissions: [u8; 2],
         /// The first client's entities gone, where they were last sent.
         gone: Vec<[f64; 3]>,
     }
@@ -1527,6 +1702,7 @@ mod tests {
                 positions: [[0.0, 64.0, 0.0]; 2],
                 moved: [false; 2],
                 spectators: [false; 2],
+                permissions: [0; 2],
                 gone: Vec::new(),
             }
         }
@@ -1540,6 +1716,7 @@ mod tests {
                 Viewer {
                     entity_id: 1,
                     spectator: self.spectators[0],
+                    permission: self.permissions[0],
                     moved: self.moved[0],
                     position: self.positions[0],
                     view_distance: 10,
@@ -1551,6 +1728,7 @@ mod tests {
                 Viewer {
                     entity_id: 2,
                     spectator: self.spectators[1],
+                    permission: self.permissions[1],
                     moved: self.moved[1],
                     position: self.positions[1],
                     view_distance: 10,
@@ -1627,6 +1805,97 @@ mod tests {
         c.tick(&mut level, &[&e]);
         assert!(!c.out[0].is_empty());
         assert_eq!(c.out[0], c.out[1]);
+    }
+
+    /// ChunkMap.addEntity pairs an entity as it joined the level: one the
+    /// game added after the last tick's pass (an item a landing falling
+    /// block drops) is paired from where it joined, not from where its first
+    /// tick took it, and its first update moves it from there; what its
+    /// first tick alone carries (needs_sync) is kept. Once tracked, its own
+    /// state is used again.
+    #[test]
+    fn an_entity_added_after_the_pass_is_paired_as_it_joined() {
+        let mut level = Entities::default();
+        let mut c = Clients::new();
+        let mut joined = state(1.0);
+        joined.velocity = [0.0, 0.2, 0.0];
+        let mut first = state(1.5);
+        first.needs_sync = true;
+        let mut entities = vec![&first];
+        let joins = level.joined_states(&entities, vec![joined.clone()]);
+        assert!(joins[&7].needs_sync);
+        Entities::starting_from(&mut entities, &joins);
+        assert_eq!(entities[0].position, [1.0, 64.0, 0.0]);
+        c.tick(&mut level, &entities);
+        let add = body(play::Clientbound::AddEntity(AddEntity {
+            id: 7,
+            uuid: 1,
+            kind: 100,
+            position: [1.0, 64.0, 0.0],
+            velocity: [0.0, 0.2, 0.0],
+            pitch: 0,
+            yaw: 0,
+            head_yaw: 0,
+            data: 0,
+        }));
+        assert_eq!(c.out[0], [add]);
+        let later = state(2.0);
+        let entities = vec![&later];
+        assert!(level.joined_states(&entities, vec![joined]).is_empty());
+        c.tick(&mut level, &entities);
+        let moved = body(play::Clientbound::MoveEntityPos(MoveEntityPos(
+            MoveEntity {
+                id: 7,
+                delta: Some(VecDelta::Linear([4096, 0, 0])),
+                rotation: None,
+                on_ground: true,
+            },
+        )));
+        assert!(c.out[0].contains(&moved), "{:?}", c.out[0]);
+    }
+
+    /// An entity that joined before the tick's ChunkMap.tick point (a
+    /// falling block from a block tick, a naturally spawned mob) has its
+    /// first update in the pass that pairs it: tick 0 of its interval,
+    /// before it moves, which the client just paired with gets too (a move
+    /// by nothing: `tickCount % 60 == 0`). A falling block that lands within
+    /// 20 ticks is never sent a move. One added by the entities' ticks has
+    /// its first update in the next pass.
+    #[test]
+    fn an_entity_joined_before_the_chunk_map_tick_is_updated_as_it_is_paired() {
+        let mut sand = state(0.5);
+        sand.kind = "minecraft:falling_block".into();
+        let move_by = |dy: i16| {
+            body(play::Clientbound::MoveEntityPos(MoveEntityPos(
+                MoveEntity {
+                    id: 7,
+                    delta: Some(VecDelta::Linear([0, dy, 0])),
+                    rotation: None,
+                    on_ground: true,
+                },
+            )))
+        };
+        let passes = |synced: Vec<(i32, i32)>| {
+            let mut level = Entities {
+                synced,
+                ..Entities::default()
+            };
+            let mut c = Clients::new();
+            c.tick(&mut level, &[&sand]);
+            let paired = c.out[0][1..].to_vec();
+            let mut fallen = sand.clone();
+            fallen.position[1] -= 0.04;
+            c.tick(&mut level, &[&fallen]);
+            (paired, c.out[0].clone())
+        };
+        // Updated in place as it was paired; its fall waits for tick 20.
+        for synced in [vec![(i32::MIN, 7)], vec![(i32::MIN, 3), (5, 9)]] {
+            assert_eq!(passes(synced), (vec![move_by(0)], vec![]));
+        }
+        // Its first update is the next pass's, after it fell.
+        for synced in [vec![], vec![(i32::MIN, 6)], vec![(7, 9)]] {
+            assert_eq!(passes(synced), (vec![], vec![move_by(-164)]));
+        }
     }
 
     #[test]
@@ -1763,6 +2032,37 @@ mod tests {
         two.watching = false;
         c.tick(&mut level, &[&one, &two]);
         assert!(c.trackers[0].is_tracking(2));
+    }
+
+    /// A player a native mod hid is tracked only by clients whose player has
+    /// at least its level, and by everyone again once shown.
+    #[test]
+    fn a_hidden_player_is_tracked_only_from_its_level_up() {
+        let mut level = Entities::default();
+        let mut c = Clients::new();
+        c.permissions = [0, 3];
+        let mut op = state(0.0);
+        (op.id, op.uuid, op.kind) = (9, 9, "minecraft:player".into());
+        op.hidden = Some(3);
+        c.tick(&mut level, &[&op]);
+        c.tick(&mut level, &[&op]);
+        assert!(
+            !c.trackers[0].is_tracking(9),
+            "a player of level 0 doesn't see it"
+        );
+        assert!(c.trackers[1].is_tracking(9), "an operator of level 3 does");
+        // Hidden after it was seen: the client below the level loses it.
+        op.hidden = None;
+        c.tick(&mut level, &[&op]);
+        assert!(c.trackers[0].is_tracking(9));
+        op.hidden = Some(4);
+        c.tick(&mut level, &[&op]);
+        assert!(!c.trackers[0].is_tracking(9) && !c.trackers[1].is_tracking(9));
+        // A client whose player was made an operator (its pairs checked again).
+        c.permissions = [4, 3];
+        c.moved = [true, false];
+        c.tick(&mut level, &[&op]);
+        assert!(c.trackers[0].is_tracking(9) && !c.trackers[1].is_tracking(9));
     }
 
     #[test]

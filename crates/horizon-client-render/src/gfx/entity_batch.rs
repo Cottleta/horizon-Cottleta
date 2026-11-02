@@ -170,10 +170,22 @@ impl EntityBatch {
         places.sort_unstable_by_key(|p| p.0);
     }
 
-    /// The buffer vertex of entity vertex `vertex`, by `places`.
-    pub(super) fn place(places: &[(u32, u32, u32)], vertex: u32) -> Option<u32> {
-        let i = places.partition_point(|p| p.0 <= vertex).checked_sub(1)?;
-        let (first, count, at) = places[i];
+    /// The buffer vertex of entity vertex `vertex`, by `places`. `run` is where the last
+    /// lookup landed: jobs come in entity order, nearly all in that run or the next.
+    pub(super) fn place(places: &[(u32, u32, u32)], run: &mut usize, vertex: u32) -> Option<u32> {
+        let holds = |i: usize| {
+            places
+                .get(i)
+                .is_some_and(|p| p.0 <= vertex && vertex < p.0 + p.1)
+        };
+        if !holds(*run) {
+            *run = if holds(*run + 1) {
+                *run + 1
+            } else {
+                places.partition_point(|p| p.0 <= vertex).checked_sub(1)?
+            };
+        }
+        let (first, count, at) = places[*run];
         (vertex < first + count).then_some(at + vertex - first)
     }
 
@@ -507,10 +519,10 @@ mod tests {
         let mut places = Vec::new();
         batch.places(&mut places);
         for (i, vertex) in entities.iter().enumerate() {
-            let at = EntityBatch::place(&places, i as u32).expect("every vertex is laid out");
+            let at = EntityBatch::place(&places, &mut 0, i as u32).expect("every vertex is laid out");
             assert_eq!(combined[at as usize].pos, vertex.pos);
         }
-        assert_eq!(EntityBatch::place(&places, entities.len() as u32), None);
+        assert_eq!(EntityBatch::place(&places, &mut 0, entities.len() as u32), None);
     }
 
     /// A held quad leaves room for the quads it stands for, copies nothing there, and
@@ -552,8 +564,8 @@ mod tests {
         assert_eq!(combined[28].pos[0], 2.0);
         let mut places = Vec::new();
         batch.places(&mut places);
-        assert_eq!(EntityBatch::place(&places, 4), Some(4));
-        assert_eq!(EntityBatch::place(&places, 8), Some(28));
-        assert_eq!(EntityBatch::place(&places, 12), Some(32));
+        assert_eq!(EntityBatch::place(&places, &mut 0, 4), Some(4));
+        assert_eq!(EntityBatch::place(&places, &mut 0, 8), Some(28));
+        assert_eq!(EntityBatch::place(&places, &mut 0, 12), Some(32));
     }
 }

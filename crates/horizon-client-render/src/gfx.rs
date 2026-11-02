@@ -6542,6 +6542,7 @@ impl Renderer {
             };
             self.entity_batch.places(&mut self.entity_places);
             let places = &self.entity_places;
+            let mut run = 0;
             gpu_parts.prepare(
                 &self.device,
                 &mut self.uploads,
@@ -6550,7 +6551,7 @@ impl Renderer {
                 frame.part_mesh_generation,
                 jobs,
                 frame.part_lights,
-                |vertex| EntityBatch::place(places, vertex),
+                |vertex| EntityBatch::place(places, &mut run, vertex),
             );
             gpu_parts.dispatch(&self.device, &mut encoder, &self.entity_buffer);
         }

@@ -70,8 +70,8 @@ pub(super) struct GpuParts {
     jobs: wgpu::Buffer,
     job_capacity: usize,
     count: wgpu::Buffer,
-    /// This frame's jobs, with `dest` in the entity buffer's layout.
-    laid_out: Vec<PartJob>,
+    /// This frame's jobs uploaded (those with a place in the entity buffer).
+    job_count: u32,
 }
 
 impl GpuParts {
@@ -147,7 +147,7 @@ impl GpuParts {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
-            laid_out: Vec::new(),
+            job_count: 0,
         }
     }
 
@@ -171,7 +171,7 @@ impl GpuParts {
         generation: u32,
         jobs: &[PartJob],
         lights: [[f32; 3]; 2],
-        place: impl Fn(u32) -> Option<u32>,
+        mut place: impl FnMut(u32) -> Option<u32>,
     ) {
         // A mesh list that started over (models reloaded, resources changed) is
         // uploaded again, even one already longer than the old upload.
@@ -197,26 +197,46 @@ impl GpuParts {
             );
             self.mesh_len = mesh.len();
         }
-        self.laid_out.clear();
-        self.laid_out.extend(jobs.iter().filter_map(|job| {
-            let dest = place(job.dest)?;
-            Some(PartJob { dest, ..*job })
-        }));
-        if self.laid_out.is_empty() {
+        self.job_count = 0;
+        if jobs.is_empty() {
             return;
         }
-        if self.laid_out.len() > self.job_capacity {
-            self.job_capacity = self.laid_out.len().next_power_of_two();
+        if jobs.len() > self.job_capacity {
+            self.job_capacity = jobs.len().next_power_of_two();
             self.jobs = Self::buffer(
                 device,
                 "Model part jobs",
                 self.job_capacity * size_of::<PartJob>(),
             );
         }
-        uploads.buffer(encoder, &self.jobs, 0, bytemuck::cast_slice(&self.laid_out));
+        // Straight into staging memory, a batch at a time. Jobs without a place leave
+        // the end of the upload unused.
+        let job_count = &mut self.job_count;
+        uploads.buffer_pieces(encoder, &self.jobs, 0, size_of_val(jobs), |put| {
+            let mut batch = [PartJob::default(); 64];
+            let mut filled = 0;
+            let mut full_batches = 0;
+            for job in jobs {
+                let Some(dest) = place(job.dest) else {
+                    continue;
+                };
+                batch[filled] = PartJob { dest, ..*job };
+                filled += 1;
+                if filled == batch.len() {
+                    put(full_batches * size_of_val(&batch), bytemuck::cast_slice(&batch));
+                    full_batches += 1;
+                    filled = 0;
+                }
+            }
+            put(full_batches * size_of_val(&batch), bytemuck::cast_slice(&batch[..filled]));
+            *job_count = (full_batches * batch.len() + filled) as u32;
+        });
+        if self.job_count == 0 {
+            return;
+        }
         let [l0, l1] = lights;
         let params: [u32; 12] = [
-            self.laid_out.len() as u32,
+            self.job_count,
             0,
             0,
             0,
@@ -239,7 +259,7 @@ impl GpuParts {
         encoder: &mut wgpu::CommandEncoder,
         entities: &wgpu::Buffer,
     ) {
-        let jobs = self.laid_out.len() as u32;
+        let jobs = self.job_count;
         if jobs == 0 {
             return;
         }

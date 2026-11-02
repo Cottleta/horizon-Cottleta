@@ -548,10 +548,11 @@ struct NameTagLayout {
     behind: usize,
 }
 /// Laid-out name tag lines by a hash of their characters, for the font
-/// epoch (`Font::epoch`) they were laid out under.
+/// epoch (`Font::epoch`) and skins (`HudAtlas::skins_revision`) they were laid out under.
 #[derive(Default)]
 struct NameTagLayouts {
     epoch: u64,
+    skins: u64,
     lines: rustc_hash::FxHashMap<u64, Vec<NameTagLayout>>,
     count: usize,
 }
@@ -563,8 +564,8 @@ thread_local! {
 }
 /// `f` with the text-space vertices of one name tag line (`HudBatch::name_tag`)
 /// and its background count. A line looks the same every frame unless it is
-/// obfuscated, draws an inline object or rasterizes new glyphs, so any other
-/// line is laid out once and then reused.
+/// obfuscated or rasterizes new glyphs, so any other line is laid out once and then
+/// reused, until the font or a skin its heads could show changes.
 fn with_name_tag_layout(
     atlas: &horizon_client::hud::HudAtlas,
     text: &Text,
@@ -582,9 +583,10 @@ fn with_name_tag_layout(
     let epoch = atlas.font.epoch();
     let mut f = Some(f);
     LAYOUTS.with_borrow_mut(|cache| {
-        if cache.epoch != epoch {
+        if cache.epoch != epoch || cache.skins != atlas.skins_revision {
             *cache = NameTagLayouts {
                 epoch,
+                skins: atlas.skins_revision,
                 ..NameTagLayouts::default()
             };
         }
@@ -613,11 +615,6 @@ fn with_name_tag_layout(
     let reusable = batch.patches.is_empty()
         && text.spans.iter().all(|s| {
             s.style.obfuscated != Some(true)
-                // A player's head changes with its skin; an atlas sprite doesn't.
-                && !matches!(
-                    s.style.inline_object,
-                    Some(horizon_client::text::InlineObject::Player { .. })
-                )
                 // `§k` makes the text obfuscated when it is drawn; other codes don't change.
                 && !s.text.contains("\u{a7}k")
                 && !s.text.contains("\u{a7}K")

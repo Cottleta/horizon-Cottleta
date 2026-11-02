@@ -1102,6 +1102,7 @@ impl Game<'_> {
         }
         super::lan::forget_sync_data();
         self.gui.atlas.object_skins.clear();
+        self.gui.atlas.skins_revision += 1;
         self.server_packs_disconnect();
         self.code_of_conduct = None;
         self.reset_tutorial();
@@ -5258,6 +5259,7 @@ impl Game<'_> {
         if let Some(old) = evicted {
             self.gui.atlas.sprites.remove(&old);
         }
+        self.gui.atlas.skins_revision += 1;
         let Some(mut rect) = self
             .gui
             .atlas

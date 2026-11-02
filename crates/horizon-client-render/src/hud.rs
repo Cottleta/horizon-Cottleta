@@ -73,6 +73,9 @@ pub struct HudAtlas {
     pub sprites: HashMap<String, Rect>,
     /// Resolved player-profile names and UUIDs for inline head components.
     pub object_skins: HashMap<String, String>,
+    /// Changes whenever a head drawn in text may look different: what's kept of such text
+    /// is good while this stands.
+    pub skins_revision: u64,
     /// Sprites with a 0 < alpha < 255 texel (`SpriteContents.transparency().hasTranslucent`),
     /// which puts their particles on vanilla's translucent layer.
     pub translucent: HashSet<String>,
@@ -575,16 +578,21 @@ impl HudAtlas {
         use std::collections::hash_map::Entry;
         if self.object_skins.len() >= 1024 && !self.object_skins.contains_key(&key) {
             self.object_skins.clear();
+            self.skins_revision += 1;
         }
         match self.object_skins.entry(key) {
             Entry::Occupied(entry)
                 if skin.starts_with("entity/player/") && self.sprites.contains_key(entry.get()) => {
             }
             Entry::Occupied(mut entry) => {
-                entry.insert(skin);
+                if *entry.get() != skin {
+                    entry.insert(skin);
+                    self.skins_revision += 1;
+                }
             }
             Entry::Vacant(entry) => {
                 entry.insert(skin);
+                self.skins_revision += 1;
             }
         }
     }
@@ -717,6 +725,7 @@ impl HudAtlas {
             translucent: HashSet::new(),
             flags: HashMap::new(),
             object_skins: HashMap::new(),
+            skins_revision: 0,
             sprite_animations: Vec::new(),
             glint: (vec![0; 4], 1, 1),
             glint_armor: (vec![0; 4], 1, 1),
@@ -1150,6 +1159,7 @@ impl HudAtlas {
             height,
             sprites,
             object_skins: HashMap::new(),
+            skins_revision: 0,
             translucent,
             flags,
             sprite_animations,

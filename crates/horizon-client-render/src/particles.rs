@@ -990,7 +990,55 @@ pub struct ParticleLevel<'a> {
     pub player: Option<([f64; 3], f64)>,
 }
 impl ParticleLevel<'_> {
+    /// Whether no cell `SceneCollisions::resolve` would scan for this movement can hold a
+    /// shape (`CollisionBlock.empty_shape`): it would find none and give the movement back.
+    /// Most particles fly through open air. A long sweep or a missing chunk is left to it.
+    fn open_air(&self, bb: Aabb, d: [f64; 3]) -> bool {
+        let sweep = bb.expand_towards(Vec3::new(d[0], d[1], d[2]));
+        let (lo, hi) = (sweep.min_position(), sweep.max_position());
+        if !lo.is_finite() || !hi.is_finite() {
+            return false;
+        }
+        let first = |v: f64| (v - 1.0e-7).floor() as i32 - 1;
+        let last = |v: f64| (v + 1.0e-7).floor() as i32 + 1;
+        let (x0, x1) = (first(lo.x), last(hi.x));
+        let (y0, y1) = (first(lo.y), last(hi.y));
+        let (z0, z1) = (first(lo.z), last(hi.z));
+        let size = |a: i32, b: i32| i64::from(b) - i64::from(a) + 1;
+        if size(x0, x1) * size(y0, y1) * size(z0, z1) > 125 {
+            return false;
+        }
+        let mut column = None;
+        for z in z0..=z1 {
+            for x in x0..=x1 {
+                let at = (x >> 4, z >> 4);
+                let chunk = match column {
+                    Some((key, chunk)) if key == at => chunk,
+                    _ => {
+                        let Some(chunk) = self.world.chunks.get(&at) else {
+                            return false;
+                        };
+                        column = Some((at, chunk));
+                        chunk
+                    }
+                };
+                for y in y0..=y1 {
+                    let empty = self
+                        .collision
+                        .collision_block(chunk.block(x, y, z))
+                        .is_ok_and(|block| block.empty_shape);
+                    if !empty {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
     fn collide(&self, bb: Aabb, d: [f64; 3]) -> [f64; 3] {
+        if self.open_air(bb, d) {
+            return d;
+        }
         let mut scene = SceneCollisions {
             world: self.world,
             binding: self.collision,

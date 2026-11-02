@@ -4148,6 +4148,8 @@ impl ParticleEngine {
         // Camera.setRotation: rotationYXZ(PI - yRot, -xRot, 0).
         let base = Quat::from_rotation_y(std::f32::consts::PI - yaw.to_radians())
             * Quat::from_rotation_x(-pitch.to_radians());
+        // Particles bunch up, and the light of a block doesn't change within a frame.
+        let mut lights = [([i32::MIN; 3], 0u8); 32];
         for p in &self.particles {
             if p.no_render {
                 continue;
@@ -4253,7 +4255,13 @@ impl ParticleEngine {
                 _ => {}
             }
             let block = ParticleLevel::block_at(p.position);
-            let packed = light_at(block);
+            let slot = &mut lights[(block[0] ^ block[1].wrapping_mul(5) ^ block[2].wrapping_mul(11))
+                as usize
+                & 31];
+            if slot.0 != block {
+                *slot = (block, light_at(block));
+            }
+            let packed = slot.1;
             let (sky_light, block_light) = p.light_coords(
                 partial,
                 u32::from(packed >> 4) * 16,

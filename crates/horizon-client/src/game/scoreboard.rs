@@ -777,8 +777,12 @@ impl Game<'_> {
     pub(super) fn draw_tab_list(&mut self, batch: &mut HudBatch) {
         use horizon_client::tab_list::{self, TabInputs};
         // Player heads and the player list both draw from the same skin
-        // slots: a new frame, with what the last one drew.
-        self.flush_skin_slots();
+        // slots: a new tick, with what the last one drew. Skins are looked at once a
+        // tick (`remote_tab_hidden`), and between their frames nothing would mark them.
+        if self.skin_slots_flushed != self.ticks {
+            self.skin_slots_flushed = self.ticks;
+            self.flush_skin_slots();
+        }
         let key = self.screen == super::Screen::Playing
             && self.keys.contains(&winit::keyboard::KeyCode::Tab);
         // tab_list::visible needs the key: on a server's list of hundreds, no

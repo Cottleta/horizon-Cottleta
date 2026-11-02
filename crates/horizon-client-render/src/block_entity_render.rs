@@ -921,8 +921,18 @@ struct SignTextEntry {
     glyphs: u64,
     /// Game time it was last drawn.
     used: i64,
+    /// When `data` was last compared with the sign's (`SIGN_TEXT_CHECK`).
+    checked: std::time::Instant,
     vertices: Vec<Vertex>,
 }
+/// How long a sign's text goes without being compared: comparing all four lines was most
+/// of a frame's sign text, and packets change them at most once a tick. By the clock, as
+/// game time can stand still. Tests compare every time.
+const SIGN_TEXT_CHECK: std::time::Duration = if cfg!(test) {
+    std::time::Duration::ZERO
+} else {
+    std::time::Duration::from_millis(50)
+};
 /// Game ticks a sign's text is kept after it was last drawn.
 const SIGN_TEXT_KEEP: i64 = 100;
 const MODELS: [(&str, &str); 27] = [
@@ -1121,7 +1131,7 @@ impl BlockEntityRenderer {
         let signs = &mut cache.signs;
         if !signs.get(&pos).is_some_and(|e| {
             (e.state, e.packed, e.near, e.glyphs) == (state, packed, near, glyphs)
-                && e.data == *data
+                && (e.checked.elapsed() < SIGN_TEXT_CHECK || e.data == *data)
         }) {
             let mut vertices = signs.remove(&pos).map_or_else(Vec::new, |e| e.vertices);
             vertices.clear();
@@ -1145,6 +1155,7 @@ impl BlockEntityRenderer {
                     near,
                     glyphs,
                     used: now,
+                    checked: std::time::Instant::now(),
                     vertices,
                 },
             );
@@ -1153,6 +1164,9 @@ impl BlockEntityRenderer {
             return;
         };
         entry.used = now;
+        if entry.checked.elapsed() >= SIGN_TEXT_CHECK {
+            entry.checked = std::time::Instant::now();
+        }
         out.extend(entry.vertices.iter().map(|v| Vertex {
             pos: (Vec3::from_array(v.pos) + origin).to_array(),
             ..*v

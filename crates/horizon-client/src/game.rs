@@ -2838,6 +2838,10 @@ struct Game<'a> {
     trim_slots: Vec<(String, usize)>,
     /// The tick `trim_slots` was last checked against the atlas.
     trim_slots_checked: u64,
+    /// The tick and level player count `update_remote_skins` last ran for.
+    remote_skins_updated: (u64, usize),
+    /// The tick `flush_skin_slots` last ran for.
+    skin_slots_flushed: u64,
     cart_models: minecarts::CartModels,
     /// The boat the player rides.
     riding: Option<u32>,
@@ -18971,6 +18975,8 @@ impl<'a> Game<'a> {
             skin_slots: horizon_client::skins::SkinSlots::new(horizon_client::hud::SKIN_SLOTS),
             trim_slots: Vec::new(),
             trim_slots_checked: 0,
+            remote_skins_updated: (u64::MAX, 0),
+            skin_slots_flushed: u64::MAX,
             cart_models: prepared.cart_models,
             riding: None,
             posed_rider: None,

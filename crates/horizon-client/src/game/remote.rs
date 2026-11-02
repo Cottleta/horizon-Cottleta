@@ -4871,7 +4871,16 @@ impl Game<'_> {
     /// building it: the drawn players' skins each frame, and once a tick the
     /// listed players' faces for chat's `object:player`.
     pub(super) fn remote_tab_hidden(&mut self) {
-        self.update_remote_skins();
+        // What skins say changes with packets and downloads, not with the frame. A player
+        // just in the level has none yet, and doesn't wait for the next tick.
+        let moment = (
+            self.ticks,
+            self.remote.as_ref().map_or(0, |r| r.level_players.len()),
+        );
+        if self.remote_skins_updated != moment {
+            self.remote_skins_updated = moment;
+            self.update_remote_skins();
+        }
         let ticks = self.ticks;
         let Some(r) = self.remote.as_mut() else {
             return;

@@ -394,7 +394,7 @@ impl Game<'_> {
                         .map(|quad| text_display::CORNERS.map(|i| quad[i])),
                 );
                 display.quads_key = Some(key);
-                self.map_patches.extend(batch.patches);
+                self.map_patches.extend(std::mem::take(&mut batch.patches));
             }
             let light = Self::display_light(&self.world, &d, position);
             // Font.DisplayMode: SEE_THROUGH over everything, else POLYGON_OFFSET.

@@ -1282,6 +1282,25 @@ pub struct EndPortalFill {
 pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     u32::from(a) << 24 | u32::from(b) << 16 | u32::from(g) << 8 | u32::from(r)
 }
+thread_local! {
+    /// The last batch's vertex list: a frame's HUD starts with room for what the last one
+    /// drew, not with an allocation per growth (a long player list is megabytes).
+    static SPARE_VERTICES: std::cell::Cell<Vec<HudVertex>> = const { std::cell::Cell::new(Vec::new()) };
+}
+impl Drop for HudBatch {
+    fn drop(&mut self) {
+        let mut vertices = std::mem::take(&mut self.vertices);
+        vertices.clear();
+        let _ = SPARE_VERTICES.try_with(|spare| {
+            let held = spare.take();
+            spare.set(if held.capacity() > vertices.capacity() {
+                held
+            } else {
+                vertices
+            });
+        });
+    }
+}
 impl HudBatch {
     /// Window.calculateScale: the largest scale keeping >= 320x240 GUI pixels,
     /// capped by the GUI Scale option (0 = auto).
@@ -1295,7 +1314,9 @@ impl HudBatch {
             scale += 1;
         }
         Self {
-            vertices: Vec::new(),
+            vertices: SPARE_VERTICES
+                .try_with(std::cell::Cell::take)
+                .unwrap_or_default(),
             scale: scale as f32,
             width: (window[0] as f32 / scale as f32).ceil(),
             height: (window[1] as f32 / scale as f32).ceil(),

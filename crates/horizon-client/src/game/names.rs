@@ -634,7 +634,7 @@ fn with_name_tag_layout(
             text: text.clone(),
             color,
             background,
-            vertices: batch.vertices,
+            vertices: batch.vertices.clone(),
             behind,
         });
     });

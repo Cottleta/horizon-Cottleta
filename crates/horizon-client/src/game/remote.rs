@@ -4952,6 +4952,13 @@ impl Game<'_> {
     /// player heads on items. The next frame uses the uploaded atlas texture.
     pub(super) fn resolve_inline_profiles(&mut self, profiles: &[serde_json::Value]) {
         use horizon_client::skins;
+        // Decoding a head's profile was a tenth of a frame with a list of them: skins change
+        // with downloads, looked at once a tick, or when more heads ask.
+        let moment = (self.ticks, profiles.len());
+        if profiles.is_empty() || self.inline_profiles_resolved == moment {
+            return;
+        }
+        self.inline_profiles_resolved = moment;
         for profile in profiles {
             let skin = skins::head_skin(
                 profile,
@@ -4959,13 +4966,13 @@ impl Game<'_> {
                 &mut self.skin_downloads.borrow_mut(),
                 |location| self.gui.atlas.sprites.contains_key(location),
             );
-            let id = skins::parse_profile(profile).id;
+            let key = skins::object_skin_key(&skins::parse_profile(profile));
             let name = profile
                 .as_str()
                 .or_else(|| profile.get("name").and_then(serde_json::Value::as_str));
             // The player list's skin for the same profile is drawn too.
             let keys = [
-                Some(format!("id:{id:032x}")),
+                Some(key.clone()),
                 name.map(|n| format!("name:{}", n.to_ascii_lowercase())),
             ];
             for key in keys.iter().flatten() {
@@ -4976,9 +4983,7 @@ impl Game<'_> {
                     self.again_skin(&listed);
                 }
             }
-            self.gui
-                .atlas
-                .set_object_skin(format!("id:{id:032x}"), skin.clone());
+            self.gui.atlas.set_object_skin(key, skin.clone());
             if let Some(name) = name {
                 self.gui
                     .atlas

@@ -794,15 +794,10 @@ impl Game<'_> {
             return;
         }
         // Nothing the list shows moves faster than a tick: frames between
-        // ticks draw the last layout, and only keep its faces in their slots.
+        // ticks draw the last layout, whose faces held their slots for the tick.
         let stamp = TickFrame::stamp(self.ticks, batch);
         if self.tab_frame.painted.replay(batch, &self.gui.atlas, stamp) {
             self.remote_tab_hidden();
-            let faces = std::mem::take(&mut self.tab_frame.faces);
-            for (uuid, skin) in &faces {
-                self.face_skin(*uuid, skin);
-            }
-            self.tab_frame.faces = faces;
             return;
         }
         let (mut players, online_mode, upside_down) = match self.remote_tab_players() {
@@ -847,9 +842,7 @@ impl Game<'_> {
                 .iter()
                 .map(|p| p.uuid)
                 .collect();
-        self.tab_frame.faces.clear();
         for p in players.iter_mut().filter(|p| faces.contains(&p.uuid)) {
-            self.tab_frame.faces.push((p.uuid, p.skin.clone()));
             p.skin = self.face_skin(p.uuid, &p.skin);
         }
         let board = &self.score.board;
@@ -883,8 +876,9 @@ pub(super) struct TickFrame {
     /// The tick and GUI size it was laid out for.
     stamp: Option<(u64, i32, i32)>,
     draws: Vec<horizon_client::hud_layout::GuiDraw>,
-    /// The vertices `draws` made, unless they also changed the blend state or
-    /// asked for player faces: then each frame paints `draws` again.
+    /// The vertices `draws` made, unless they also changed the blend state: then each
+    /// frame paints `draws` again. Heads inside text are in these vertices too, and their
+    /// profiles are resolved from the frame that laid them out.
     vertices: Option<Vec<horizon_client::hud::HudVertex>>,
 }
 
@@ -916,13 +910,9 @@ impl TickFrame {
         stamp: (u64, i32, i32),
         draws: Vec<horizon_client::hud_layout::GuiDraw>,
     ) {
-        let (start, blends, profiles) = (
-            batch.vertices.len(),
-            batch.blends.len(),
-            batch.inline_profiles.len(),
-        );
+        let (start, blends) = (batch.vertices.len(), batch.blends.len());
         horizon_client::hud_layout::paint(batch, atlas, &draws);
-        let plain = batch.blends.len() == blends && batch.inline_profiles.len() == profiles;
+        let plain = batch.blends.len() == blends;
         self.vertices = plain.then(|| batch.vertices[start..].to_vec());
         self.draws = draws;
         self.stamp = Some(stamp);
@@ -936,7 +926,6 @@ impl TickFrame {
 #[derive(Default)]
 pub(super) struct TabFrame {
     painted: TickFrame,
-    faces: Vec<(u128, String)>,
 }
 
 /// The host and guests that have entered the world, rebuilt from live state.

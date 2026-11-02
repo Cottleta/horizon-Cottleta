@@ -618,7 +618,9 @@ fn with_name_tag_layout(
                     s.style.inline_object,
                     Some(horizon_client::text::InlineObject::Player { .. })
                 )
-                && !s.text.contains('\u{a7}')
+                // `§k` makes the text obfuscated when it is drawn; other codes don't change.
+                && !s.text.contains("\u{a7}k")
+                && !s.text.contains("\u{a7}K")
         });
     patches.append(&mut batch.patches);
     if !reusable {

@@ -1912,9 +1912,10 @@ impl HudBatch {
         use crate::text::InlineObject;
         match object {
             InlineObject::Player { profile, hat, .. } => {
-                let id = crate::skins::parse_profile(profile).id;
+                let info = crate::skins::parse_profile(profile);
+                let id = info.id;
                 let name = inline_profile_name(profile);
-                let by_id = atlas.object_skins.get(&format!("id:{id:032x}"));
+                let by_id = atlas.object_skins.get(&crate::skins::object_skin_key(&info));
                 let by_name = name.and_then(|name| {
                     atlas
                         .object_skins

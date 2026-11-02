@@ -2842,6 +2842,8 @@ struct Game<'a> {
     remote_skins_updated: (u64, usize),
     /// The tick `flush_skin_slots` last ran for.
     skin_slots_flushed: u64,
+    /// The tick and head count `resolve_inline_profiles` last ran for.
+    inline_profiles_resolved: (u64, usize),
     cart_models: minecarts::CartModels,
     /// The boat the player rides.
     riding: Option<u32>,
@@ -18977,6 +18979,7 @@ impl<'a> Game<'a> {
             trim_slots_checked: 0,
             remote_skins_updated: (u64::MAX, 0),
             skin_slots_flushed: u64::MAX,
+            inline_profiles_resolved: (u64::MAX, 0),
             cart_models: prepared.cart_models,
             riding: None,
             posed_rider: None,

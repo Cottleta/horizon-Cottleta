@@ -469,6 +469,20 @@ pub fn parse_profile(v: &serde_json::Value) -> ProfileInfo {
     }
 }
 
+/// The key of an inline head's skin in `HudAtlas::object_skins`. A profile with only a
+/// `textures` property has the nil id, shared by every such head: its texture tells them apart.
+pub fn object_skin_key(profile: &ProfileInfo) -> String {
+    use std::hash::{Hash, Hasher};
+    match &profile.textures {
+        Some((value, _)) if profile.id == 0 => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            value.hash(&mut hasher);
+            format!("textures:{:016x}", hasher.finish())
+        }
+        _ => format!("id:{:032x}", profile.id),
+    }
+}
+
 /// `ResolvableProfile.create`'s `Dynamic` key from a skull's `profile` tag:
 /// a bare name string is `createUnresolved`, and a compound without
 /// properties and with exactly one of a name or an id is `Dynamic`.
@@ -1109,6 +1123,21 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
 
 #[cfg(test)]
 mod tests {
+    /// Heads with only a `textures` property all have the nil id: each keeps its own skin.
+    #[test]
+    fn heads_with_only_textures_keep_their_own_skins() {
+        let head = |value: &str| {
+            parse_profile(&serde_json::json!({
+                "properties": [{"name": "textures", "value": value}]
+            }))
+        };
+        assert_eq!(head("a").id, 0);
+        assert_ne!(object_skin_key(&head("a")), object_skin_key(&head("b")));
+        assert_eq!(object_skin_key(&head("a")), object_skin_key(&head("a")));
+        let named = parse_profile(&serde_json::json!("Notch"));
+        assert_eq!(object_skin_key(&named), format!("id:{:032x}", named.id));
+    }
+
     /// A profile's `texture` names a pack texture, never a file outside the
     /// packs: bad characters and `..` segments draw nothing.
     #[test]

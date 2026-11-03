@@ -89,6 +89,29 @@ fn recover_issues(dir: &Path) -> [Option<crate::save::DatIssue>; 2] {
         crate::save::level_dat_issue(dir, true),
     ]
 }
+/// How long the ban warning keeps Proceed greyed out.
+const WARNING_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Exists once the ban warning's "Do not show this screen again" was ticked.
+fn warning_accepted() -> PathBuf {
+    crate::logging::game_home().join("ban-warning-accepted")
+}
+fn warning_header() -> String {
+    lang::get_or(
+        "horizon.ban_warning.header",
+        "Warning: You Could Be Banned",
+    )
+}
+fn warning_message() -> String {
+    lang::get_or(
+        "horizon.ban_warning.message",
+        "This is an unofficial, modified Minecraft client. Servers and their anti-cheats may \
+         treat it as cheating even if you do nothing wrong, and that can get your account \
+         banned. You use it on servers at your own risk: any ban or other consequence is your \
+         own responsibility, not the fault of this build's makers or the Horizon project.\n\n\
+         Online play is offered by third-party servers that are not owned, operated or \
+         supervised by Mojang Studios or Microsoft.",
+    )
+}
 /// The SafetyScreen's column (WarningScreen: title, 12 px around the message
 /// box of its lines and 4 px padding, the checkbox, then the buttons, 8 px
 /// apart): the title's top.
@@ -332,10 +355,11 @@ pub enum Mode {
         alert: Option<Alert>,
     },
     Multiplayer(crate::multiplayer::Screen),
-    /// SafetyScreen: the warning before the first Multiplayer click, with its
-    /// "Do not show this screen again" box.
+    /// In SafetyScreen's place: the warning before the first Multiplayer click, with its
+    /// "Do not show this screen again" box and a wait before Proceed (`WARNING_WAIT`).
     MultiplayerWarning {
         check: bool,
+        opened: std::time::Instant,
     },
     /// CreateFlatWorldScreen over Create New World: the fields that screen
     /// keeps and the superflat editor on top of them.
@@ -403,6 +427,9 @@ pub struct Title {
     pub last_server: String,
     /// `skipMultiplayerWarning`, synchronized with `options.txt` the same way.
     pub skip_multiplayer_warning: bool,
+    /// The ban warning's box was ticked (`warning_accepted`). Its own, not vanilla's
+    /// option: a box ticked on vanilla's warning never agreed to this one.
+    skip_ban_warning: bool,
     pub saves: PathBuf,
     /// The prepared resource root: the flat preset list and block registry.
     resources: PathBuf,
@@ -760,6 +787,7 @@ impl Title {
             mode,
             last_server: String::new(),
             skip_multiplayer_warning: false,
+            skip_ban_warning: warning_accepted().exists(),
             saves,
             resources: resources.to_owned(),
             started: now,
@@ -2117,16 +2145,23 @@ impl Title {
                 true,
                 46,
             )],
-            Mode::MultiplayerWarning { .. } => {
+            Mode::MultiplayerWarning { opened, .. } => {
                 let lines = self.message_lines.get();
                 let y = warning_top(h, lines) + 82.0 + lines as f32 * 9.0;
+                let left = WARNING_WAIT.saturating_sub(opened.elapsed());
+                let proceed = lang::get_or("gui.proceed", "Proceed");
+                let proceed = if left.is_zero() {
+                    proceed
+                } else {
+                    format!("{proceed} ({})", left.as_secs() + 1)
+                };
                 vec![
                     b(
                         (w / 2.0).floor() - 154.0,
                         y,
                         150.0,
-                        &lang::get_or("gui.proceed", "Proceed"),
-                        true,
+                        &proceed,
+                        left.is_zero(),
                         70,
                     ),
                     b(
@@ -2345,17 +2380,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             // message on the next line.
             Mode::MultiplayerWarning { .. } => ScreenInfo::new(
                 "multiplayer_warning",
-                format!(
-                    "{}\n{}",
-                    get(
-                        "multiplayerWarning.header",
-                        "Caution: Third-Party Online Play"
-                    ),
-                    get(
-                        "multiplayerWarning.message",
-                        "Caution: Online play is offered by third-party servers that are not owned, operated, or supervised by Mojang Studios or Microsoft. During online play, you may be exposed to unmoderated chat messages or other types of user-generated content that may not be suitable for everyone.",
-                    ),
-                ),
+                format!("{}\n{}", warning_header(), warning_message()),
             ),
             Mode::Multiplayer(_) => return None,
         };
@@ -3013,19 +3038,16 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                     centered(atlas, batch, line, text_top + i as f32 * 9.0, u32::MAX);
                 }
             }
-            Mode::MultiplayerWarning { check } => {
+            Mode::MultiplayerWarning { check, .. } => {
                 crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
-                let message = lang::get_or(
-                    "multiplayerWarning.message",
-                    "Caution: Online play is offered by third-party servers that are not owned, operated, or supervised by Mojang Studios or Microsoft. During online play, you may be exposed to unmoderated chat messages or other types of user-generated content that may not be suitable for everyone.",
-                );
+                let message = warning_message();
                 // The message sits in a text box `width - 100` wide with 4 px
                 // inside, left aligned (FittingMultiLineTextWidget).
                 let box_w = w - 100.0;
                 let lines = wrapped(atlas, &message, box_w - 8.0);
                 self.message_lines.set(lines.len());
                 let top = warning_top(h, lines.len());
-                let header = Text::translate("multiplayerWarning.header", &[]).bold();
+                let header = Text::literal(warning_header()).bold();
                 batch.text_styled(
                     atlas,
                     &header,
@@ -3352,7 +3374,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             return (Action::None, self.select_create_tab(tab));
         }
         // The SafetyScreen's box toggles where it was last drawn.
-        if let Mode::MultiplayerWarning { check } = &mut self.mode {
+        if let Mode::MultiplayerWarning { check, .. } = &mut self.mode {
             let [bx, by, bw, bh] = self.warning_check.get();
             if (bx..bx + bw).contains(&x) && (by..by + bh).contains(&y) {
                 *check = !*check;
@@ -3423,18 +3445,29 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 }
             }
             (Mode::Main, Some(4)) => {
-                // TitleScreen.init: SafetyScreen first, unless it was turned off.
-                self.mode = if self.skip_multiplayer_warning {
+                // The warning first, unless its box was ticked.
+                self.mode = if self.skip_ban_warning {
                     Mode::Multiplayer(crate::multiplayer::Screen::list(&self.saves))
                 } else {
-                    Mode::MultiplayerWarning { check: false }
+                    Mode::MultiplayerWarning {
+                        check: false,
+                        opened: std::time::Instant::now(),
+                    }
                 };
                 Action::None
             }
-            (Mode::MultiplayerWarning { check }, Some(70)) => {
-                // SafetyScreen Proceed: the box saves the choice.
+            (Mode::MultiplayerWarning { check, .. }, Some(70)) => {
+                // Proceed: the box saves the choice.
                 if *check {
-                    self.skip_multiplayer_warning = true;
+                    self.skip_ban_warning = true;
+                    let file = warning_accepted();
+                    if let Err(e) = file
+                        .parent()
+                        .map_or(Ok(()), std::fs::create_dir_all)
+                        .and_then(|()| std::fs::write(&file, ""))
+                    {
+                        log::warn!("Ban warning: {e}");
+                    }
                 }
                 self.mode = Mode::Multiplayer(crate::multiplayer::Screen::list(&self.saves));
                 Action::None
@@ -3985,6 +4018,13 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         }
     }
     /// The world list has the keyboard: no search box focus.
+    /// The ban warning's Proceed is free at once (the tests that pass through it).
+    #[cfg(test)]
+    fn end_warning_wait(&mut self) {
+        if let Mode::MultiplayerWarning { opened, .. } = &mut self.mode {
+            *opened -= WARNING_WAIT;
+        }
+    }
     pub fn list_focused(&self) -> bool {
         matches!(self.mode, Mode::Select { .. }) && !self.search_focused
     }
@@ -4667,6 +4707,36 @@ mod classic_tests {
             panic!("the create screen");
         };
         assert!(name.ends_with(" and more"), "{name:?}");
+    }
+
+    /// The warning's Proceed waits, and only its own box skips it: not vanilla's option.
+    #[test]
+    fn the_ban_warning_waits_and_ignores_vanillas_skip() {
+        let mut title = Title::new(
+            PathBuf::new(),
+            Path::new("/nonexistent/horizon-test-resources"),
+        );
+        title.skip_multiplayer_warning = true;
+        title.skip_ban_warning = false;
+        title.mode = Mode::Main;
+        let size = (854.0, 480.0);
+        let main = title.buttons(size.0, size.1);
+        let multiplayer = main.iter().find(|b| b.id == 4).expect("Multiplayer");
+        title.click_action(multiplayer.x, multiplayer.y, size, Some(4));
+        assert!(matches!(title.mode, Mode::MultiplayerWarning { check: false, .. }));
+        let proceed = |title: &Title| {
+            title
+                .buttons(size.0, size.1)
+                .into_iter()
+                .find(|b| b.id == 70)
+                .expect("Proceed")
+                .enabled
+        };
+        assert!(!proceed(&title), "greyed out at first");
+        if let Mode::MultiplayerWarning { opened, .. } = &mut title.mode {
+            *opened -= WARNING_WAIT;
+        }
+        assert!(proceed(&title), "free after the wait");
     }
 
     #[test]

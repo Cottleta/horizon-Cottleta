@@ -18477,6 +18477,18 @@ impl Game<'_> {
                                     f64::from(gpu) * 100.0 / f64::from(ms(cpu).max(0.001));
                             }
                             self.frame_stats.record_cpu(ms(cpu));
+                            // What this PC reaches, for Auto Settings: play only, menus cost little.
+                            if self.screen == Screen::Playing
+                                && self.title.is_none()
+                                && let Some(&gpu) = r.gpu_times.last()
+                            {
+                                horizon_client::auto_settings::note_frame(
+                                    elapsed.as_secs_f32() * 1000.0,
+                                    ms(cpu),
+                                    gpu,
+                                    &self.settings,
+                                );
+                            }
                             let render = r.last_encode;
                             self.frame_stats.record_phases([
                                 ms(updated - now),

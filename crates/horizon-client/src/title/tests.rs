@@ -107,6 +107,7 @@ fn direct_connection_remembers_the_address_on_cancel_escape_and_join() {
     f.click("Multiplayer");
     // SafetyScreen comes first while its box was never ticked.
     assert!(matches!(f.title.mode, Mode::MultiplayerWarning { .. }));
+    f.title.end_warning_wait();
     f.click("Proceed");
     f.click("Direct Connection");
     assert_eq!(f.title.focused_field().unwrap().1, "localhost:25566");
@@ -120,6 +121,7 @@ fn direct_connection_remembers_the_address_on_cancel_escape_and_join() {
     f.title.escape();
     f.title.escape();
     f.click("Multiplayer");
+    f.title.end_warning_wait();
     f.click("Proceed");
     f.click("Direct Connection");
     assert_eq!(f.title.focused_field().unwrap().1, "[::1]:25568");
@@ -144,6 +146,7 @@ fn direct_connection_remembers_the_address_on_cancel_escape_and_join() {
 fn f5_reloads_the_server_list() {
     let mut f = Fixture::new();
     f.click("Multiplayer");
+    f.title.end_warning_wait();
     f.click("Proceed");
     let file = crate::multiplayer::servers_file(&f.title.saves);
     horizon_protocol::servers::save(

@@ -589,6 +589,10 @@ pub struct Graphics {
     pub texture_budget_mib: u32,
     /// The HUD rebuilds 20 times a second until a key, a click or the wheel (`hud_rate`).
     pub dynamic_hud: bool,
+    /// Auto Settings' frame rate target, 0 until one is picked.
+    pub auto_target_fps: u32,
+    /// Auto Settings' FPS Target rows are dropped down: not saved.
+    pub auto_target_open: bool,
     pub sky: bool,
     pub fog: bool,
     pub weather: bool,
@@ -674,6 +678,8 @@ impl Default for Graphics {
             upload_budget_kib: 0,
             texture_budget_mib: 0,
             dynamic_hud: false,
+            auto_target_fps: 0,
+            auto_target_open: false,
             sky: true,
             fog: true,
             weather: true,
@@ -797,6 +803,7 @@ impl Graphics {
                     g.texture_budget_mib = number(g.texture_budget_mib).min(16384);
                 }
                 "dynamicHud" => g.dynamic_hud = flag(g.dynamic_hud),
+                "autoTargetFps" => g.auto_target_fps = number(g.auto_target_fps),
                 "sky" => g.sky = flag(g.sky),
                 "fog" => g.fog = flag(g.fog),
                 "weather" => g.weather = flag(g.weather),
@@ -858,7 +865,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\ndynamicHud:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\ndynamicHud:{}\nautoTargetFps:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -909,6 +916,7 @@ impl Graphics {
             self.shader_pack,
             bool_text(self.translucent_batching),
             bool_text(self.dynamic_hud),
+            self.auto_target_fps,
         );
         text += &self.blue_map.serialize();
         text
@@ -1049,6 +1057,8 @@ mod tests {
     fn round_trips() {
         let g = Graphics {
             dynamic_hud: true,
+            auto_target_fps: 500,
+            auto_target_open: false,
             preset: Preset::Balanced,
             lod_distance: 256,
             far_detail: FarDetail::Reduced,

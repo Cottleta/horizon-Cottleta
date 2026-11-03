@@ -20,6 +20,8 @@ use crate::{
 /// The screen's pages, in its order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
+    /// Settings picked for this PC, and the player's saved ones.
+    Auto,
     General,
     Quality,
     Performance,
@@ -28,15 +30,17 @@ pub enum Page {
     Hdr,
 }
 impl Page {
-    pub const ALL: [Page; 5] = [
+    pub const ALL: [Page; 6] = [
         Page::General,
         Page::Quality,
         Page::Performance,
         Page::Advanced,
         Page::Hdr,
+        Page::Auto,
     ];
     pub fn name(self) -> &'static str {
         match self {
+            Page::Auto => "Auto Settings",
             Page::General => "General",
             Page::Quality => "Quality",
             Page::Performance => "Performance",
@@ -47,6 +51,7 @@ impl Page {
     /// What the page holds, in the strip while no setting is pointed at.
     pub fn about(self) -> &'static str {
         match self {
+            Page::Auto => "Settings picked for this PC, and your saved ones.",
             Page::General => "How far you see, the window and the HUD.",
             Page::Quality => "The sky and weather, lighting, textures and the image.",
             Page::Performance => "Chunk loading, culling and power use.",
@@ -77,6 +82,12 @@ pub enum H {
     ChunkUpdates,
     UploadBudget,
     AutoSettings,
+    AutoPerformance,
+    AutoTarget,
+    AutoFps,
+    AutoApply,
+    AutoSave,
+    AutoLoad,
     DynamicHud,
     Sky,
     Fog,
@@ -158,7 +169,7 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         h(
                             H::AutoSettings,
                             None,
-                            "Picks settings for this PC from its GPU, CPU and memory.",
+                            "Most frames, or the best graphics for a frame rate.",
                         ),
                     ],
                 ),
@@ -548,6 +559,43 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                 ),
             ],
         ),
+        (
+            Page::Auto,
+            vec![
+                (
+                    "Pick for this PC",
+                    vec![
+                        h(
+                            H::AutoPerformance,
+                            None,
+                            "Lowest settings: the most frames this PC can reach.",
+                        ),
+                        h(
+                            H::AutoTarget,
+                            None,
+                            "The best graphics that should still reach a frame rate you pick.",
+                        ),
+                        h(
+                            H::AutoFps,
+                            None,
+                            "The range comes from this PC. Type a number in the box too.",
+                        ),
+                        h(
+                            H::AutoApply,
+                            None,
+                            "An estimate from frame times so far and what each level costs.",
+                        ),
+                    ],
+                ),
+                (
+                    "Your settings",
+                    vec![
+                        h(H::AutoSave, None, "Keeps the settings as they are now."),
+                        h(H::AutoLoad, None, "Goes back to the settings you saved."),
+                    ],
+                ),
+            ],
+        ),
     ];
     // Only Windows and Linux have more than one graphics API, and translucent batching
     // (Metal draws flat).
@@ -702,6 +750,7 @@ impl H {
                 n => (n as f32 - 150.0) / 1850.0,
             }),
             H::HdrBlackLevel => Some(g.hdr_black_level as f32 / 100.0),
+            H::AutoFps => Some(crate::auto_settings::target_position(g.auto_target_fps)),
             H::HdrUiBrightness => Some((g.hdr_ui_brightness as f32 - 25.0) / 75.0),
             _ => None,
         }
@@ -756,7 +805,13 @@ impl H {
                 }
                 k => labelled("Upload Budget", lang::tr("%s KiB/frame", &[&k])),
             },
-            H::AutoSettings => Text::literal(lang::get("Quick Auto Settings")),
+            H::AutoSettings => Text::literal(lang::get("Auto Settings...")),
+            H::AutoPerformance => Text::literal(lang::get("Best Performance")),
+            H::AutoTarget => Text::literal(lang::get("FPS Target...")),
+            H::AutoFps => labelled("Target", format!("{} FPS", crate::auto_settings::target(s))),
+            H::AutoApply => Text::literal(lang::get("Apply FPS Target")),
+            H::AutoSave => Text::literal(lang::get("Save Current Settings")),
+            H::AutoLoad => Text::literal(lang::get("Load Saved Settings")),
             H::DynamicHud => labelled("Dynamic HUD", on_off(g.dynamic_hud)),
             H::Sky => labelled("Sky", on_off(g.sky)),
             H::Fog => labelled("Fog", on_off(g.fog)),
@@ -842,6 +897,7 @@ impl H {
     fn set_slider(self, s: &mut Settings, v: f32) {
         let g = &mut s.horizon;
         match self {
+            H::AutoFps => g.auto_target_fps = crate::auto_settings::target_at(v),
             H::ChunkUpdates => g.chunk_updates = (v * 64.0).round() as u32,
             H::UploadBudget => {
                 g.upload_budget_kib =
@@ -993,6 +1049,9 @@ impl Item {
                 | H::HdrPaperWhite
                 | H::HdrUiBrightness,
             ) if !s.horizon.hdr => Some("Turn HDR on to use it."),
+            Item::Horizon(H::AutoLoad) if !crate::auto_settings::saved_exists() => {
+                Some("No settings saved yet.")
+            }
             Item::Horizon(H::TranslucentBatching)
                 if !crate::graphics::translucent_batching_offered() =>
             {
@@ -1157,9 +1216,47 @@ pub enum Action {
     Done,
 }
 
+/// What this screen edits, from `b` to `s`: Horizon's graphics settings and the vanilla
+/// options on its rows.
+pub(crate) fn copy_screen_settings(b: &Settings, s: &mut Settings) {
+    s.horizon = b.horizon.clone();
+    s.render_distance = b.render_distance;
+    s.simulation_distance = b.simulation_distance;
+    s.gamma = b.gamma;
+    s.gui_scale = b.gui_scale;
+    s.vsync = b.vsync;
+    s.max_fps = b.max_fps;
+    s.inactivity_fps_limit = b.inactivity_fps_limit.clone();
+    s.fov = b.fov;
+    s.view_bobbing = b.view_bobbing;
+    s.attack_indicator = b.attack_indicator;
+    s.autosave_indicator = b.autosave_indicator;
+    s.clouds = b.clouds.clone();
+    s.cloud_range = b.cloud_range;
+    s.weather_radius = b.weather_radius;
+    s.particles = b.particles;
+    s.smooth_lighting = b.smooth_lighting;
+    s.biome_blend = b.biome_blend;
+    s.entity_distance = b.entity_distance;
+    s.entity_shadows = b.entity_shadows;
+    s.vignette = b.vignette;
+    s.chunk_fade = b.chunk_fade;
+    s.mipmap_levels = b.mipmap_levels;
+    s.cutout_leaves = b.cutout_leaves;
+    s.improved_transparency = b.improved_transparency;
+    s.prioritize_chunk_updates = b.prioritize_chunk_updates;
+    // Presets set it beside the options above.
+    s.graphics_preset = b.graphics_preset.clone();
+}
+
+/// The width of the box to type a frame rate target in.
+const FPS_BOX_W: f32 = 40.0;
+
 /// What the keyboard or a controller can focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
+    /// The box to type a frame rate target in.
+    FpsBox,
     Item(Item),
     Page(Page),
     Search,
@@ -1271,6 +1368,24 @@ impl Columns {
         let x = self.list_x + self.list_w - style::INSET - style::CONTROL_W;
         (x, style::CONTROL_W)
     }
+    /// The box to type a target in, at the right of `H::AutoFps`'s row at `y`.
+    fn fps_box(&self, y: f32) -> [f32; 4] {
+        let (tx, tw) = self.track();
+        [
+            tx + tw - FPS_BOX_W,
+            y + (style::ROW - style::CONTROL_H) / 2.0,
+            FPS_BOX_W,
+            style::CONTROL_H,
+        ]
+    }
+    /// `item`'s slider value for the pointer at `x`.
+    fn slider_of(&self, item: Item, x: f32) -> f32 {
+        if item == Item::Horizon(H::AutoFps) {
+            let (tx, tw) = self.track();
+            return ((x - tx - 5.0) / (tw - FPS_BOX_W - 14.0)).clamp(0.0, 1.0);
+        }
+        self.slider_at(x)
+    }
     /// A slider's value for the pointer at `x`: the handle's middle follows it.
     fn slider_at(&self, x: f32) -> f32 {
         let (tx, tw) = self.track();
@@ -1280,7 +1395,12 @@ impl Columns {
 
 /// Whether a setting is on the screen now: Upscaling only while TAA is, which does it.
 fn shown(item: Item, s: &Settings) -> bool {
-    item != Item::Horizon(H::Upscaling) || s.horizon.taa
+    match item {
+        Item::Horizon(H::Upscaling) => s.horizon.taa,
+        // FPS Target drops these down.
+        Item::Horizon(H::AutoFps | H::AutoApply) => s.horizon.auto_target_open,
+        _ => true,
+    }
 }
 /// A control's label as its name and its value ("Render Distance" and "12 chunks").
 fn parts(item: Item, s: &Settings, binding: bool) -> (String, Option<String>) {
@@ -1314,6 +1434,8 @@ pub struct GraphicsUi {
     /// The key binding the options screen is waiting on (`Action::BindKey`).
     pub binding: Option<&'static str>,
     pub search: ui::EditBox,
+    /// The box to type a frame rate target in.
+    fps_box: ui::EditBox,
     /// The page the plate shows, alone, while nothing is searched.
     page: Page,
     /// While searching, the page last picked in the page list: current until the list scrolls.
@@ -1328,6 +1450,9 @@ impl Default for GraphicsUi {
         search.bordered = false;
         search.focused = false;
         search.message = lang::get("Search options");
+        let mut fps_box = ui::EditBox::new(0.0, 0.0, 0.0, 8.0);
+        fps_box.bordered = false;
+        fps_box.focused = false;
         Self {
             scroll: ui::Scroll::default(),
             dragging: None,
@@ -1335,6 +1460,7 @@ impl Default for GraphicsUi {
             can_change_value: false,
             binding: None,
             search,
+            fps_box,
             page: Page::General,
             picked: None,
             before: None,
@@ -1492,34 +1618,7 @@ impl GraphicsUi {
         let Some(b) = self.before.as_deref() else {
             return;
         };
-        s.horizon = b.horizon.clone();
-        s.render_distance = b.render_distance;
-        s.simulation_distance = b.simulation_distance;
-        s.gamma = b.gamma;
-        s.gui_scale = b.gui_scale;
-        s.vsync = b.vsync;
-        s.max_fps = b.max_fps;
-        s.inactivity_fps_limit = b.inactivity_fps_limit.clone();
-        s.fov = b.fov;
-        s.view_bobbing = b.view_bobbing;
-        s.attack_indicator = b.attack_indicator;
-        s.autosave_indicator = b.autosave_indicator;
-        s.clouds = b.clouds.clone();
-        s.cloud_range = b.cloud_range;
-        s.weather_radius = b.weather_radius;
-        s.particles = b.particles;
-        s.smooth_lighting = b.smooth_lighting;
-        s.biome_blend = b.biome_blend;
-        s.entity_distance = b.entity_distance;
-        s.entity_shadows = b.entity_shadows;
-        s.vignette = b.vignette;
-        s.chunk_fade = b.chunk_fade;
-        s.mipmap_levels = b.mipmap_levels;
-        s.cutout_leaves = b.cutout_leaves;
-        s.improved_transparency = b.improved_transparency;
-        s.prioritize_chunk_updates = b.prioritize_chunk_updates;
-        // Presets set it beside the options above.
-        s.graphics_preset = b.graphics_preset.clone();
+        copy_screen_settings(b, s);
         self.changed = false;
     }
 
@@ -1603,6 +1702,9 @@ impl GraphicsUi {
                 described = Some(setting);
             }
             self.draw_row(batch, atlas, s, &cols, item, y, hover, focused);
+            if item == Item::Horizon(H::AutoFps) {
+                self.draw_fps_box(s, batch, atlas, cols.fps_box(y));
+            }
         }
         if lines.is_empty() {
             let none = Text::literal(lang::get("No settings match."));
@@ -1756,6 +1858,31 @@ impl GraphicsUi {
         let live = item.blocked(s).is_none();
         let label = item.label(s).plain();
         let (name, value) = parts(item, s, self.binding.is_some());
+        if item == Item::Horizon(H::AutoFps) {
+            // Its track always shows, narrower, with the box beside it (`draw_fps_box`).
+            let (tx, tw) = cols.track();
+            let control = [tx, y + (style::ROW - style::CONTROL_H) / 2.0, tw - FPS_BOX_W - 4.0, style::CONTROL_H];
+            let position = item.slider(s).unwrap_or(0.0);
+            let lit = hover || self.dragging == Some(item);
+            crate::widgets::record_as(
+                &label,
+                rect,
+                live,
+                crate::widgets::Kind::Slider {
+                    value: position,
+                    track: [tx + 5.0, control[2] - 10.0],
+                },
+            );
+            let value = Text::literal(value.unwrap_or_default());
+            style::slider(batch, atlas, control, &value, position, (lit, live));
+            let ty = y + ((style::ROW - 8.0) / 2.0).floor();
+            let shown = Text::literal(style::fit(atlas, &name, tx - 6.0 - rect[0] - style::INSET));
+            batch.text_styled(atlas, &shown, rect[0] + style::INSET, ty, style::WHITE, true);
+            if focused {
+                style::ring(batch, atlas, [rect[0] + 1.0, y, rect[2] - 2.0, style::ROW], style::WHITE);
+            }
+            return;
+        }
         let (tx, tw) = cols.track();
         let right = tx + tw;
         let control = [
@@ -1847,6 +1974,26 @@ impl GraphicsUi {
             );
         }
     }
+    /// The box to type a target in: the target's number until it is being typed in.
+    fn draw_fps_box(&mut self, s: &Settings, batch: &mut HudBatch, atlas: &HudAtlas, rect: [f32; 4]) {
+        let focused = self.focus == Some(Target::FpsBox);
+        if !focused {
+            self.fps_box.set_value(&crate::auto_settings::target(s).to_string());
+        }
+        style::well(batch, atlas, rect);
+        let [x, y, w, h] = rect;
+        self.fps_box.focused = focused;
+        (self.fps_box.x, self.fps_box.y) = (x + 4.0, y + ((h - 8.0) / 2.0).floor());
+        self.fps_box.width = w - 8.0;
+        self.fps_box.text_color = style::WHITE;
+        self.fps_box.draw(batch, atlas, None);
+    }
+    /// Takes what was typed in the box as the target, within this PC's range.
+    fn commit_fps_box(&mut self, s: &mut Settings) {
+        if let Ok(fps) = self.fps_box.value.trim().parse::<u32>() {
+            s.horizon.auto_target_fps = crate::auto_settings::clamp_target(fps);
+        }
+    }
     /// Vanilla's scroller, inside the panel's right edge, sized as `ui::Scroll` drags it.
     fn draw_scroller(&self, batch: &mut HudBatch, atlas: &HudAtlas, cols: &Columns, content: f32) {
         if !cols.scrolls() {
@@ -1932,7 +2079,7 @@ impl GraphicsUi {
                 return Vec::new();
             }
             if let Some(item) = self.dragging {
-                item.set_slider(s, cols.slider_at(x));
+                item.set_slider(s, cols.slider_of(item, x));
                 self.changed = true;
                 return vec![Action::SliderDrag];
             }
@@ -1960,6 +2107,10 @@ impl GraphicsUi {
             return Vec::new();
         }
         if self.focus == Some(Target::Search) {
+            self.focus = None;
+        }
+        if self.focus == Some(Target::FpsBox) {
+            self.commit_fps_box(s);
             self.focus = None;
         }
         if at(cols.button(0)) {
@@ -1993,6 +2144,15 @@ impl GraphicsUi {
         if item.blocked(s).is_some() {
             return Vec::new();
         }
+        if item == Item::Horizon(H::AutoFps)
+            && let Some(line) = lines.iter().find(|l| l.setting.is_some_and(|set| set.item == item))
+            && at(cols.fps_box(self.row_y(&cols, line)))
+        {
+            self.focus = Some(Target::FpsBox);
+            self.fps_box.reset_blink();
+            self.fps_box.move_cursor_to_end(false);
+            return Vec::new();
+        }
         self.focus = Some(Target::Item(item));
         let actions = self.activate(s, item, shift, framebuffer, Some((x, &cols)));
         self.mark(&actions);
@@ -2016,9 +2176,34 @@ impl GraphicsUi {
             }
             Item::Horizon(H::HdrCalibrate) => vec![Action::ButtonClick, Action::Calibrate],
             Item::Horizon(H::AutoSettings) => {
-                let picks = crate::auto_settings::pick(crate::auto_settings::detect());
+                self.page = Page::Auto;
+                self.picked = None;
+                self.scroll.amount = 0.0;
+                vec![Action::ButtonClick]
+            }
+            Item::Horizon(H::AutoPerformance) => {
+                crate::auto_settings::apply(crate::auto_settings::best_performance(), s);
+                vec![Action::ButtonClick, Action::Changed]
+            }
+            Item::Horizon(H::AutoTarget) => {
+                s.horizon.auto_target_open = !s.horizon.auto_target_open;
+                vec![Action::ButtonClick]
+            }
+            Item::Horizon(H::AutoApply) => {
+                let picks = crate::auto_settings::for_target(crate::auto_settings::target(s));
                 crate::auto_settings::apply(picks, s);
                 vec![Action::ButtonClick, Action::Changed]
+            }
+            Item::Horizon(H::AutoSave) => {
+                crate::auto_settings::save(s);
+                vec![Action::ButtonClick]
+            }
+            Item::Horizon(H::AutoLoad) => {
+                if crate::auto_settings::load(s) {
+                    vec![Action::ButtonClick, Action::Changed]
+                } else {
+                    Vec::new()
+                }
             }
             Item::Horizon(H::HdrKey) => {
                 vec![
@@ -2032,7 +2217,7 @@ impl GraphicsUi {
                 match at {
                     Some((x, cols)) if x >= cols.track().0 => {
                         self.dragging = Some(item);
-                        item.set_slider(s, cols.slider_at(x));
+                        item.set_slider(s, cols.slider_of(item, x));
                         vec![Action::SliderDrag]
                     }
                     _ => Vec::new(),
@@ -2156,6 +2341,17 @@ impl GraphicsUi {
             self.can_change_value = false;
             return (Vec::new(), false);
         }
+        if self.focus == Some(Target::FpsBox) {
+            if matches!(key, K::Enter | K::NumpadEnter | K::Tab) {
+                self.commit_fps_box(s);
+                self.focus = None;
+            } else if !self.fps_box.key(key, false, shift)
+                && let Some(t) = text
+            {
+                self.type_text(t);
+            }
+            return (Vec::new(), true);
+        }
         if self.focus == Some(Target::Search)
             && !matches!(key, K::Tab | K::ArrowDown | K::Enter | K::NumpadEnter)
         {
@@ -2242,7 +2438,7 @@ impl GraphicsUi {
             && let Some(target) = self.focus
         {
             let actions = match target {
-                Target::Search => Vec::new(),
+                Target::Search | Target::FpsBox => Vec::new(),
                 Target::Page(page) => {
                     self.pick(page, &lines, &cols, content);
                     vec![Action::ButtonClick]
@@ -2269,10 +2465,15 @@ impl GraphicsUi {
     }
     /// Whether the search field takes the keys.
     pub fn typing(&self) -> bool {
-        self.focus == Some(Target::Search)
+        matches!(self.focus, Some(Target::Search | Target::FpsBox))
     }
     /// Text typed into the search field (the keyboard, a controller's on-screen keyboard).
     pub fn type_text(&mut self, text: &str) {
+        if self.focus == Some(Target::FpsBox) {
+            let digits: String = text.chars().filter(char::is_ascii_digit).take(5).collect();
+            self.fps_box.insert_text(&digits);
+            return;
+        }
         if !text.is_empty() {
             self.search.insert_text(text);
             self.searched();
@@ -2286,6 +2487,9 @@ impl GraphicsUi {
     ) -> bool {
         if !self.typing() {
             return false;
+        }
+        if self.focus == Some(Target::FpsBox) {
+            return true;
         }
         let before = self.search.value.clone();
         self.search.shortcut(shortcut, clipboard);
@@ -2670,6 +2874,36 @@ mod tests {
     }
 
     #[test]
+    fn the_fps_box_takes_digits_only_and_keeps_within_the_range() {
+        let mut s = Settings::default();
+        let mut ui = GraphicsUi::default();
+        ui.focus = Some(Target::FpsBox);
+        assert!(ui.typing());
+        ui.type_text("1x0a0");
+        assert_eq!(ui.fps_box.value, "100");
+        assert_eq!(ui.search.value, "", "the search stays out of it");
+        ui.commit_fps_box(&mut s);
+        assert_eq!(s.horizon.auto_target_fps, 100);
+        ui.fps_box.set_value("1");
+        ui.commit_fps_box(&mut s);
+        assert_eq!(s.horizon.auto_target_fps, crate::auto_settings::MIN_TARGET);
+    }
+
+    #[test]
+    fn fps_target_drops_its_rows_down() {
+        let mut s = Settings::default();
+        let mut ui = GraphicsUi::default();
+        ui.open(Page::Auto);
+        let shows = |ui: &GraphicsUi, s: &Settings| {
+            let (lines, _) = ui.lines(s);
+            lines.iter().any(|l| l.setting.is_some_and(|set| set.item == Item::Horizon(H::AutoFps)))
+        };
+        assert!(!shows(&ui, &s));
+        ui.activate(&mut s, Item::Horizon(H::AutoTarget), false, [854, 480], None);
+        assert!(shows(&ui, &s));
+    }
+
+    #[test]
     fn the_wheel_scrolls_and_stops_at_both_ends_without_changing_values() {
         let mut s = Settings::default();
         let mut ui = GraphicsUi::default();
@@ -2716,7 +2950,7 @@ mod tests {
         // Up from Done: the page list's last page.
         ui.focus = Some(Target::Done);
         ui.key_modifiers(&mut s, K::ArrowUp, None, false, SIZE, FB);
-        assert_eq!(ui.focus, Some(Target::Page(Page::Hdr)));
+        assert_eq!(ui.focus, Some(Target::Page(Page::Auto)));
         // Its row wheeled far out of view: Down takes the first row in view, as it is.
         ui.focus = Some(Target::Item(Item::Horizon(H::Preset)));
         ui.scroll(&s, SIZE, -1000.0);

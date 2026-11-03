@@ -21419,6 +21419,7 @@ pub fn run_with() -> Result<()> {
         // (horizon_threads::jobs) and other programs outnumber the cores, and a frame that gave its core up (in a GPU submit) waited
         // 10 to 200 ms to get one back.
         horizon_threads::favour_current();
+        horizon_threads::avoid_interrupt_core();
     }
     if options.execution_role.is_client() {
         horizon_threads::catch_stop_signals();

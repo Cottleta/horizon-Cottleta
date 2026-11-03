@@ -74,6 +74,51 @@ fn favour() -> bool {
     false
 }
 
+/// Keep the calling thread off the first core, where Windows runs the GPU driver's
+/// interrupt work (a quarter or more of that core while frames run fast), so a thread
+/// that sets the frame rate doesn't share it. Nothing elsewhere: Linux moves those
+/// interrupts off the busy cores itself. `HORIZON_AVOID_CORE0=0` turns it off. Whether
+/// the OS took it.
+pub fn avoid_interrupt_core() -> bool {
+    if std::env::var_os("HORIZON_AVOID_CORE0").is_some_and(|v| v == "0") {
+        return false;
+    }
+    avoid_first_core()
+}
+
+/// `mask` without its first core's logical processors, when at least three stay.
+#[cfg(any(windows, test))]
+fn without_first_core(mask: usize, threads_per_core: usize) -> Option<usize> {
+    let mut left = mask;
+    for _ in 0..threads_per_core.max(1) {
+        left &= left.wrapping_sub(1);
+    }
+    (left.count_ones() >= 3).then_some(left)
+}
+
+#[cfg(windows)]
+fn avoid_first_core() -> bool {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentThread, GetProcessAffinityMask, SetThreadAffinityMask,
+    };
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let per_core = physical_cores().map_or(1, |cores| (threads / cores.max(1)).max(1));
+    let (mut process, mut system) = (0, 0);
+    // SAFETY: the pseudo handles need no closing and the out pointers live for the call.
+    unsafe {
+        if GetProcessAffinityMask(GetCurrentProcess(), &mut process, &mut system) == 0 {
+            return false;
+        }
+        without_first_core(process, per_core)
+            .is_some_and(|mask| SetThreadAffinityMask(GetCurrentThread(), mask) != 0)
+    }
+}
+
+#[cfg(not(windows))]
+fn avoid_first_core() -> bool {
+    false
+}
+
 /// The CPU time the calling thread has used, where only an OS call gives it
 /// precisely. Windows counts it exactly only in cycles of the time-stamp
 /// counter (`QueryThreadCycleTime`; `GetThreadTimes` moves in scheduler ticks
@@ -432,6 +477,20 @@ pub fn keep_stdio_from_children() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_first_core_goes_while_enough_stay() {
+        use super::without_first_core;
+        // An 8-core CPU, and four cores with two threads each.
+        assert_eq!(without_first_core(0xFF, 1), Some(0xFE));
+        assert_eq!(without_first_core(0xFF, 2), Some(0xFC));
+        // A process limited to some cores: its own first one goes.
+        assert_eq!(without_first_core(0xF0, 1), Some(0xE0));
+        // Too few left: it stays where it is.
+        assert_eq!(without_first_core(0b1111, 2), None);
+        assert_eq!(without_first_core(0b11, 1), None);
+    }
+
     /// Without `HORIZON_WORKER_THREADS`, the count is the machine's.
     #[test]
     fn worker_count_defaults_to_the_machine() {

@@ -79,6 +79,7 @@ impl Queue {
         let spawned = std::thread::Builder::new()
             .name("Render submit".into())
             .spawn(move || {
+                horizon_threads::avoid_interrupt_core();
                 for job in job_rx {
                     let timed = |step: usize, started: Instant| {
                         let nanos = u64::try_from(started.elapsed().as_nanos());

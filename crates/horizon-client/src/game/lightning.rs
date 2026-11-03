@@ -803,6 +803,8 @@ mod tests {
                 flags: Default::default(),
                 model: Arc::new(Part {
                     name: "root".into(),
+                    id: 0,
+                    uid: 0,
                     pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
                     polygons: Vec::new(),
                     children: Vec::new(),

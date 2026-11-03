@@ -57,6 +57,8 @@ mod tests {
     fn part() -> Arc<Part> {
         Arc::new(Part {
             name: String::new(),
+            id: 0,
+            uid: 0,
             pose: [0.0; 9],
             polygons: Vec::new(),
             children: Vec::new(),

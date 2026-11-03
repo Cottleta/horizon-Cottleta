@@ -57,6 +57,8 @@ fn explode(part: &mut Part, skin: &[u8], size: usize, depth: f32, changed: &mut 
             polygons.extend(extrude_polygon(polygon, skin, size, depth, changed));
         }
         part.polygons = polygons;
+        // Other polygons than the part it was cloned from: its own GPU mesh (`Part::uid`).
+        part.uid = crate::mobs::new_part_uid();
     }
     for child in &mut part.children {
         explode(child, skin, size, depth, changed);
@@ -214,6 +216,8 @@ mod tests {
     fn one_slab_and_four_sides_for_a_single_painted_texel() {
         let model = Part {
             name: "hat".into(),
+            id: 0,
+            uid: crate::mobs::new_part_uid(),
             pose: [0.0; 9],
             polygons: vec![face()],
             children: Vec::new(),
@@ -221,6 +225,7 @@ mod tests {
         let out = extrude(&model, &skin([255, 0, 0, 0]), 64, 1.0).expect("a hat");
         // One face plus four skirts.
         assert_eq!(out.polygons.len(), 5);
+        assert_ne!(out.uid, model.uid, "its mesh is not the flat part's");
         let top = out.polygons[0].vertices;
         for v in top {
             assert!(v[2] > 1.4, "the slab is pushed out: {v:?}");
@@ -231,6 +236,8 @@ mod tests {
     fn a_transparent_face_draws_nothing() {
         let model = Part {
             name: "jacket".into(),
+            id: 0,
+            uid: 0,
             pose: [0.0; 9],
             polygons: vec![face()],
             children: Vec::new(),
@@ -243,6 +250,8 @@ mod tests {
     fn a_part_that_is_not_an_outer_layer_is_untouched() {
         let model = Part {
             name: "head".into(),
+            id: 0,
+            uid: 0,
             pose: [0.0; 9],
             polygons: vec![face()],
             children: Vec::new(),

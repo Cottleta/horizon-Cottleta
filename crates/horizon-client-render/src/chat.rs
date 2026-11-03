@@ -855,8 +855,10 @@ impl Chat {
             let line = &self.lines[index];
             let bottom = chat_bottom - i as i32 * entry_height;
             let top = bottom - entry_height;
-            let width = font.width_text(&line.content).ceil() as i32;
-            hovered_message |= inside(0, top, width, bottom);
+            // Measured for the row under the cursor and for icons: the rest need no width.
+            let width = || font.width_text(&line.content).ceil() as i32;
+            let in_row = mouse_y >= f64::from(top) && mouse_y < f64::from(bottom);
+            hovered_message |= in_row && inside(0, top, width(), bottom);
             // GuiMessage.Line.endOfEntry: the next newer line is another message's.
             let end_of_entry = index == 0
                 || match (&line.tag, &self.lines[index - 1].tag) {
@@ -873,7 +875,7 @@ impl Chat {
                 tooltip = Some(tag.text.clone());
             }
             if tag.icon {
-                let (left, text_bottom) = (width + 4, bottom - bottom_to_text + 9);
+                let (left, text_bottom) = (width() + 4, bottom - bottom_to_text + 9);
                 let icon_top = text_bottom - 9 - 1;
                 let over = inside(left, icon_top, left + 9, text_bottom);
                 if over {

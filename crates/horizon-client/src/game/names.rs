@@ -176,6 +176,7 @@ impl Game<'_> {
             let at = glam::DVec3::new(m.position.x, m.position.y, m.position.z);
             (at.distance_squared(camera) < 64.0 * 64.0).then_some((m, name, false))
         });
+        let own = self.own_name_tag().map(|(m, _)| m.id);
         let players = players
             .into_iter()
             .chain(self.own_name_tag())
@@ -277,6 +278,7 @@ impl Game<'_> {
                         lines,
                         light: l,
                         discrete,
+                        style: None,
                     });
                 }
                 continue;
@@ -284,40 +286,39 @@ impl Game<'_> {
             // The text of a tag changes with a server's packets, not with the frame,
             // and a team's prefix and suffix are components to convert: once a tick.
             let lines = self.tag_lines((m.id, player, near, true), || {
-            // getDisplayName: the name in the team's prefix, suffix and colour.
-            let member = if player {
-                Text::literal(&name)
-            } else {
-                m.custom_name_text
-                    .clone()
-                    .unwrap_or_else(|| Text::literal(&name))
-            };
-            // StringDecomposer.iterateFormatted: `§` codes a server leaves
-            // inside the team prefix or the name itself apply at draw time.
-            let shown = match team {
-                Some(t) => t.formatted_name(member),
-                None => member,
-            }
-            .resolve_legacy();
-            let shown = text
-                .map(|text| Text::literal(text).resolve_legacy())
-                .unwrap_or(shown);
-            let mut lines = Vec::new();
-            // EntityRenderer.extractNameTags: the score shows within the
-            // below-name distance (10), under the name.
-            let mut lift = 0.0;
-            if m.species() == horizon_client::mobs::Species::Mannequin {
-                if let Some(text) = description() {
-                    lines.push((text, 0.0));
+                // getDisplayName: the name in the team's prefix, suffix and colour.
+                let member = if player {
+                    Text::literal(&name)
+                } else {
+                    m.custom_name_text
+                        .clone()
+                        .unwrap_or_else(|| Text::literal(&name))
+                };
+                // StringDecomposer.iterateFormatted: `§` codes a server leaves
+                // inside the team prefix or the name itself apply at draw time.
+                let shown = match team {
+                    Some(t) => t.formatted_name(member),
+                    None => member,
+                }
+                .resolve_legacy();
+                let shown = text
+                    .map(|text| Text::literal(text).resolve_legacy())
+                    .unwrap_or(shown);
+                let mut lines = Vec::new();
+                // EntityRenderer.extractNameTags: the score shows within the
+                // below-name distance (10), under the name.
+                let mut lift = 0.0;
+                if m.species() == horizon_client::mobs::Species::Mannequin {
+                    if let Some(text) = description() {
+                        lines.push((text, 0.0));
+                        lift = f64::from(9.0f32 * 1.15 * 0.025);
+                    }
+                } else if near && let Some(score) = holder().and_then(|h| self.below_name_text(&h))
+                {
+                    lines.push((score.resolve_legacy(), 0.0));
                     lift = f64::from(9.0f32 * 1.15 * 0.025);
                 }
-            } else if near
-                && let Some(score) = holder().and_then(|h| self.below_name_text(&h))
-            {
-                lines.push((score.resolve_legacy(), 0.0));
-                lift = f64::from(9.0f32 * 1.15 * 0.025);
-            }
-            lines.push((shown, lift));
+                lines.push((shown, lift));
                 lines
             });
             let l = self.world.light(
@@ -325,11 +326,18 @@ impl Game<'_> {
                 (m.position.y + f64::from(m.height())).floor() as i32,
                 m.position.z.floor() as i32,
             );
+            // A Horizon player's name tag style (cosmetics), beside the name.
+            let style = if player && horizon_cosmetics::enabled() {
+                self.cosmetics_tag(m, Some(m.id) == own)
+            } else {
+                None
+            };
             tags.push(NameTag {
                 at: p,
                 lines,
                 light: l,
                 discrete,
+                style,
             });
         }
         drop(player_ids);
@@ -383,24 +391,22 @@ impl Game<'_> {
             let near = distance_sqr < 10.0 * 10.0;
             let name = a.custom_name.clone().unwrap_or_else(Text::empty);
             let lines = self.tag_lines((a.id, false, near, true), || {
-            let shown = match team {
-                Some(t) => t.formatted_name(name.clone()),
-                None => name.clone(),
-            }
-            .resolve_legacy();
-            let shown = text
-                .map(|text| Text::literal(text).resolve_legacy())
-                .unwrap_or(shown);
-            let mut lines = Vec::new();
-            let mut lift = 0.0;
-            let holder = self.persist.uuids.get(&a.id).map(|u| uuid_text(*u));
-            if near
-                && let Some(score) = holder.and_then(|h| self.below_name_text(&h))
-            {
-                lines.push((score.resolve_legacy(), 0.0));
-                lift = f64::from(9.0f32 * 1.15 * 0.025);
-            }
-            lines.push((shown, lift));
+                let shown = match team {
+                    Some(t) => t.formatted_name(name.clone()),
+                    None => name.clone(),
+                }
+                .resolve_legacy();
+                let shown = text
+                    .map(|text| Text::literal(text).resolve_legacy())
+                    .unwrap_or(shown);
+                let mut lines = Vec::new();
+                let mut lift = 0.0;
+                let holder = self.persist.uuids.get(&a.id).map(|u| uuid_text(*u));
+                if near && let Some(score) = holder.and_then(|h| self.below_name_text(&h)) {
+                    lines.push((score.resolve_legacy(), 0.0));
+                    lift = f64::from(9.0f32 * 1.15 * 0.025);
+                }
+                lines.push((shown, lift));
                 lines
             });
             // The tag rides with the body, between last tick's position and this one's.
@@ -415,6 +421,7 @@ impl Game<'_> {
                 lines,
                 light: l,
                 discrete: false,
+                style: None,
             });
         }
         // ItemFrameRenderer.shouldShowName/getNameTag: only the targeted
@@ -478,6 +485,7 @@ impl Game<'_> {
                         center.z.floor() as i32,
                     ),
                     discrete: false,
+                    style: None,
                 });
             }
         }
@@ -504,7 +512,7 @@ impl Game<'_> {
             if tag.discrete {
                 self.mark_translucent_entity(out.len(), "minecraft:name_tag");
                 let light = vertex_light(tag.light);
-                patches.extend(self.name_tag_quads(
+                patches.extend(self.styled_name_tag_quads(
                     o,
                     &tag.lines,
                     FADED,
@@ -513,6 +521,7 @@ impl Game<'_> {
                     light,
                     NAME_TAG_UNIT,
                     out,
+                    tag.style,
                 ));
                 continue;
             }
@@ -520,7 +529,7 @@ impl Game<'_> {
             let lit = (tag.light >> 4).max(2) << 4 | (tag.light & 15).max(2);
             self.mark_entity(out.len(), "minecraft:name_tag");
             let light = vertex_light(lit);
-            patches.extend(self.name_tag_quads(
+            patches.extend(self.styled_name_tag_quads(
                 o,
                 &tag.lines,
                 0xFF,
@@ -529,9 +538,10 @@ impl Game<'_> {
                 light,
                 NAME_TAG_UNIT,
                 out,
+                tag.style,
             ));
             // RenderPipelines.TEXT_SEE_THROUGH: no depth test, no lightmap.
-            patches.extend(self.name_tag_quads(
+            patches.extend(self.styled_name_tag_quads(
                 o,
                 &tag.lines,
                 FADED,
@@ -540,6 +550,7 @@ impl Game<'_> {
                 0,
                 NAME_TAG_UNIT,
                 see_through,
+                tag.style,
             ));
         }
         self.map_patches.extend(patches);
@@ -560,6 +571,26 @@ impl Game<'_> {
         unit: f32,
         out: &mut Vec<Vertex>,
     ) -> Vec<horizon_client::font::Patch> {
+        self.styled_name_tag_quads(
+            o, lines, text_alpha, background, text_layer, light, unit, out, None,
+        )
+    }
+
+    /// [`Self::name_tag_quads`], with a cosmetic style on the last line (the name): its mark
+    /// before the text and its line under the background.
+    #[allow(clippy::too_many_arguments)]
+    fn styled_name_tag_quads(
+        &self,
+        o: glam::DVec3,
+        lines: &[(Text, f64)],
+        text_alpha: u32,
+        background: bool,
+        text_layer: u32,
+        light: u32,
+        unit: f32,
+        out: &mut Vec<Vertex>,
+        style: Option<TagStyle>,
+    ) -> Vec<horizon_client::font::Patch> {
         // Options.getBackgroundOpacity(0.25) black, as ARGB.color.
         const BACKGROUND: u32 = 0x3F00_0000;
         // The camera's facing (Camera.rotation()), turned round in third-person
@@ -575,7 +606,8 @@ impl Game<'_> {
         let up = right.cross(forward).normalize_or_zero();
         let away = forward.as_vec3() * 0.002;
         let mut patches = Vec::new();
-        for (text, lift) in lines {
+        let last = lines.len().saturating_sub(1);
+        for (n, (text, lift)) in lines.iter().enumerate() {
             let o = (o + glam::DVec3::new(0.0, *lift, 0.0)).as_vec3();
             let (r, u) = (right.as_vec3() * unit, up.as_vec3() * unit);
             // Text space: x right, y down (scale 0.025, -0.025).
@@ -610,6 +642,38 @@ impl Game<'_> {
                     }
                 },
             );
+            if let Some(style) = style.filter(|_| n == last) {
+                let y0 = name_tag_top(text);
+                let x = -self.gui.atlas.font.width_text(text) / 2.0;
+                let alpha = text_alpha << 24;
+                let mut batch = HudBatch::new([1, 1]);
+                // The mark, 8 text pixels square, a pixel left of the background.
+                batch.rect_uv(x - 10.0, y0, 8.0, 8.0, style.mark, alpha | 0xFF_FFFF);
+                // The line, a pixel tall, under the background (which runs from -1 to 9).
+                let width = self.gui.atlas.font.width_text(text);
+                batch.fill(
+                    &self.gui.atlas,
+                    x - 1.0,
+                    y0 + 9.0,
+                    width + 1.0,
+                    1.0,
+                    alpha | style.line,
+                );
+                for quad in batch.vertices.as_chunks::<6>().0 {
+                    // The corners from the bottom left, as the world draws quads.
+                    for v in [quad[5], quad[2], quad[1], quad[0]] {
+                        out.push(Vertex {
+                            normal: [0; 4],
+                            pos: at(v.pos[0], v.pos[1]).to_array(),
+                            uv: v.uv,
+                            layer: text_layer,
+                            color: v.color,
+                            light,
+                            glint_uv: [0.0, 0.0],
+                        });
+                    }
+                }
+            }
         }
         // Glyphs rasterized on first use (Unifont's) upload with the frame.
         patches
@@ -639,6 +703,14 @@ struct NameTagLayouts {
 const NAME_TAG_LAYOUTS: usize = 4096;
 thread_local! {
     static LAYOUTS: std::cell::RefCell<NameTagLayouts> = std::cell::RefCell::default();
+}
+/// Where a name tag line starts in text space (`EntityRenderer`: deadmau5's sits higher).
+fn name_tag_top(text: &Text) -> f32 {
+    if text.plain() == "deadmau5" {
+        -10.0
+    } else {
+        0.0
+    }
 }
 /// `f` with the text-space vertices of one name tag line (`HudBatch::name_tag`)
 /// and its background count. A line looks the same every frame unless it is
@@ -681,11 +753,7 @@ fn with_name_tag_layout(
         return;
     };
     let mut batch = HudBatch::new([1, 1]);
-    let y0 = if text.plain() == "deadmau5" {
-        -10.0
-    } else {
-        0.0
-    };
+    let y0 = name_tag_top(text);
     // Font.prepareText, as any text: bold, italic, fonts and each
     // glyph's own box (accented.png's are 12 pixels tall).
     let behind = batch.name_tag(atlas, text, y0, color, background);
@@ -736,6 +804,16 @@ struct NameTag {
     lines: std::sync::Arc<[(Text, f64)]>,
     light: u8,
     discrete: bool,
+    style: Option<TagStyle>,
+}
+
+/// A cosmetic name tag style: a mark before the name and a line under it.
+#[derive(Clone, Copy)]
+pub(super) struct TagStyle {
+    /// The mark's place in the GUI atlas.
+    pub mark: horizon_client::hud::Rect,
+    /// The line's colour, `0xrrggbb`.
+    pub line: u32,
 }
 
 #[cfg(test)]

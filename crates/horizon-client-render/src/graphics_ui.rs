@@ -76,6 +76,8 @@ pub enum H {
     CacheCopperGolemStatues,
     ChunkUpdates,
     UploadBudget,
+    AutoSettings,
+    DynamicHud,
     Sky,
     Fog,
     Weather,
@@ -147,11 +149,18 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
             vec![
                 (
                     "Preset",
-                    vec![h(
+                    vec![
+                        h(
                         H::Preset,
                         None,
                         "Sets the options below together. Changing one makes it Custom.",
-                    )],
+                    ),
+                        h(
+                            H::AutoSettings,
+                            None,
+                            "Picks settings for this PC from its GPU, CPU and memory.",
+                        ),
+                    ],
                 ),
                 (
                     "Distance",
@@ -471,11 +480,18 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                 ),
                 (
                     "Overlay",
-                    vec![h(
-                        H::Overlay,
-                        None,
-                        "Frame rate and frame times over the game, with a graph.",
-                    )],
+                    vec![
+                        h(
+                            H::Overlay,
+                            None,
+                            "Frame rate and frame times over the game, with a graph.",
+                        ),
+                        h(
+                            H::DynamicHud,
+                            High,
+                            "HUD at 20 FPS until you press a key or click.",
+                        ),
+                    ],
                 ),
             ],
         ),
@@ -740,6 +756,8 @@ impl H {
                 }
                 k => labelled("Upload Budget", lang::tr("%s KiB/frame", &[&k])),
             },
+            H::AutoSettings => Text::literal(lang::get("Quick Auto Settings")),
+            H::DynamicHud => labelled("Dynamic HUD", on_off(g.dynamic_hud)),
             H::Sky => labelled("Sky", on_off(g.sky)),
             H::Fog => labelled("Fog", on_off(g.fog)),
             H::Weather => labelled("Weather", on_off(g.weather)),
@@ -883,6 +901,7 @@ impl H {
             H::CacheCopperGolemStatues => {
                 g.cache_copper_golem_statues = !g.cache_copper_golem_statues
             }
+            H::DynamicHud => g.dynamic_hud = !g.dynamic_hud,
             H::Sky => g.sky = !g.sky,
             H::Fog => g.fog = !g.fog,
             H::Weather => g.weather = !g.weather,
@@ -995,6 +1014,7 @@ impl Item {
             Item::Horizon(H::CacheChests) => g.cache_chests,
             Item::Horizon(H::CacheBanners) => g.cache_banners,
             Item::Horizon(H::CacheCopperGolemStatues) => g.cache_copper_golem_statues,
+            Item::Horizon(H::DynamicHud) => g.dynamic_hud,
             Item::Horizon(H::Sky) => g.sky,
             Item::Horizon(H::Fog) => g.fog,
             Item::Horizon(H::Weather) => g.weather,
@@ -1995,6 +2015,11 @@ impl GraphicsUi {
                 vec![Action::ButtonClick, Action::Changed]
             }
             Item::Horizon(H::HdrCalibrate) => vec![Action::ButtonClick, Action::Calibrate],
+            Item::Horizon(H::AutoSettings) => {
+                let picks = crate::auto_settings::pick(crate::auto_settings::detect());
+                crate::auto_settings::apply(picks, s);
+                vec![Action::ButtonClick, Action::Changed]
+            }
             Item::Horizon(H::HdrKey) => {
                 vec![
                     Action::ButtonClick,

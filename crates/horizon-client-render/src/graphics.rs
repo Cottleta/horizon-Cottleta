@@ -587,6 +587,8 @@ pub struct Graphics {
     /// The block textures' video memory (their top mip level), in MiB; 0 leaves it to
     /// Horizon (`sprites::DEFAULT_TEXTURE_BUDGET`). Applies when resources next load.
     pub texture_budget_mib: u32,
+    /// The HUD rebuilds 20 times a second until a key, a click or the wheel (`hud_rate`).
+    pub dynamic_hud: bool,
     pub sky: bool,
     pub fog: bool,
     pub weather: bool,
@@ -671,6 +673,7 @@ impl Default for Graphics {
             chunk_updates: 0,
             upload_budget_kib: 0,
             texture_budget_mib: 0,
+            dynamic_hud: false,
             sky: true,
             fog: true,
             weather: true,
@@ -793,6 +796,7 @@ impl Graphics {
                 "textureBudgetMiB" => {
                     g.texture_budget_mib = number(g.texture_budget_mib).min(16384);
                 }
+                "dynamicHud" => g.dynamic_hud = flag(g.dynamic_hud),
                 "sky" => g.sky = flag(g.sky),
                 "fog" => g.fog = flag(g.fog),
                 "weather" => g.weather = flag(g.weather),
@@ -854,7 +858,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\ndynamicHud:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -904,6 +908,7 @@ impl Graphics {
             self.api.name(),
             self.shader_pack,
             bool_text(self.translucent_batching),
+            bool_text(self.dynamic_hud),
         );
         text += &self.blue_map.serialize();
         text
@@ -1043,6 +1048,7 @@ mod tests {
     #[test]
     fn round_trips() {
         let g = Graphics {
+            dynamic_hud: true,
             preset: Preset::Balanced,
             lod_distance: 256,
             far_detail: FarDetail::Reduced,

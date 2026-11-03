@@ -142,6 +142,7 @@ mod glowing;
 mod golems;
 mod growth;
 mod hand;
+mod hud_rate;
 mod headless;
 mod ime;
 mod initial_spawn;
@@ -2518,6 +2519,11 @@ struct Game<'a> {
     /// When the last frame's work ended: what runs before the next one starts (`idle`, the
     /// event loop) shows in HORIZON_SPIKES as the time between frames.
     frame_end: Instant,
+    /// The HUD the next frames may draw again (`hud_rate`), with the size it is for.
+    hud_kept: Option<([u32; 2], HudBatch)>,
+    hud_built: Instant,
+    hud_touched: Instant,
+    hud_view: (f32, f32),
     /// FramerateLimitTracker.latestInputTime.
     last_input: Instant,
     /// Controllers (Horizon's own).
@@ -15766,7 +15772,7 @@ impl Game<'_> {
         } else {
             Vec::new()
         };
-        let mut hud = horizon_client::spans::time("hud", || self.hud(size));
+        let mut hud = self.frame_hud(size);
         self.flush_ime(&mut hud);
         let title = self.shows_panorama();
         let (yaw, pitch) = if title {
@@ -16108,6 +16114,7 @@ impl Game<'_> {
         };
         // A frame the surface refused (occluded, lost, timed out) is `Ok(false)`.
         self.frame_drawn = matches!(result, Ok(true));
+        self.keep_hud(size, hud);
         // Restore storage even when rendering fails (for example, a lost surface).
         self.entity_vertices = entities;
         self.part_jobs = part_jobs;
@@ -17166,6 +17173,14 @@ impl Game<'_> {
         }
     }
     fn handle_window_event_inner(&mut self, event_loop: &dyn EventLoopCtl, mut event: WindowEvent) {
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+        ) {
+            self.touch_hud();
+        }
         if let WindowEvent::Focused(false) = &event {
             self.physical_keys.clear();
             self.physical_buttons.clear();
@@ -18876,6 +18891,10 @@ impl<'a> Game<'a> {
             spectator_gui: Default::default(),
             previous: now,
             frame_end: now,
+            hud_kept: None,
+            hud_built: now,
+            hud_touched: now,
+            hud_view: (0.0, 0.0),
             last_input: now,
             pad: Default::default(),
             frames: 0,

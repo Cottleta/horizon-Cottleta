@@ -304,6 +304,10 @@ impl Game<'_> {
         event_loop: &dyn EventLoopCtl,
     ) -> Result<Option<Value>> {
         let words: Vec<&str> = line.split_whitespace().collect();
+        // A script's input, as the player's would be (`hud_rate`).
+        if matches!(words.first(), Some(&("key" | "hold" | "mouse" | "release"))) {
+            self.touch_hud();
+        }
         if self.pending_save.is_some() && words.first() != Some(&"quit") {
             return Err("a world save is in progress".into());
         }

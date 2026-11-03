@@ -725,3 +725,30 @@ pub fn physical_cores() -> Option<usize> {
 pub fn physical_cores() -> Option<usize> {
     None
 }
+
+/// The memory this PC has, in bytes.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn total_memory() -> Option<u64> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kib * 1024)
+}
+
+/// See the Linux `total_memory`.
+#[cfg(windows)]
+pub fn total_memory() -> Option<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: the struct is plain data, its length set as the call requires.
+    unsafe {
+        let mut status: MEMORYSTATUSEX = std::mem::zeroed();
+        status.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+        (GlobalMemoryStatusEx(&mut status) != 0).then_some(status.ullTotalPhys)
+    }
+}
+
+/// See the Linux `total_memory`.
+#[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
+pub fn total_memory() -> Option<u64> {
+    None
+}

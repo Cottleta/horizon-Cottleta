@@ -167,7 +167,8 @@ impl EntityBatch {
                 at += (count.max(held) * 4) as u32;
             }
         }
-        places.sort_unstable_by_key(|p| p.0);
+        // Sorted runs, one per material: the stable sort merges them.
+        places.sort_by_key(|p| p.0);
     }
 
     /// The buffer vertex of entity vertex `vertex`, by `places`. `run` is where the last

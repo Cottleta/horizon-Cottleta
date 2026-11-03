@@ -990,6 +990,8 @@ impl Title {
         self.preparing = false;
         if !matches!(self.mode, Mode::Create { .. }) {
             self.mode = Self::new_world();
+            // The button that led here is on the screen before: Enter confirms this one.
+            self.focused_button = None;
         }
     }
     /// `PackSelectionScreen.onFilesDrop`: a pack dropped on the window joins
@@ -3986,6 +3988,11 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
     pub fn list_focused(&self) -> bool {
         matches!(self.mode, Mode::Select { .. }) && !self.search_focused
     }
+    /// Whether Space confirms: a text field that takes typing takes the space instead,
+    /// even with a button focused by the click that led here.
+    pub fn space_confirms(&mut self) -> bool {
+        self.list_focused() || (self.focused_button.is_some() && !self.has_caret_field())
+    }
     /// `WorldListEntry.keyPressed`: the selected world joins, as its click does.
     fn join_selected(&mut self) -> Action {
         let Mode::Select { worlds, selected } = &self.mode else {
@@ -4642,6 +4649,24 @@ mod classic_tests {
             title.focused_button.is_some(),
             "the next Tab reaches the buttons"
         );
+    }
+
+    /// The click on Create New World leaves that button focused; the name box the new
+    /// screen opens with still takes spaces.
+    #[test]
+    fn a_world_name_takes_spaces_after_the_button_that_opened_it() {
+        let mut title = Title::new(
+            PathBuf::new(),
+            Path::new("/nonexistent/horizon-test-resources"),
+        );
+        title.mode = Title::new_world();
+        title.focused_button = Some(11);
+        assert!(!title.space_confirms(), "Space goes to the name box");
+        title.type_text(" and more");
+        let Mode::Create { name, .. } = &title.mode else {
+            panic!("the create screen");
+        };
+        assert!(name.ends_with(" and more"), "{name:?}");
     }
 
     #[test]

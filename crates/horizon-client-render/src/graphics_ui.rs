@@ -982,12 +982,6 @@ impl Item {
             _ => None,
         }
     }
-    /// A value stepped between `<` `>`: not a tick box, a slider or a press.
-    fn steps(self, s: &Settings) -> bool {
-        self.switch(s).is_none()
-            && self.slider(s).is_none()
-            && !matches!(self, Item::Horizon(H::HdrKey | H::HdrCalibrate))
-    }
     /// On/off settings and their value.
     pub fn switch(self, s: &Settings) -> Option<bool> {
         let g = &s.horizon;
@@ -2030,43 +2024,6 @@ impl GraphicsUi {
     pub fn release(&mut self) -> bool {
         self.scroll.release();
         self.dragging.take().is_some()
-    }
-    /// The mouse wheel at the cursor. It scrolls the list, except that a hovered value
-    /// stepped by `<` `>` takes the step (`CycleButton.mouseScrolled`: up goes back)
-    /// while the "Scroll wheel changes settings" extra is on. A slider, a tick box and a
-    /// focused row don't take it, wherever the focus came from: the keyboard and a
-    /// controller step them with Left and Right.
-    pub fn wheel(
-        &mut self,
-        s: &mut Settings,
-        (w, h): (f32, f32),
-        (x, y): (f32, f32),
-        framebuffer: [i32; 2],
-        amount: f32,
-    ) -> Vec<Action> {
-        if amount != 0.0 && s.extras.wheel_cycles_settings {
-            let (cols, lines, _) = self.layout(s, w, h);
-            let hovered = (y >= cols.top && y < cols.bottom)
-                .then(|| {
-                    lines.iter().find_map(|line| {
-                        let setting = line.setting?;
-                        let ry = self.row_y(&cols, line);
-                        ui::hovered((x, y), cols.list_x, ry, cols.list_w, style::ROW)
-                            .then_some(setting.item)
-                    })
-                })
-                .flatten();
-            if let Some(item) = hovered
-                && item.steps(s)
-                && item.blocked(s).is_none()
-            {
-                item.cycle(s, amount > 0.0, framebuffer);
-                self.changed = true;
-                return vec![Action::ButtonClick, Action::Changed];
-            }
-        }
-        self.scroll(s, (w, h), amount);
-        Vec::new()
     }
     /// The mouse wheel scrolls the list.
     pub fn scroll(&mut self, s: &Settings, (w, h): (f32, f32), amount: f32) {

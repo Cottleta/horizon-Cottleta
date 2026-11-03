@@ -4352,7 +4352,7 @@ impl OptionsUi {
     /// left by a click does not count (`focus_from_keyboard`): vanilla's wheel
     /// ignores it, and honouring it toggled the clicked option on every later wheel
     /// event, from anywhere on the screen, while the list never scrolled.
-    /// The graphics screen has its own wheel (`GraphicsUi::wheel`).
+    /// The graphics screen has its own wheel (`GraphicsUi::scroll`).
     pub fn wheel(
         &mut self,
         s: &mut Settings,
@@ -4364,8 +4364,9 @@ impl OptionsUi {
         self.size = size;
         self.framebuffer = framebuffer;
         if Self::graphics_page(self.page()).is_some() {
-            let actions = self.graphics.wheel(s, size, cursor, framebuffer, amount);
-            return self.graphics_events(s, actions);
+            // A long list of values: the wheel over one still scrolls it.
+            self.graphics.scroll(s, size, amount);
+            return Vec::new();
         }
         let plain = self.resource_error.is_none()
             && !(self.pack_screen.is_some() && self.stack.last() == Some(&Page::Packs));
@@ -7516,6 +7517,18 @@ mod tests {
         let events = ui.wheel(&mut s, size, cursor, [854, 480], 1.0);
         assert_eq!(s.master_volume, 0.5);
         assert!(!events.iter().any(|e| matches!(e, Event::Volume(0, _))));
+    }
+
+    #[test]
+    fn the_graphics_screens_wheel_never_steps_the_value_under_it() {
+        let mut s = Settings::default();
+        assert!(s.extras.wheel_cycles_settings);
+        let mut ui = OptionsUi::default();
+        ui.show(Page::GraphicsAdvanced);
+        for y in (20..350).step_by(5) {
+            let events = ui.wheel(&mut s, (640.0, 360.0), (320.0, y as f32), [1920, 1080], 1.0);
+            assert!(events.is_empty(), "stepped a value at y {y}: {events:?}");
+        }
     }
 
     #[test]

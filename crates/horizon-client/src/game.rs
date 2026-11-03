@@ -18241,9 +18241,7 @@ impl Game<'_> {
                             PhysicalKey::Code(
                                 code @ (KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space),
                             ) if code != KeyCode::Space
-                                || self.title.as_ref().is_some_and(|t| {
-                                    t.list_focused() || t.focused_button.is_some()
-                                }) =>
+                                || self.title.as_mut().is_some_and(|t| t.space_confirms()) =>
                             {
                                 let (action, sound) = self
                                     .title

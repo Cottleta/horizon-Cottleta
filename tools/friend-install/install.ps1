@@ -19,7 +19,10 @@ function Write-Text($path, $text) {
     [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding($false)))
 }
 
-foreach ($file in 'horizon-client.exe', 'horizon-ctl.exe') {
+# The game finds DXC beside it. Without DXC, DirectX 12 compiles with FXC, whose terrain
+# shader takes several times the GPU time.
+$files = 'horizon-client.exe', 'horizon-ctl.exe', 'dxcompiler.dll', 'dxil.dll'
+foreach ($file in $files) {
     if (-not (Test-Path (Join-Path $here $file))) {
         Stop-With "$file is missing. Unpack the whole zip into a folder first, then run this from there."
     }
@@ -64,7 +67,7 @@ robocopy $source.FullName $target /E /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) {
     Stop-With "Copying failed (robocopy code $LASTEXITCODE). Is the disk full?"
 }
-foreach ($file in 'horizon-client.exe', 'horizon-ctl.exe') {
+foreach ($file in $files) {
     Copy-Item -Force (Join-Path $here $file) (Join-Path $target $file)
     $wanted = (Get-FileHash (Join-Path $here $file)).Hash
     if ((Get-FileHash (Join-Path $target $file)).Hash -ne $wanted) {

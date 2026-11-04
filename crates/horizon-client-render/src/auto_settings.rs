@@ -6,7 +6,8 @@
 use crate::graphics::Preset;
 use crate::settings::Settings;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gpu {
@@ -43,9 +44,11 @@ const fn level(preset: Preset, render_distance: i32, simulation_distance: i32, c
     }
 }
 
+pub const LEVELS: usize = 5;
+
 /// The levels from most frames to best graphics. The costs are measured over terrain in
 /// single player on one fast PC (7800X3D, RX 9070): a slower GPU will likely lose more.
-const LADDER: [Picks; 5] = [
+const LADDER: [Picks; LEVELS] = [
     level(Preset::Performance, 8, 6, 1.0),
     level(Preset::Performance, 12, 6, 0.89),
     level(Preset::Balanced, 12, 8, 0.85),
@@ -60,11 +63,22 @@ pub fn best_performance() -> Picks {
 
 /// The best level expected to reach `target` at the first level's `capacity` frames a second.
 fn level_for(target: u32, capacity: f32) -> Picks {
+    if let Some(fps) = tested() {
+        return level_tested(target, fps);
+    }
     LADDER
         .into_iter()
         .rev()
         .find(|level| capacity * level.cost >= target as f32)
         .unwrap_or(LADDER[0])
+}
+
+/// The best level that reached `target` when this PC was measured.
+fn level_tested(target: u32, fps: [f32; LEVELS]) -> Picks {
+    (0..LEVELS)
+        .rev()
+        .find(|&i| fps[i] >= target as f32)
+        .map_or(LADDER[0], |i| LADDER[i])
 }
 
 /// The best level expected to reach `target` on this PC.
@@ -120,6 +134,9 @@ fn cost_of(s: &Settings) -> f32 {
 
 /// What the first level should reach here.
 pub fn capacity() -> f32 {
+    if let Some(fps) = tested() {
+        return fps[0].max(1.0);
+    }
     match f32::from_bits(MEASURED.load(Ordering::Relaxed)) {
         0.0 => guess(detect()),
         measured => measured,
@@ -217,6 +234,95 @@ pub fn apply(picks: Picks, s: &mut Settings) {
     s.horizon.dynamic_hud = true;
 }
 
+/// Sets a level to measure it, uncapped; `save_for_test` keeps what to go back to.
+pub fn apply_for_test(level: usize, s: &mut Settings) {
+    apply(LADDER[level.min(LEVELS - 1)], s);
+    s.vsync = false;
+    s.max_fps = 260;
+}
+
+/// What each level reached when this PC was last measured.
+static TESTED: Mutex<Option<Option<[f32; LEVELS]>>> = Mutex::new(None);
+
+fn tested_file() -> PathBuf {
+    crate::logging::game_home().join("auto-test.txt")
+}
+
+fn parse_tested(text: &str) -> Option<[f32; LEVELS]> {
+    let fps: Vec<f32> = text
+        .split_whitespace()
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let fps: [f32; LEVELS] = fps.try_into().ok()?;
+    fps.iter().all(|f| f.is_finite() && *f > 0.0).then_some(fps)
+}
+
+pub fn tested() -> Option<[f32; LEVELS]> {
+    let mut tested = TESTED.lock().unwrap_or_else(|e| e.into_inner());
+    *tested.get_or_insert_with(|| {
+        parse_tested(&std::fs::read_to_string(tested_file()).unwrap_or_default())
+    })
+}
+
+/// Keeps a finished test's frame rates; a later estimate goes by them.
+pub fn note_tested(mut fps: [f32; LEVELS]) {
+    // A better level can't really be faster: that's noise, and the slower reading is safer.
+    for i in 1..LEVELS {
+        fps[i] = fps[i].min(fps[i - 1]);
+    }
+    let text = fps.map(|f| format!("{f:.0}")).join(" ");
+    if let Err(e) = std::fs::write(tested_file(), text) {
+        log::warn!("Auto test: {e}");
+    }
+    *TESTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Some(fps));
+    TEST_STOPPED.store(false, Ordering::Relaxed);
+}
+
+/// The last test didn't finish, this run.
+static TEST_STOPPED: AtomicBool = AtomicBool::new(false);
+
+pub fn note_test_stopped() {
+    TEST_STOPPED.store(true, Ordering::Relaxed);
+}
+
+pub fn test_stopped() -> bool {
+    TEST_STOPPED.load(Ordering::Relaxed)
+}
+
+/// Measuring needs the title screen: it opens a world of its own.
+static CAN_TEST: AtomicBool = AtomicBool::new(false);
+
+pub fn set_can_test(can: bool) {
+    CAN_TEST.store(can, Ordering::Relaxed);
+}
+
+pub fn can_test() -> bool {
+    CAN_TEST.load(Ordering::Relaxed)
+}
+
+fn test_backup() -> PathBuf {
+    crate::logging::game_home()
+        .join("auto-test-backup")
+        .join("options.txt")
+}
+
+/// Keeps the player's settings while a test changes them, also through a crash.
+pub fn save_for_test(s: &Settings) {
+    save_to(&test_backup(), s);
+}
+
+/// The settings from before a test, once. Whether there were any: a test that ended
+/// without restoring them leaves them until the next start.
+pub fn restore_after_test(s: &mut Settings) -> bool {
+    let path = test_backup();
+    let done = load_from(&path, s);
+    if done && let Some(dir) = path.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    done
+}
+
 fn saved_options() -> PathBuf {
     crate::logging::game_home()
         .join("saved-settings")
@@ -229,11 +335,14 @@ pub fn saved_exists() -> bool {
 
 /// Keeps the settings the graphics screen edits, for `load`.
 pub fn save(s: &Settings) {
-    let path = saved_options();
+    save_to(&saved_options(), s);
+}
+
+fn save_to(path: &std::path::Path, s: &Settings) {
     let Some(dir) = path.parent() else {
         return;
     };
-    if let Err(e) = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&path, s.serialize()))
+    if let Err(e) = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(path, s.serialize()))
     {
         log::warn!("Saved settings: {e}");
         return;
@@ -244,10 +353,14 @@ pub fn save(s: &Settings) {
 /// Goes back to the saved settings, as far as the graphics screen edits them. Whether
 /// there were any.
 pub fn load(s: &mut Settings) -> bool {
-    if !saved_exists() {
+    load_from(&saved_options(), s)
+}
+
+fn load_from(path: &std::path::Path, s: &mut Settings) -> bool {
+    if !path.exists() {
         return false;
     }
-    let saved = Settings::load(&saved_options());
+    let saved = Settings::load(path);
     // Servers named for BlueMap aren't graphics; they live in their own file.
     let servers = s.horizon.blue_map.servers.clone();
     crate::graphics_ui::copy_screen_settings(&saved, s);
@@ -304,6 +417,18 @@ mod tests {
         assert!(guess(hw(Gpu::Discrete, 8)) > guess(hw(Gpu::Discrete, 4)));
         assert!(guess(hw(Gpu::Discrete, 4)) > guess(hw(Gpu::Integrated, 8)));
         assert!(guess(hw(Gpu::Integrated, 8)) > guess(hw(Gpu::Software, 8)));
+    }
+
+    #[test]
+    fn a_measured_pc_goes_by_its_own_numbers() {
+        let fps = [1000.0, 900.0, 300.0, 200.0, 100.0];
+        assert_eq!(level_tested(250, fps), LADDER[2]);
+        assert_eq!(level_tested(100, fps), LADDER[4]);
+        assert_eq!(level_tested(5000, fps), LADDER[0]);
+        assert_eq!(parse_tested("1000 900 300 200 100"), Some(fps));
+        assert_eq!(parse_tested("1000 900"), None);
+        assert_eq!(parse_tested("a b c d e"), None);
+        assert_eq!(parse_tested("0 900 300 200 100"), None);
     }
 
     #[test]

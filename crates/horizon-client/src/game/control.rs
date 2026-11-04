@@ -754,6 +754,20 @@ impl Game<'_> {
                 self.apply_settings();
                 ok()
             }
+            "auto-level" => {
+                let level: usize = arg(1)?.parse()?;
+                horizon_client::auto_settings::apply_for_test(level, &mut self.settings);
+                self.apply_settings();
+                ok()
+            }
+            "auto-end" => {
+                self.end_auto_test()?;
+                ok()
+            }
+            "auto-show" => {
+                self.show_auto_page();
+                ok()
+            }
             "lod-distance" => {
                 let n: u32 = arg(1)?.parse()?;
                 if n > horizon_client::lod::MAX_CHUNKS {

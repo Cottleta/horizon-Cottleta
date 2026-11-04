@@ -29,6 +29,7 @@ pub mod attribute_updates;
 pub mod auto_jump;
 pub mod banner;
 pub mod beehive;
+pub mod auto_test;
 pub mod benchmark;
 pub mod block_entity_item;
 pub mod block_pattern;

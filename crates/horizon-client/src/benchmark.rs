@@ -90,10 +90,10 @@ pub fn start(requests: Sender<Request>, setup: Setup) {
         .expect("spawn the benchmark thread");
 }
 
-struct Control(Sender<Request>);
+pub(crate) struct Control(pub(crate) Sender<Request>);
 
 impl Control {
-    fn call(&self, line: &str) -> Result<Value, String> {
+    pub(crate) fn call(&self, line: &str) -> Result<Value, String> {
         let (reply, response) = mpsc::channel();
         self.0
             .send(Request {
@@ -111,7 +111,7 @@ impl Control {
             None => Ok(value),
         }
     }
-    fn status(&self) -> Value {
+    pub(crate) fn status(&self) -> Value {
         self.call("status").unwrap_or(Value::Null)
     }
 }
@@ -362,7 +362,7 @@ const QUIET_MESHES_PER_S: f64 = 100.0;
 /// Right after a teleport (and at spawn) the game reports nothing queued and steady counts for over
 /// a second before it starts loading: the counts must change once, or stay full for 5 s, and the
 /// resident chunks reach [`view_chunks`], before "steady" means loaded.
-fn wait_loaded(control: &Control, near: impl Fn(&Value) -> bool) -> Result<Instant, String> {
+pub(crate) fn wait_loaded(control: &Control, near: impl Fn(&Value) -> bool) -> Result<Instant, String> {
     let deadline = Instant::now() + LOAD_LIMIT;
     let (mut last, mut changed, mut meshing) = (None, Instant::now(), Instant::now());
     let mut previous: Option<(Instant, f64)> = None;

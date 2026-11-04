@@ -1410,6 +1410,8 @@ fn matches_focus(id: &FocusId, i: usize, wd: &Widget) -> bool {
 /// What the game must do after an interaction.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    /// Measure this PC (`auto_test`).
+    AutoTest,
     /// An accepted button press or the release of a slider.
     ButtonClick,
     /// Horizon's own: download the Modrinth hit at this index of the pack
@@ -2221,6 +2223,7 @@ impl OptionsUi {
                     self.calibration = Some(crate::hdr_calibration::Calibration::new(s));
                     self.push(Page::HdrCalibration);
                 }
+                Action::AutoTest => events.push(Event::AutoTest),
                 Action::Done => events.extend(self.back(s)),
             }
         }

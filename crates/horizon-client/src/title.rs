@@ -89,6 +89,19 @@ fn recover_issues(dir: &Path) -> [Option<crate::save::DatIssue>; 2] {
         crate::save::level_dat_issue(dir, true),
     ]
 }
+/// Exists once the first-launch screen was answered.
+fn first_launch_answered() -> PathBuf {
+    crate::logging::game_home().join("first-launch-done")
+}
+fn first_launch_header() -> String {
+    lang::get_or("horizon.first_launch.header", "Set Up This Build")
+}
+fn first_launch_message() -> String {
+    lang::get_or(
+        "horizon.first_launch.message",
+        "This build can pick its settings for your PC.\n\nQuick uses your parts and what you choose: the most frames, or the best graphics for a frame rate you pick.\n\nFull measures your PC first in a temporary world, which takes a few minutes.\n\nYou can do either later in Horizon Graphics, Auto Settings.",
+    )
+}
 /// How long the ban warning keeps Proceed greyed out.
 const WARNING_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Exists once the ban warning's "Do not show this screen again" was ticked.
@@ -381,6 +394,9 @@ pub enum Mode {
         options: WorldOptions,
         buffet: buffet::State,
     },
+    /// This build's first question: play, or pick settings for this PC. Comes after
+    /// the accessibility onboarding.
+    FirstLaunch,
     /// AccessibilityOnboardingScreen: the first screen of a first launch.
     Onboarding(Onboarding),
     /// `BanNoticeScreens`: a ConfirmLinkScreen `Gui.addInitialScreens` queued.
@@ -395,6 +411,10 @@ pub enum Action {
     Language,
     /// AccessibilityOnboardingScreen's Music & Sounds button.
     Sounds,
+    /// The first-launch screen's Quick: Horizon Graphics at Auto Settings.
+    AutoSettings,
+    /// The first-launch screen's Full: measure this PC.
+    AutoTest,
     /// The title's bottom text (`PlainTextButton`): `CreditsAndAttributionScreen`.
     Credits,
     /// `Blaze3D.openUri`: a ConfirmLinkScreen's Open in Browser.
@@ -480,6 +500,8 @@ pub struct Title {
     rules: RefCell<Option<RulesScreen>>,
     /// The onboarding screen has run out: the owner saves `onboardAccessibility` as false.
     pub onboarding_finished: bool,
+    /// The first-launch screen follows the accessibility onboarding.
+    first_launch_due: bool,
     /// Focused button id, for keyboard navigation.
     pub focused_button: Option<u8>,
     /// CreateWorldScreen's Experiments screen, over Create New World.
@@ -752,6 +774,7 @@ impl Mode {
             Self::Error { .. } => "error",
             Self::Multiplayer(screen) => screen.id(),
             Self::MultiplayerWarning { .. } => "multiplayer_warning",
+            Self::FirstLaunch => "first_launch",
             Self::Onboarding(_) => "onboarding",
             Self::BanNotice(_) => "ban_notice",
         }
@@ -817,6 +840,7 @@ impl Title {
             recent: std::cell::RefCell::new(None),
             rules: RefCell::new(None),
             onboarding_finished: false,
+            first_launch_due: false,
             focused_button: None,
             experiments: RefCell::new(None),
             confirm_experiments: RefCell::new(None),
@@ -1014,6 +1038,33 @@ impl Title {
     /// The read finished: the flag goes, and the create screen opens — a
     /// fresh one entering from the world list, the one the player already
     /// filled in after the data packs changed (`openCreateWorldScreen`).
+    /// A normal start's first screens: the first-launch one until it's answered, after
+    /// the accessibility onboarding if that comes up too.
+    pub fn start_first_launch(&mut self) {
+        if first_launch_answered().exists() {
+            return;
+        }
+        if matches!(self.mode, Mode::Onboarding(_)) {
+            self.first_launch_due = true;
+        } else {
+            self.mode = Mode::FirstLaunch;
+        }
+    }
+    fn answer_first_launch(&mut self) {
+        self.mode = Mode::Main;
+        // A unit test mustn't answer for whoever runs it.
+        if cfg!(test) {
+            return;
+        }
+        let file = first_launch_answered();
+        if let Err(e) = file
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&file, ""))
+        {
+            log::warn!("First launch: {e}");
+        }
+    }
     pub fn finish_preparing(&mut self) {
         self.preparing = false;
         if !matches!(self.mode, Mode::Create { .. }) {
@@ -2174,6 +2225,16 @@ impl Title {
                     ),
                 ]
             }
+            Mode::FirstLaunch => {
+                let lines = self.message_lines.get();
+                let y = warning_top(h, lines) + 49.0 + lines as f32 * 9.0;
+                let x = (w / 2.0).floor() - 100.0;
+                vec![
+                    b(x, y, 200.0, &lang::get_or("horizon.first_launch.quick", "Quick Auto Settings"), true, 131),
+                    b(x, y + 24.0, 200.0, &lang::get_or("horizon.first_launch.full", "Full Auto Settings"), true, 132),
+                    b(x, y + 48.0, 200.0, &lang::get_or("horizon.first_launch.continue", "Continue to the Game"), true, 130),
+                ]
+            }
             Mode::Onboarding(_) => self.onboarding_buttons(w, h),
             Mode::BanNotice(_) => {
                 // ConfirmLinkScreen.addButtons: Open in Browser, Copy to Clipboard, then the
@@ -2378,6 +2439,10 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             }
             // SafetyScreen: WarningScreen's narration, the header and the
             // message on the next line.
+            Mode::FirstLaunch => ScreenInfo::new(
+                "first_launch",
+                format!("{}\n{}", first_launch_header(), first_launch_message()),
+            ),
             Mode::MultiplayerWarning { .. } => ScreenInfo::new(
                 "multiplayer_warning",
                 format!("{}\n{}", warning_header(), warning_message()),
@@ -3038,6 +3103,42 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                     centered(atlas, batch, line, text_top + i as f32 * 9.0, u32::MAX);
                 }
             }
+            Mode::FirstLaunch => {
+                crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
+                let message = first_launch_message();
+                let box_w = (w - 100.0).min(360.0);
+                let lines = wrapped(atlas, &message, box_w - 8.0);
+                self.message_lines.set(lines.len());
+                let top = warning_top(h, lines.len());
+                let header = Text::literal(first_launch_header()).bold();
+                batch.text_styled(
+                    atlas,
+                    &header,
+                    (w / 2.0).floor() - (atlas.font.width_text(&header) / 2.0).floor(),
+                    top,
+                    u32::MAX,
+                    true,
+                );
+                let box_x = ((w - box_w) / 2.0).floor();
+                let box_y = top + 29.0;
+                let box_h = lines.len() as f32 * 9.0 + 8.0;
+                crate::widgets::narratable(|| {
+                    crate::widgets::Narratable::text(message.clone(), [box_x, box_y, box_w, box_h])
+                });
+                crate::ui::nine_slice(
+                    batch,
+                    atlas,
+                    "gui/sprites/widget/text_field",
+                    box_x,
+                    box_y,
+                    box_w,
+                    box_h,
+                    u32::MAX,
+                );
+                for (i, line) in lines.iter().enumerate() {
+                    batch.text(atlas, line, box_x + 4.0, box_y + 4.0 + i as f32 * 9.0, u32::MAX, true);
+                }
+            }
             Mode::MultiplayerWarning { check, .. } => {
                 crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
                 let message = warning_message();
@@ -3496,6 +3597,14 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             (Mode::Onboarding(_), Some(onboarding::CONTINUE)) => {
                 self.onboarding_close();
                 Action::None
+            }
+            (Mode::FirstLaunch, Some(id @ 130..=132)) => {
+                self.answer_first_launch();
+                match id {
+                    131 => Action::AutoSettings,
+                    132 => Action::AutoTest,
+                    _ => Action::None,
+                }
             }
             (Mode::Main, Some(3)) => Action::Options,
             (Mode::Main, Some(7)) => Action::Accessibility,
@@ -4586,6 +4695,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             Mode::CreateBuffet { .. } => self.close_buffet(false),
             Mode::Create { .. } => self.cancel_create(),
             // Screen.keyPressed: Escape closes the screen, which fades out.
+            Mode::FirstLaunch => self.answer_first_launch(),
             Mode::Onboarding(_) => self.onboarding_close(),
             // ConfirmScreen.keyPressed: Escape answers no, which runs `next`.
             Mode::BanNotice(_) => self.next_ban_notice(),
@@ -4710,6 +4820,25 @@ mod classic_tests {
     }
 
     /// The warning's Proceed waits, and only its own box skips it: not vanilla's option.
+    #[test]
+    fn the_first_launch_screen_follows_onboarding_and_each_choice_leaves_it() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut title = Title::new(PathBuf::new(), root);
+        title.mode = Mode::FirstLaunch;
+        let size = (427.0, 240.0);
+        let buttons = title.buttons(size.0, size.1);
+        for (id, want) in [(131, "auto"), (132, "test"), (130, "none")] {
+            title.mode = Mode::FirstLaunch;
+            let b = buttons.iter().find(|b| b.id == id).expect("a button");
+            let got = title.click_action(b.x, b.y, size, Some(id));
+            assert!(matches!(title.mode, Mode::Main));
+            assert!(matches!(
+                (want, got),
+                ("auto", Action::AutoSettings) | ("test", Action::AutoTest) | ("none", Action::None)
+            ));
+        }
+    }
+
     #[test]
     fn the_ban_warning_waits_and_ignores_vanillas_skip() {
         let mut title = Title::new(

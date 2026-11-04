@@ -86,6 +86,7 @@ pub enum H {
     AutoTarget,
     AutoFps,
     AutoApply,
+    AutoTest,
     AutoSave,
     AutoLoad,
     DynamicHud,
@@ -590,6 +591,11 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                 (
                     "Your settings",
                     vec![
+                        h(
+                            H::AutoTest,
+                            None,
+                            "Tries each level, a few minutes. Esc stops it.",
+                        ),
                         h(H::AutoSave, None, "Keeps the settings as they are now."),
                         h(H::AutoLoad, None, "Goes back to the settings you saved."),
                     ],
@@ -810,6 +816,17 @@ impl H {
             H::AutoTarget => Text::literal(lang::get("FPS Target...")),
             H::AutoFps => labelled("Target", format!("{} FPS", crate::auto_settings::target(s))),
             H::AutoApply => Text::literal(lang::get("Apply FPS Target")),
+            H::AutoTest if crate::auto_settings::test_stopped() => {
+                Text::literal(lang::get("Measure This PC (last test stopped)"))
+            }
+            H::AutoTest => Text::literal(match crate::auto_settings::tested() {
+                Some(fps) => format!(
+                    "{} ({} FPS)",
+                    lang::get("Measure This PC Again"),
+                    fps[0].round()
+                ),
+                None => lang::get("Measure This PC"),
+            }),
             H::AutoSave => Text::literal(lang::get("Save Current Settings")),
             H::AutoLoad => Text::literal(lang::get("Load Saved Settings")),
             H::DynamicHud => labelled("Dynamic HUD", on_off(g.dynamic_hud)),
@@ -1049,6 +1066,9 @@ impl Item {
                 | H::HdrPaperWhite
                 | H::HdrUiBrightness,
             ) if !s.horizon.hdr => Some("Turn HDR on to use it."),
+            Item::Horizon(H::AutoTest) if !crate::auto_settings::can_test() => {
+                Some("Leave the world first.")
+            }
             Item::Horizon(H::AutoLoad) if !crate::auto_settings::saved_exists() => {
                 Some("No settings saved yet.")
             }
@@ -1213,6 +1233,8 @@ pub enum Action {
     BindKey(&'static str),
     /// Start HDR calibration.
     Calibrate,
+    /// Measure this PC, from the title screen.
+    AutoTest,
     Done,
 }
 
@@ -2194,6 +2216,7 @@ impl GraphicsUi {
                 crate::auto_settings::apply(picks, s);
                 vec![Action::ButtonClick, Action::Changed]
             }
+            Item::Horizon(H::AutoTest) => vec![Action::ButtonClick, Action::AutoTest],
             Item::Horizon(H::AutoSave) => {
                 crate::auto_settings::save(s);
                 vec![Action::ButtonClick]

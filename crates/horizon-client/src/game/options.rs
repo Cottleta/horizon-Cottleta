@@ -122,6 +122,7 @@ impl Game<'_> {
         // bindings can also change before the physical key is released.
         self.keys.clear();
         self.screen = Screen::Options;
+        horizon_client::auto_settings::set_can_test(self.title.is_some());
         self.options_from_title = from_title;
         self.options_to_game = false;
         let minecart_improvements = self.minecart_improvements();
@@ -316,6 +317,7 @@ impl Game<'_> {
         for e in events {
             match e {
                 Event::ButtonClick => self.audio.play_button_click(),
+                Event::AutoTest => self.start_auto_test(),
                 Event::Changed => {
                     self.settings.save(&Self::options_path());
                     self.apply_settings();

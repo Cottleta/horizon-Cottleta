@@ -105,6 +105,7 @@ impl StartupMenu {
             if settings.file.bool("onboardAccessibility") {
                 title.start_onboarding();
             }
+            title.start_first_launch();
             self.title = Some(title);
         }
     }
@@ -219,6 +220,7 @@ impl StartupMenu {
                 cookies: None,
                 lan,
             },
+            Action::AutoTest => PendingWorldEntry::AutoTest,
             _ => return,
         };
         self.pending = Some(entry);
@@ -495,6 +497,7 @@ impl Loading {
     }
 
     fn open_menu_options(&mut self, page: Page) {
+        horizon_client::auto_settings::set_can_test(true);
         self.menu.options.open_at(false, page);
         self.menu.options.languages = horizon_client::lang::available(&[&self.menu.root]);
         self.menu.options.pack_infos = packs::pack_infos(&self.vanilla_root, &[]);
@@ -509,6 +512,11 @@ impl Loading {
                 Event::Changed => {
                     self.save_menu_settings();
                     self.apply_menu_settings();
+                }
+                // Starts once the game has loaded.
+                Event::AutoTest => {
+                    self.menu.options_open = false;
+                    self.menu.queue_entry(Action::AutoTest, String::new());
                 }
                 Event::SliderDrag => {
                     self.apply_menu_settings();
@@ -687,6 +695,10 @@ impl Loading {
         match action {
             Action::Quit => event_loop.exit(),
             Action::Options => self.open_menu_options(Page::Main),
+            Action::AutoSettings => {
+                self.open_menu_options(Page::Graphics);
+                self.menu.options.graphics.open(horizon_client::graphics_ui::Page::Auto);
+            }
             Action::Accessibility => self.open_menu_options(Page::Accessibility),
             Action::Language => self.open_menu_options(Page::Language),
             Action::Sounds => self.open_menu_options(Page::Sound),

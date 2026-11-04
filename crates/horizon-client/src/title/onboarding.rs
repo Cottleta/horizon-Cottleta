@@ -177,7 +177,11 @@ impl Title {
         if let Mode::Onboarding(screen) = &self.mode
             && screen.closed(now)
         {
-            self.mode = Mode::Main;
+            self.mode = if std::mem::take(&mut self.first_launch_due) {
+                Mode::FirstLaunch
+            } else {
+                Mode::Main
+            };
             self.onboarding_finished = true;
         }
     }

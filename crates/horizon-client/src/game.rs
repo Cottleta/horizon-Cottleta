@@ -2960,6 +2960,8 @@ struct Game<'a> {
     pack_shadow_casters: (bool, bool),
     /// A scripted flight from the control socket (`fly`).
     flight: Option<control::Flight>,
+    /// A test of this PC is running: its settings aren't the player's.
+    auto_testing: bool,
     /// The running agent action from the control socket (game/agent.rs).
     agent: agent::Agent,
     /// Widget commands waiting for the frame after a click (game/ui_control.rs).
@@ -12039,6 +12041,11 @@ impl Game<'_> {
             Action::Quit if self.options.split_guest => {}
             Action::Quit => event_loop.exit(),
             Action::Options => self.open_options(true),
+            Action::AutoSettings => {
+                self.open_options_at(true, horizon_client::options_ui::Page::Graphics);
+                self.ui.options.graphics.open(horizon_client::graphics_ui::Page::Auto);
+            }
+            Action::AutoTest => self.start_auto_test(),
             Action::Accessibility => {
                 self.open_options_at(true, horizon_client::options_ui::Page::Accessibility)
             }
@@ -14250,6 +14257,41 @@ impl Game<'_> {
             self.settings.horizon.translucent_batching,
             shader_packs::picked_pack_draws_flat(&self.settings),
         )
+    }
+    /// Measures this PC from the title screen (`auto_test`).
+    pub(crate) fn start_auto_test(&mut self) {
+        if self.title.is_none() || self.auto_testing {
+            return;
+        }
+        self.auto_testing = true;
+        if self.screen == Screen::Options {
+            self.screen = Screen::Playing;
+        }
+        horizon_client::auto_settings::save_for_test(&self.settings);
+        let control = self
+            .control
+            .get_or_insert_with(horizon_client::control::Server::local);
+        horizon_client::auto_test::start(control.sender(), std::env::current_dir().unwrap_or_default());
+    }
+    /// The test is over: the player's settings again, and back to the title.
+    pub(crate) fn end_auto_test(&mut self) -> Result<()> {
+        if !std::mem::take(&mut self.auto_testing) {
+            return Ok(());
+        }
+        if self.title.is_none() {
+            self.close_world()?;
+        }
+        horizon_client::auto_settings::restore_after_test(&mut self.settings);
+        self.settings.save(&Self::options_path());
+        self.apply_settings();
+        Ok(())
+    }
+    /// The Auto page, once the test's world has closed.
+    pub(crate) fn show_auto_page(&mut self) {
+        if self.title.is_some() {
+            self.open_options_at(true, horizon_client::options_ui::Page::Graphics);
+            self.ui.options.graphics.open(horizon_client::graphics_ui::Page::Auto);
+        }
     }
     fn apply_settings(&mut self) {
         // LocalPlayer.refreshChatAbilities: the chat shows what the Chat option allows.
@@ -19146,6 +19188,7 @@ impl<'a> Game<'a> {
             pending_screenshot: None,
             pending_bench: None,
             flight: None,
+            auto_testing: false,
             ui_wait: Default::default(),
             events: Default::default(),
             input_trace: Default::default(),
@@ -19391,6 +19434,8 @@ enum LoaderMsg {
 }
 
 enum PendingWorldEntry {
+    /// A test of this PC, asked for while the game was still loading.
+    AutoTest,
     Local {
         folder: String,
         name: Option<String>,
@@ -19471,6 +19516,7 @@ impl Game<'_> {
             self.reload_packs();
         }
         match self.pending_entry.take() {
+            Some(PendingWorldEntry::AutoTest) => self.start_auto_test(),
             Some(PendingWorldEntry::Local {
                 folder,
                 name,
@@ -20765,6 +20811,11 @@ fn start_game<'a>(
         game.mods.dev = game.options.dev_mods.clone();
         game.start_mods();
     }
+    // A test of this PC that never ended left its own settings in place.
+    if horizon_client::auto_settings::restore_after_test(&mut game.settings) {
+        game.settings.save(&Game::options_path());
+        game.apply_settings();
+    }
     // After the mods: their templates are among the ids it lists.
     game.preload_registries();
     game.start_agent_control()?;
@@ -20855,6 +20906,10 @@ fn start_game<'a>(
             // Gui.addInitialScreens: the accessibility onboarding comes first.
             if game.settings.file.bool("onboardAccessibility") {
                 title.start_onboarding();
+            }
+            // Harnesses start here and expect the menu; asking for it shows it to them too.
+            if std::env::var_os("HORIZON_FIRST_LAUNCH").is_some() {
+                title.start_first_launch();
             }
             game.title = Some(title);
         }

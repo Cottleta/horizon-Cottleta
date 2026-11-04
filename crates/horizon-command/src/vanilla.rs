@@ -6,7 +6,7 @@ use super::{
     args::{ArgType, Resource, integer},
 };
 use horizon_client_core::gamerules::{
-    MINECART_IMPROVEMENTS, OWN_RULES, Value, available_rules,
+    MINECART_IMPROVEMENTS, Value, available_rules,
 };
 
 /// Permission levels (Commands.LEVEL_*).
@@ -300,14 +300,8 @@ fn registered_with_features(dev: bool, minecart_improvements: bool) -> Dispatche
     // gamerule <rule> [<value>] (short and namespaced names)
     let gr = d.literal(root, "gamerule");
     d.requires(gr, GAMEMASTERS);
-    // Horizon's own rules have their names only.
-    let own = OWN_RULES
-        .iter()
-        .map(|r| (r, [r.name.to_owned(), String::new()]));
-    let vanilla = available_rules(minecart_improvements)
-        .map(|r| (r, [r.name.to_owned(), format!("minecraft:{}", r.name)]));
-    for (rule, names) in vanilla.chain(own) {
-        for name in names.into_iter().filter(|n| !n.is_empty()) {
+    for rule in available_rules(minecart_improvements) {
+        for name in [rule.name.to_owned(), format!("minecraft:{}", rule.name)] {
             let r = d.literal(gr, &name);
             d.executes(r, "gamerule");
             let ty = match rule.default {

@@ -167,6 +167,24 @@ fn non_player_entity_id(t: Target) -> Option<i32> {
     };
     i32::try_from(id).ok()
 }
+/// `gamerule NAME [true|false]` for one of Horizon's own rules. They stay out of the command
+/// tree, which is vanilla's and is sent to clients: no suggestions for them.
+fn own_game_rule(command: &str) -> Option<(&'static gamerules::Rule, Option<bool>)> {
+    let mut words = command.split_whitespace();
+    if words.next()? != "gamerule" {
+        return None;
+    }
+    let name = words.next()?;
+    let rule = gamerules::OWN_RULES.iter().find(|r| r.name == name)?;
+    let value = match words.next() {
+        None => None,
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        Some(_) => return None,
+    };
+    words.next().is_none().then_some((rule, value))
+}
+
 impl Game<'_> {
     /// `native_player_level_change` for a level that was `from` before an experience change.
     pub(super) fn native_player_level_changed(&mut self, from: i32) {
@@ -200,6 +218,16 @@ impl Game<'_> {
             return true;
         }
         let d = vanilla::game_dispatcher_with_features(&self.level.enabled_features);
+        if let Some(rule) = own_game_rule(command) {
+            // Whoever may run /gamerule may set these.
+            if d.parse("gamerule keep_inventory", &self.ui.registries)
+                .executable()
+                .is_ok()
+            {
+                self.set_own_game_rule(rule);
+                return true;
+            }
+        }
         let parse = d.parse(command, &self.ui.registries);
         let result = match parse.executable() {
             Err(e) => {
@@ -226,6 +254,22 @@ impl Game<'_> {
             self.check_inventory_trigger();
         }
         ok
+    }
+    /// `/gamerule` for Horizon's own rules, as vanilla's command words it.
+    fn set_own_game_rule(&mut self, (rule, value): (&'static gamerules::Rule, Option<bool>)) {
+        let current = self.ui.rules.get(rule.name).unwrap_or(rule.default);
+        match value.map(Value::Bool) {
+            None => {
+                self.system_message(Text::tr("commands.gamerule.query", &[&rule.name, &current]));
+            }
+            Some(value) if value == current => {
+                self.command_failure(Text::tr("commands.gamerule.not_set", &[&rule.name, &value]));
+            }
+            Some(value) => {
+                self.set_game_rule(rule, value);
+                self.feedback(Text::tr("commands.gamerule.set", &[&rule.name, &value]));
+            }
+        }
     }
     /// `run_command` with its output suppressed
     /// (`CommandSourceStack.withSuppressedOutput`): the player's own source,

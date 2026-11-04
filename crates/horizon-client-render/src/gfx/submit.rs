@@ -31,6 +31,23 @@ pub struct Job {
     pub encoder: wgpu::CommandEncoder,
     pub surface: Option<wgpu::SurfaceTexture>,
     pub after: Option<AfterSubmit>,
+    /// The frame was drawn into a texture of its own: the submit thread acquires the
+    /// window's image, copies the frame to it and presents it ([`detached`]).
+    pub detached: Option<Detached>,
+}
+
+/// What the submit thread needs to show a frame the window's thread drew offscreen. Only
+/// the window's image makes the threads take turns: wgpu lends one at a time, so a frame
+/// drawn into it can't start until the last one is presented.
+pub struct Detached {
+    pub surface: Arc<wgpu::Surface<'static>>,
+    pub frame: wgpu::Texture,
+}
+
+/// Whether frames are drawn offscreen and shown by the submit thread, unless
+/// `HORIZON_DETACHED_PRESENT` says (`0` off).
+pub fn detached() -> bool {
+    std::env::var("HORIZON_DETACHED_PRESENT").as_deref() != Ok("0")
 }
 
 struct Thread {
@@ -55,7 +72,10 @@ pub struct Queue {
     /// [`take_waited`](Self::take_waited): the GPU or the display holding a frame back, not work.
     waited: AtomicU64,
     /// Nanoseconds the submit thread took on its last frame: finishing, submitting, presenting.
-    steps: Arc<[AtomicU64; 3]>,
+    steps: Arc<[AtomicU64; 4]>,
+    /// The submit thread got no image for a detached frame: the window's thread configures
+    /// the surface again.
+    surface_trouble: Arc<AtomicBool>,
 }
 
 impl Queue {
@@ -68,6 +88,7 @@ impl Queue {
             landing: Mutex::new(None),
             waited: AtomicU64::new(0),
             steps: Arc::default(),
+            surface_trouble: Arc::default(),
         };
         if !threaded {
             return this;
@@ -76,6 +97,7 @@ impl Queue {
         let (done_tx, done) = mpsc::channel();
         let queue = this.queue.clone();
         let steps = this.steps.clone();
+        let surface_trouble = this.surface_trouble.clone();
         let spawned = std::thread::Builder::new()
             .name("Render submit".into())
             .spawn(move || {
@@ -85,8 +107,34 @@ impl Queue {
                         let nanos = u64::try_from(started.elapsed().as_nanos());
                         steps[step].store(nanos.unwrap_or(u64::MAX), Ordering::Relaxed);
                     };
+                    let mut encoder = job.encoder;
+                    let mut image = job.surface;
+                    if let Some(detached) = job.detached {
+                        let started = Instant::now();
+                        image = match detached.surface.get_current_texture() {
+                            wgpu::CurrentSurfaceTexture::Success(image) => Some(image),
+                            wgpu::CurrentSurfaceTexture::Suboptimal(image) => {
+                                surface_trouble.store(true, Ordering::Release);
+                                Some(image)
+                            }
+                            _ => {
+                                surface_trouble.store(true, Ordering::Release);
+                                None
+                            }
+                        };
+                        if let Some(image) = &image
+                            && image.texture.size() == detached.frame.size()
+                        {
+                            encoder.copy_texture_to_texture(
+                                detached.frame.as_image_copy(),
+                                image.texture.as_image_copy(),
+                                image.texture.size(),
+                            );
+                        }
+                        timed(3, started);
+                    }
                     let started = Instant::now();
-                    let commands = job.encoder.finish();
+                    let commands = encoder.finish();
                     timed(0, started);
                     let started = Instant::now();
                     let submission = queue.submit([commands]);
@@ -94,7 +142,7 @@ impl Queue {
                     if let Some(after) = job.after {
                         after();
                     }
-                    if let Some(surface) = job.surface {
+                    if let Some(surface) = image {
                         let started = Instant::now();
                         queue.present(surface);
                         timed(2, started);
@@ -172,6 +220,14 @@ impl Queue {
     pub fn thread_steps(&self) -> [Duration; 3] {
         [0, 1, 2].map(|i| Duration::from_nanos(self.steps[i].load(Ordering::Relaxed)))
     }
+    /// How long the submit thread took to get its last detached frame's image.
+    pub fn thread_acquire(&self) -> Duration {
+        Duration::from_nanos(self.steps[3].load(Ordering::Relaxed))
+    }
+    /// Whether the submit thread found the surface needing to be configured again; once.
+    pub fn take_surface_trouble(&self) -> bool {
+        self.surface_trouble.swap(false, Ordering::AcqRel)
+    }
     /// The submission of the frame [`submit_later`](Self::submit_later) took, once it is
     /// made; `None` if it was taken already.
     pub fn landed(&self) -> Option<wgpu::SubmissionIndex> {
@@ -239,6 +295,7 @@ mod tests {
                 encoder,
                 surface: None,
                 after: None,
+                detached: None,
             };
             assert!(queue.submit_later(job).is_ok());
             queue.write_buffer(&source, 0, &[frame + 10; 4]);

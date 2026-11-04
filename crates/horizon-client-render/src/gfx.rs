@@ -863,6 +863,8 @@ pub struct Renderer {
     /// this one on the same device: reused, not created again, as a new
     /// surface for the window can come back lost (Wayland on Mesa).
     spare_surface: std::sync::Mutex<Option<wgpu::Surface<'static>>>,
+    /// What a detached frame is drawn into (`submit::Detached`).
+    detached_target: Option<wgpu::Texture>,
     /// The offscreen colour target, sized like `config`.
     offscreen: Option<wgpu::Texture>,
     /// Offscreen submissions still on the GPU: at most two frames run ahead.
@@ -4314,6 +4316,7 @@ impl Renderer {
             adapter,
             surface: surface.map(Arc::new),
             spare_surface: std::sync::Mutex::new(None),
+            detached_target: None,
             offscreen,
             in_flight: std::collections::VecDeque::new(),
             paced_elsewhere: false,
@@ -6636,7 +6639,26 @@ impl Renderer {
         // Its steps as spans (HORIZON_SPIKES): each lap names the step that just ended.
         let mut laps = crate::spans::laps();
         let landing = Instant::now();
-        self.land_frame();
+        if self.queue.take_surface_trouble() {
+            self.queue.wait();
+            self.configure_surface();
+        }
+        // Only what the submit thread can show by itself: the rest needs the frame here.
+        let detached_frame = checks.is_none()
+            && submit::detached()
+            && self.queue.threaded()
+            && self.surface.is_some()
+            && self.hdr.is_none()
+            && self.hdr_marker.is_none()
+            && !self.frame_gen.on
+            && self.screenshot.is_none()
+            && self.first_frame != FirstFrame::Submit
+            && self.config.present_mode != wgpu::PresentMode::Fifo
+            && self.frame_format == self.config.format;
+        // A detached frame needs nothing of the previous one until it is handed over.
+        if !detached_frame {
+            self.land_frame();
+        }
         // Waiting for the previous frame (offscreen: at most two on the GPU), not work.
         let landed = landing.elapsed();
         self.queue.take_waited();
@@ -6730,7 +6752,7 @@ impl Renderer {
         // The present thread failed: this frame acquires as without frame generation.
         let fg = fg_frames.is_some();
         let mut fg_made = false;
-        let acquired = if fg {
+        let acquired = if fg || detached_frame {
             None
         } else {
             self.surface.as_ref().map(|s| s.get_current_texture())
@@ -6776,8 +6798,18 @@ impl Renderer {
             self.frame_gen.paused = false;
         }
         let size = [self.config.width, self.config.height];
+        let detached_texture = detached_frame.then(|| {
+            let stale = self.detached_target.as_ref().is_none_or(|t| {
+                t.width() != size[0] || t.height() != size[1] || t.format() != self.config.format
+            });
+            if stale {
+                self.detached_target = Some(Self::offscreen_target(&self.device, &self.config));
+            }
+            self.detached_target.clone().expect("just made")
+        });
         let target_texture = match (&surface_frame, &mut self.hdr) {
             _ if let Some((real, _)) = &fg_frames => real.clone(),
+            _ if let Some(texture) = &detached_texture => texture.clone(),
             (Some(_), Some(hdr)) => hdr.frame(&self.device, size),
             // A screenshot of a swapchain without COPY_SRC (OpenGL), and a 16-bit frame
             // with HDR off, draw into a texture of their own, then onto the swapchain.
@@ -10075,7 +10107,12 @@ impl Renderer {
             && self.hdr_marker.is_none()
             && (surface_frame.is_none() || self.config.present_mode != wgpu::PresentMode::Fifo)
         {
-            let offscreen = surface_frame.is_none();
+            let offscreen = surface_frame.is_none() && !detached_frame;
+            if detached_frame {
+                let waiting = Instant::now();
+                self.land_frame();
+                self.last_wait += waiting.elapsed();
+            }
             // Culling and a shader pack's centre depth read back as soon as the frame is
             // submitted, as here.
             let cull = self.cull.as_mut().and_then(|c| c.submitted());
@@ -10097,6 +10134,10 @@ impl Renderer {
                 encoder,
                 surface: surface_frame,
                 after,
+                detached: detached_frame.then(|| submit::Detached {
+                    surface: self.surface.clone().expect("checked for this frame"),
+                    frame: target_texture.clone(),
+                }),
             };
             match self.queue.submit_later(job) {
                 Ok(()) => {
@@ -10109,6 +10150,9 @@ impl Renderer {
                         .saturating_sub(self.last_wait.saturating_sub(landed));
                     let [finish, submit, present] = self.queue.thread_steps();
                     self.last_steps[1..].copy_from_slice(&[finish, submit, present]);
+                    if detached_frame {
+                        self.last_steps[0] = self.queue.thread_acquire();
+                    }
                     self.last_inline = std::time::Duration::ZERO;
                     self.last_held = self.last_wait.saturating_sub(self.last_steps[0]);
                     self.visible = visible;

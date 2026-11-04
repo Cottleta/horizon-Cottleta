@@ -2973,6 +2973,14 @@ struct Game<'a> {
     flight: Option<control::Flight>,
     /// A test of this PC is running: its settings aren't the player's.
     auto_testing: bool,
+    /// The level it's measuring, for its menu.
+    auto_test_level: usize,
+    /// Stop was asked for: it ends at its next check.
+    auto_test_stopping: bool,
+    /// The control queue is only there for the test: it goes when the test ends, so that
+    /// losing focus pauses again.
+    auto_test_control: bool,
+    auto_test_drop_control: bool,
     /// The running agent action from the control socket (game/agent.rs).
     agent: agent::Agent,
     /// Widget commands waiting for the frame after a click (game/ui_control.rs).
@@ -8034,10 +8042,14 @@ impl Game<'_> {
     /// pauses the game. An open screen (books, signs, the pack prompt, a server
     /// dialog) stays instead of pausing (`Gui.setPauseScreen`).
     fn pause_if_inactive(&mut self) {
+        if std::mem::take(&mut self.auto_test_drop_control) {
+            self.control = None;
+        }
         if self
             .focus_lost
             .is_some_and(|t| t.elapsed() > Duration::from_millis(500))
             && self.control.is_none()
+            && !self.auto_testing
             && self.screen == Screen::Playing
             && self.player.is_some()
             && !self.options.no_pause
@@ -8084,6 +8096,8 @@ impl Game<'_> {
     /// the cursor where it is. Like GLFW's `glfwSetCursorPos`, nothing warps
     /// while the window is unfocused (losing focus releases the pointer).
     fn capture(&mut self, capture: bool) {
+        // The test's menu keeps the pointer.
+        let capture = capture && !self.auto_testing;
         // A guest's action (`as_guest`) opens and closes screens on the
         // guest's own client: the window's pointer stays the host's (#687).
         if self.lan_acting.is_some() {
@@ -8777,6 +8791,9 @@ impl Game<'_> {
         batch.blur_at = batch.vertices.len() as u32;
         // PackConfirmScreen takes the open screen's place (it comes back once
         // the prompt is answered): the screen under the prompt isn't drawn.
+        if self.auto_testing {
+            self.draw_auto_test(&mut batch);
+        }
         let screen = if self.server_packs.prompt.is_some() || self.book.is_some() {
             Screen::Playing
         } else {
@@ -14341,9 +14358,13 @@ impl Game<'_> {
             return;
         }
         self.auto_testing = true;
+        self.auto_test_level = 0;
+        self.auto_test_stopping = false;
+        self.auto_test_control = self.control.is_none();
         if self.screen == Screen::Options {
             self.screen = Screen::Playing;
         }
+        self.capture(false);
         horizon_client::auto_settings::save_for_test(&self.settings);
         let control = self
             .control
@@ -14363,8 +14384,57 @@ impl Game<'_> {
         self.apply_settings();
         Ok(())
     }
+    /// Esc or the menu's Stop: the test sees the paused screen at its next check.
+    fn stop_auto_test(&mut self) {
+        self.auto_test_stopping = true;
+        self.pause_menu = false;
+        self.pause_focus = None;
+        self.screen = Screen::Paused;
+    }
+    /// The test's menu over the world, the pointer free: what it's doing, and Stop.
+    fn auto_test_stop_button(w: f32, h: f32) -> (f32, f32, f32) {
+        ((w / 2.0).floor() - 60.0, (h / 2.0).floor() + 16.0, 120.0)
+    }
+    fn draw_auto_test(&mut self, batch: &mut HudBatch) {
+        use horizon_client::{auto_settings, ui};
+        let (w, h) = (batch.width, batch.height);
+        let atlas = &self.gui.atlas;
+        let (panel_w, panel_h) = (240.0, 84.0);
+        let (x, y) = (((w - panel_w) / 2.0).floor(), (h / 2.0).floor() - 44.0);
+        ui::nine_slice(batch, atlas, "gui/sprites/widget/text_field", x, y, panel_w, panel_h, u32::MAX);
+        let center = |batch: &mut HudBatch, text: &str, y: f32| {
+            let tw = HudBatch::text_width(atlas, text);
+            batch.text(atlas, text, ((w - tw) / 2.0).floor(), y, u32::MAX, true);
+        };
+        center(batch, &horizon_client::lang::get_or("horizon.auto_test.title", "Measuring This PC"), y + 8.0);
+        let picks = auto_settings::level_at(self.auto_test_level);
+        let line = if self.auto_test_stopping {
+            horizon_client::lang::get_or("horizon.auto_test.stopping", "Stopping...")
+        } else {
+            format!(
+                "Level {} of {}: {}, {} chunks",
+                self.auto_test_level + 1,
+                auto_settings::LEVELS,
+                picks.preset.name(),
+                picks.render_distance,
+            )
+        };
+        center(batch, &line, y + 22.0);
+        let (bar_x, bar_y, bar_w) = (x + 20.0, y + 36.0, panel_w - 40.0);
+        batch.fill(atlas, bar_x, bar_y, bar_w, 4.0, 0xFF40_4040);
+        let done = (self.auto_test_level + 1) as f32 / auto_settings::LEVELS as f32;
+        batch.fill(atlas, bar_x, bar_y, (bar_w * done).floor(), 4.0, 0xFF80_FF80);
+        let (bx, by, bw) = Self::auto_test_stop_button(w, h);
+        let hover = !self.auto_test_stopping && ui::hovered(self.cursor, bx, by, bw, 20.0);
+        let label = horizon_client::text::Text::literal(horizon_client::lang::get_or(
+            "horizon.auto_test.stop",
+            "Stop",
+        ));
+        ui::button(batch, atlas, bx, by, bw, 20.0, &label, !self.auto_test_stopping, hover);
+    }
     /// The Auto page, once the test's world has closed.
     pub(crate) fn show_auto_page(&mut self) {
+        self.auto_test_drop_control = std::mem::take(&mut self.auto_test_control);
         if self.title.is_some() {
             self.open_options_at(true, horizon_client::options_ui::Page::Graphics);
             self.ui.options.graphics.open(horizon_client::graphics_ui::Page::Auto);
@@ -16383,6 +16453,13 @@ impl Game<'_> {
     /// `Screen.keyPressed` hears the raw one, and only a raw key settles what
     /// the container's hotbar keys are now (`checkHotbarKeyPressed`).
     fn key_pressed(&mut self, key: KeyCode, raw: KeyCode) -> Result<()> {
+        // The test's menu takes the keys, and only Esc does anything.
+        if self.auto_testing {
+            if key == KeyCode::Escape && !self.auto_test_stopping {
+                self.stop_auto_test();
+            }
+            return Ok(());
+        }
         if self.sleeping.is_some()
             && self.screen == Screen::Playing
             && !matches!(
@@ -17240,6 +17317,27 @@ impl Game<'_> {
         }
         follow_keymap(&mut event);
         // MacosUtil.setCtrlClickEmulatesRightClick: Control + left click is a right click.
+        // The test's menu takes the mouse.
+        if self.auto_testing {
+            match &event {
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    let (w, h) = self.gui_size();
+                    let (bx, by, bw) = Self::auto_test_stop_button(w, h);
+                    if !self.auto_test_stopping
+                        && horizon_client::ui::hovered(self.cursor, bx, by, bw, 20.0)
+                    {
+                        self.stop_auto_test();
+                    }
+                    return;
+                }
+                WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => return,
+                _ => {}
+            }
+        }
         if let WindowEvent::MouseInput { state, button, .. } = &mut event
             && *button == MouseButton::Left
             && self.right_click_emulation.is_right_click(
@@ -19277,6 +19375,10 @@ impl<'a> Game<'a> {
             pending_bench: None,
             flight: None,
             auto_testing: false,
+            auto_test_level: 0,
+            auto_test_stopping: false,
+            auto_test_control: false,
+            auto_test_drop_control: false,
             ui_wait: Default::default(),
             events: Default::default(),
             input_trace: Default::default(),

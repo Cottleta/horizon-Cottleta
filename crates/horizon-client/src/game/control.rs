@@ -829,6 +829,7 @@ impl Game<'_> {
             "auto-level" => {
                 let level: usize = arg(1)?.parse()?;
                 horizon_client::auto_settings::apply_for_test(level, &mut self.settings);
+                self.auto_test_level = level.min(horizon_client::auto_settings::LEVELS - 1);
                 self.apply_settings();
                 ok()
             }

@@ -31,15 +31,24 @@ pub struct Picks {
     pub preset: Preset,
     pub render_distance: i32,
     pub simulation_distance: i32,
+    /// Far terrain, in chunks. It costs more than anything else here, so every level says.
+    pub lod_distance: u32,
     /// The share of the first level's frame rate this one keeps.
     pub cost: f32,
 }
 
-const fn level(preset: Preset, render_distance: i32, simulation_distance: i32, cost: f32) -> Picks {
+const fn level(
+    preset: Preset,
+    render_distance: i32,
+    simulation_distance: i32,
+    lod_distance: u32,
+    cost: f32,
+) -> Picks {
     Picks {
         preset,
         render_distance,
         simulation_distance,
+        lod_distance,
         cost,
     }
 }
@@ -49,12 +58,17 @@ pub const LEVELS: usize = 5;
 /// The levels from most frames to best graphics. The costs are measured over terrain in
 /// single player on one fast PC (7800X3D, RX 9070): a slower GPU will likely lose more.
 const LADDER: [Picks; LEVELS] = [
-    level(Preset::Performance, 8, 6, 1.0),
-    level(Preset::Performance, 12, 6, 0.89),
-    level(Preset::Balanced, 12, 8, 0.85),
-    level(Preset::Quality, 16, 12, 0.72),
-    level(Preset::Ultra, 24, 12, 0.49),
+    level(Preset::Performance, 8, 6, 0, 1.0),
+    level(Preset::Performance, 12, 6, 0, 0.91),
+    level(Preset::Balanced, 12, 8, 0, 0.82),
+    level(Preset::Quality, 16, 12, 256, 0.25),
+    level(Preset::Ultra, 24, 12, 512, 0.17),
 ];
+
+/// A level by its place, from most frames.
+pub fn level_at(i: usize) -> Picks {
+    LADDER[i.min(LEVELS - 1)]
+}
 
 /// The most frames this PC can reach.
 pub fn best_performance() -> Picks {
@@ -231,6 +245,7 @@ pub fn apply(picks: Picks, s: &mut Settings) {
     let most = if detect().memory_gib < 8 { 8 } else { i32::MAX };
     s.render_distance = picks.render_distance.min(most);
     s.simulation_distance = picks.simulation_distance;
+    s.horizon.lod_distance = picks.lod_distance;
     s.horizon.dynamic_hud = true;
 }
 
@@ -437,6 +452,7 @@ mod tests {
         apply(best_performance(), &mut s);
         assert_eq!(s.horizon.preset, Preset::Performance);
         assert_eq!(s.simulation_distance, 6);
+        assert_eq!(s.horizon.lod_distance, 0);
         assert!(s.horizon.dynamic_hud);
     }
 }

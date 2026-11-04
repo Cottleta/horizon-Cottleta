@@ -369,6 +369,10 @@ pub(crate) fn wait_loaded(control: &Control, near: impl Fn(&Value) -> bool) -> R
     let (mut first, mut moved, began) = (None, false, Instant::now());
     while Instant::now() < deadline {
         let s = control.status();
+        // The auto test's Stop: a harness run never pauses.
+        if s["screen"] == "paused" {
+            return Err("paused".to_owned());
+        }
         let now = Instant::now();
         let position = &s["player"]["position"];
         if position.is_null()

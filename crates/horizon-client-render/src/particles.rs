@@ -500,6 +500,8 @@ pub struct Particle {
     light: Light,
     behaviour: Behaviour,
     no_render: bool,
+    /// The block, the age and the light it last read there, for `render`.
+    kept_light: std::cell::Cell<Option<([i32; 3], i32, u8)>>,
     /// Ticked once when created (`CritParticle` constructor).
     pre_tick: bool,
     /// `Particle.random`: the particle's own generator (`RandomSource.create()`).
@@ -839,6 +841,7 @@ impl Particle {
             light: Light::World,
             behaviour: Behaviour::Base,
             no_render: false,
+            kept_light: std::cell::Cell::new(None),
             pre_tick: false,
             frame_ticks: 0,
             random: LegacyRandom::new(0),
@@ -4413,6 +4416,7 @@ impl ParticleEngine {
         let base = Quat::from_rotation_y(std::f32::consts::PI - yaw.to_radians())
             * Quat::from_rotation_x(-pitch.to_radians());
         let mut light_cache = ParticleLightCache::default();
+        out.reserve(self.particles.len() * 4);
         // Most particles don't roll: one rotation of the quad's corners for them all.
         const CORNERS: [(f32, f32); 4] = [(1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0)];
         let base_corners = CORNERS.map(|(x, y)| base * FVec3::new(x, y, 0.0));
@@ -4531,7 +4535,15 @@ impl ParticleEngine {
                 _ => {}
             }
             let block = ParticleLevel::block_at(p.position);
-            let packed = light_cache.get(block, light_at);
+            // Light hardly changes between frames: read again in a new block or every 8 ticks.
+            let packed = match p.kept_light.get() {
+                Some((at, tick, light)) if at == block && (p.age - tick) < 8 => light,
+                _ => {
+                    let light = light_cache.get(block, light_at);
+                    p.kept_light.set(Some((block, p.age, light)));
+                    light
+                }
+            };
             let (sky_light, block_light) = p.light_coords(
                 partial,
                 u32::from(packed >> 4) * 16,

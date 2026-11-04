@@ -11082,7 +11082,15 @@ impl Game<'_> {
         self.refresh_drawn_block_entities();
         // Block entities (BlockEntityRenderers): chests, shulker boxes, banners, skulls...
         if let Some(r) = &self.renderer {
-            let lid = |p: [i32; 3]| self.chest_lid(p, alpha as f32);
+            // Nearly always every lid is shut: no lookup per chest then.
+            let lids_moving = self.be_anims.lids_moving();
+            let lid = |p: [i32; 3]| {
+                if lids_moving {
+                    self.chest_lid(p, alpha as f32)
+                } else {
+                    0.0
+                }
+            };
             let anim = |p: [i32; 3]| self.block_anim(p, alpha as f32);
             let scene = BlockEntityScene {
                 camera,

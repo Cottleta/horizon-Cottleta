@@ -621,25 +621,25 @@ impl Game<'_> {
                 background,
                 &mut patches,
                 |vertices, behind| {
-                    for (i, quad) in vertices.as_chunks::<6>().0.iter().enumerate() {
+                    let quads = vertices.as_chunks::<6>().0;
+                    out.reserve(quads.len() * 4);
+                    out.extend(quads.iter().enumerate().flat_map(|(i, quad)| {
                         let shift = if i * 6 < behind {
                             away
                         } else {
                             glam::Vec3::ZERO
                         };
                         // The corners from the bottom left, as the world draws quads.
-                        for v in [quad[5], quad[2], quad[1], quad[0]] {
-                            out.push(Vertex {
-                                normal: [0; 4],
-                                pos: (at(v.pos[0], v.pos[1]) + shift).to_array(),
-                                uv: v.uv,
-                                layer: text_layer,
-                                color: v.color,
-                                light,
-                                glint_uv: [0.0, 0.0],
-                            });
-                        }
-                    }
+                        [&quad[5], &quad[2], &quad[1], &quad[0]].map(|v| Vertex {
+                            normal: [0; 4],
+                            pos: (at(v.pos[0], v.pos[1]) + shift).to_array(),
+                            uv: v.uv,
+                            layer: text_layer,
+                            color: v.color,
+                            light,
+                            glint_uv: [0.0, 0.0],
+                        })
+                    }));
                 },
             );
             if let Some(style) = style.filter(|_| n == last) {

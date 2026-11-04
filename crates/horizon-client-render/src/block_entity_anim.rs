@@ -970,6 +970,12 @@ impl BlockEntityAnims {
         self.gateway_servers.retain(|p, _| keep(*p));
         self.conduit_servers.retain(|p, _| keep(*p));
     }
+    /// Whether any lid could read other than shut this frame.
+    pub fn lids_moving(&self) -> bool {
+        self.chests
+            .values()
+            .any(|l| l.openness != 0.0 || l.o_openness != 0.0)
+    }
     /// `getOpenNess(partial)` of the chest or ender chest at `pos`.
     pub fn lid(&self, pos: [i32; 3], partial: f32) -> f32 {
         self.chests

@@ -1091,7 +1091,10 @@ impl Game<'_> {
             ),
         ];
         for (count, on_surface, model, texture) in layers {
-            let (true, Some(model), Some(rect)) = (count > 0, model, sprites.get(texture)) else {
+            if count == 0 {
+                continue;
+            }
+            let (Some(model), Some(rect)) = (model, sprites.get(texture)) else {
                 continue;
             };
             horizon_client::mobs::render::stuck_in_body(
@@ -1119,6 +1122,9 @@ impl Game<'_> {
         light: u32,
         out: &mut Vec<horizon_client::mesher::Vertex>,
     ) {
+        if m.extra.shoulder_parrots.iter().all(Option::is_none) {
+            return;
+        }
         let Some(parrot) = self.res.mob_types().get("minecraft:parrot") else {
             return;
         };

@@ -2494,6 +2494,19 @@ fn attachment_matrix(
     anchors: &[(String, String, [f32; 3])],
     key: &str,
 ) -> Option<glam::Mat4> {
+    // Nearly no model declares one: no walk over its parts then.
+    if !anchors.iter().any(|(_, kind, _)| kind == key) {
+        return None;
+    }
+    attachment_walk(part, parent, poses, anchors, key)
+}
+fn attachment_walk(
+    part: &Part,
+    parent: glam::Mat4,
+    poses: &Poses,
+    anchors: &[(String, String, [f32; 3])],
+    key: &str,
+) -> Option<glam::Mat4> {
     let p = poses.pose(part);
     let m = parent
         * glam::Mat4::from_translation(glam::Vec3::new(p[0], p[1], p[2]) / 16.0)
@@ -2512,7 +2525,7 @@ fn attachment_matrix(
     }
     part.children
         .iter()
-        .find_map(|c| attachment_matrix(c, m, poses, anchors, key))
+        .find_map(|c| attachment_walk(c, m, poses, anchors, key))
 }
 /// `AllayModel.translateToHand`: the root and body, then the right arm's
 /// pitch, a 0.7 scale and a shift. Both hands use the right arm's pitch.

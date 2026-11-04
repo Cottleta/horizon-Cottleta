@@ -44,7 +44,7 @@ pub(super) struct ArmorStandAssets {
     /// (slot model suffix, small) -> model.
     pub layers: HashMap<(&'static str, bool), Arc<Part>>,
     /// The player's armour models by slot (helmet, chestplate, leggings, boots).
-    pub player: HashMap<&'static str, Part>,
+    pub player: rustc_hash::FxHashMap<&'static str, Part>,
     /// asset id -> layer kind (humanoid / humanoid_leggings) -> each layer's (texture, undyed colour), in order.
     pub equipment: HashMap<String, HashMap<String, Vec<(String, Option<u32>)>>>,
     /// asset id -> `trim_overrides`.
@@ -60,7 +60,7 @@ impl ArmorStandAssets {
     ) -> Self {
         let load = |key: &str| document.and_then(|document| document.model(key));
         let mut layers = HashMap::new();
-        let mut player = HashMap::new();
+        let mut player = rustc_hash::FxHashMap::default();
         for slot in ["helmet", "chestplate", "leggings", "boots"] {
             if let Some(part) = load(&format!("minecraft:player#{slot}")) {
                 player.insert(slot, part);

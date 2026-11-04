@@ -3833,3 +3833,50 @@ fn alternate_current_does_fewer_updates_than_vanilla() {
     let (vanilla, alternate) = (updates(false, f), updates(true, f));
     assert!(alternate * 2 < vanilla, "{alternate} vs {vanilla}");
 }
+
+/// `cargo test --profile fast -p horizon-world --lib alternate_current_timing -- --ignored --nocapture`
+#[test]
+#[ignore = "prints timings"]
+fn alternate_current_timing() {
+    let Some(f) = fixture() else {
+        return;
+    };
+    for (name, on) in [("vanilla", false), ("alternate current", true)] {
+        for size in [20, 40, 60] {
+            let mut w = World::new(f);
+            w.level.alternate_current = on;
+            let wire = w.id(
+                "redstone_wire",
+                &[
+                    ("north", "side"),
+                    ("east", "side"),
+                    ("south", "side"),
+                    ("west", "side"),
+                ],
+            );
+            let stone = w.id("stone", &[]);
+            let block = w.id("redstone_block", &[]);
+            for x in -1..size {
+                for z in 0..size {
+                    w.put(BlockPos::new(x, 0, z), stone);
+                    if x >= 0 {
+                        w.put(BlockPos::new(x, 1, z), wire);
+                    }
+                }
+            }
+            let source = BlockPos::new(-1, 1, size / 2);
+            let started = std::time::Instant::now();
+            let before = w.level.neighbor_updates.get();
+            let rounds = 3;
+            for _ in 0..rounds {
+                w.set(source, block);
+                w.set(source, w.b().air());
+            }
+            println!(
+                "{name} {size}x{size}: {:.2} ms per change, {} neighbor updates",
+                started.elapsed().as_secs_f64() * 1000.0 / f64::from(rounds * 2),
+                (w.level.neighbor_updates.get() - before) / u64::from(rounds as u32 * 2),
+            );
+        }
+    }
+}

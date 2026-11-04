@@ -192,6 +192,19 @@ impl<'r> BlockCollisionRegistry<'r> {
             .map_err(CollisionQueryError::Dynamic)
     }
 
+    /// That a state's collision shape is empty in every context.
+    pub fn always_empty(&self, state: BlockStateId) -> bool {
+        let contextual = self
+            .scan_flags
+            .get(state.0 as usize)
+            .is_none_or(|flags| flags & 8 != 0);
+        !contextual
+            && self
+                .cached
+                .cached_shape(state)
+                .is_ok_and(|shape| shape.is_some_and(VoxelShape::is_empty))
+    }
+
     /// Ordinary entity/position/placement contexts. The remaining pinned block
     /// families share their no-context geometry; the native registry audit checks
     /// cached states with rejecting context/world providers before using that path.

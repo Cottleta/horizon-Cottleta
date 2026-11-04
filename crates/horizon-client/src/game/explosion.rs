@@ -36,6 +36,10 @@ impl RayWorld for ColliderRays<'_, '_> {
     fn block_state(&mut self, p: BlockPos) -> io::Result<BlockStateId> {
         Ok(self.scene.world.block(p.x, p.y, p.z))
     }
+    fn nothing_to_hit(&mut self, state: BlockStateId, _: BlockPos) -> bool {
+        // These rays ignore fluids.
+        self.scene.binding.always_empty(state)
+    }
     fn fluid_state(&mut self, _: BlockPos) -> io::Result<()> {
         Ok(())
     }
@@ -307,6 +311,8 @@ impl Game<'_> {
                 .cloned()
         });
         let mut set: JavaHashMap<Key, ()> = JavaHashMap::default();
+        // Rays cross the same blocks: a cheaper check spares most inserts, which change nothing.
+        let mut seen: rustc_hash::FxHashSet<[i32; 3]> = rustc_hash::FxHashSet::default();
         for xx in 0..16 {
             for yy in 0..16 {
                 for zz in 0..16 {
@@ -322,6 +328,9 @@ impl Game<'_> {
                     zd /= d;
                     let mut power = radius * (0.7 + self.world.random.next_float() * 0.6);
                     let (mut xp, mut yp, mut zp) = (center[0], center[1], center[2]);
+                    // A ray's steps are shorter than a block, whose state doesn't change here.
+                    let mut last = None;
+                    let mut state = self.world.block(0, min_y, 0);
                     while power > 0.0 {
                         let pos = [xp.floor() as i32, yp.floor() as i32, zp.floor() as i32];
                         if pos[1] < min_y
@@ -331,7 +340,9 @@ impl Game<'_> {
                         {
                             break;
                         }
-                        let state = self.world.block(pos[0], pos[1], pos[2]);
+                        if last != Some(pos) {
+                            state = self.world.block(pos[0], pos[1], pos[2]);
+                        }
                         let f = self.res.facts().get(state);
                         let fluid = if f.fluid != Fluid::None {
                             100.0f32
@@ -359,9 +370,10 @@ impl Game<'_> {
                             }
                             _ => {}
                         }
-                        if power > 0.0 && !spared {
+                        if power > 0.0 && !spared && last != Some(pos) && seen.insert(pos) {
                             set.put(Key(pos), ());
                         }
+                        last = Some(pos);
                         xp += xd * f64::from(0.3f32);
                         yp += yd * f64::from(0.3f32);
                         zp += zd * f64::from(0.3f32);

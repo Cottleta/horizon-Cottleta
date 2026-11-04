@@ -41,6 +41,11 @@ impl<E: std::error::Error + 'static> std::error::Error for RayError<E> {}
 /// Block/shape providers retain the captured collision context for the query.
 /// State handles must remain valid when later provider calls change the world.
 pub trait RayWorld {
+    /// That a block has no shape to hit and no fluid to look at, known without building them.
+    /// Rays cross far more of these than anything else.
+    fn nothing_to_hit(&mut self, _block: Self::Block, _at: BlockPos) -> bool {
+        false
+    }
     type Error;
     type Block: Copy;
     type Fluid: Copy;
@@ -107,6 +112,9 @@ pub fn clip_world<W: RayWorld>(
     let result = traverse_blocks(start, end, max_visits, |p| {
         let mut query = || -> Result<Option<BlockHit>, W::Error> {
             let block = world.block_state(p)?;
+            if world.nothing_to_hit(block, p) {
+                return Ok(None);
+            }
             let fluid = world.fluid_state(p)?;
             let shape = world.block_shape(block, p, blocks)?;
             let solid = clip_with_interaction(world, start, end, p, &shape, block)?;

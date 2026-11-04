@@ -639,7 +639,11 @@ impl VanillaLodSampler {
             let states = self.generator.generator.data().block_states();
             fill_under_surface(&mut column, |state| states.get(state).has_fluid());
         }
-        self.vegetation.apply(&mut column, x, z, width, light);
+        // A superflat world places no trees, so its far terrain must not guess any
+        // from the biome. Its structures use this sampler, and plains has trees.
+        if !self.generator.is_flat() {
+            self.vegetation.apply(&mut column, x, z, width, light);
+        }
         self.islands.apply(&mut column, x, z, width, light);
         if !nether {
             shade_sky(&mut column, self.generator.generator.data().block_states());
@@ -684,6 +688,49 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    #[ignore = "requires prepared worldgen data in HORIZON_TEST_RESOURCES"]
+    fn superflat_far_terrain_has_no_trees() -> crate::Result<()> {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("HORIZON_TEST_RESOURCES").expect("resources"),
+        );
+        let assets = crate::assets::Assets::load(&root)?;
+        let biomes = crate::biome::Biomes::load(&root)?;
+        let flat = horizon_world::worldgen::generator::FlatSettings {
+            layers: vec![
+                ("minecraft:bedrock".into(), 1),
+                ("minecraft:dirt".into(), 2),
+                ("minecraft:grass_block".into(), 1),
+            ],
+            biome: "minecraft:plains".into(),
+            structure_overrides: Some(vec![
+                "minecraft:strongholds".into(),
+                "minecraft:villages".into(),
+            ]),
+        };
+        let terrain = Arc::new(VanillaTerrain::for_flat(
+            &root.join("worldgen"),
+            &Default::default(),
+            assets.registry,
+            &biomes,
+            1234,
+            &flat,
+            true,
+        )?);
+        let mut sampler = VanillaLodSampler::new(terrain);
+        for width in [2, 4, 8, 16, 32, 64] {
+            for column in sampler.grid(-2048, -2048, width, 64) {
+                for span in &column.spans {
+                    let name = &assets.registry.state(span.state).unwrap().name;
+                    assert!(
+                        !name.ends_with("_leaves") && !name.ends_with("_log"),
+                        "{name} in far terrain at width {width}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
     #[test]
     #[ignore = "requires prepared worldgen data in HORIZON_TEST_RESOURCES"]
     fn decorated_lod_refines_real_seed_canopies_and_all_dimensions() -> crate::Result<()> {

@@ -366,14 +366,19 @@ pub fn heap_tag(name: &'static str) -> Option<heap_census::Tag> {
 /// don't name it.
 const PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
+/// Milliseconds a free page waits before going back to the OS. Long enough that memory
+/// freed and asked for again within a frame stays put: with no delay, a light view made
+/// two `madvise` calls every frame. Short enough to keep the saving below.
+const PURGE_DELAY_MS: std::ffi::c_long = 10;
+
 /// Set the allocator up, first thing in `main`: free pages go back to the OS
-/// at once instead of a second later. With mimalloc's delay the game held a
+/// soon instead of a second later. With mimalloc's delay the game held a
 /// quarter more memory than with the system heap; without it a few percent,
 /// and generation keeps most of its speed-up.
 pub fn configure_allocator() {
     // SAFETY: sets one integer option, which mimalloc reads at each purge.
     unsafe {
-        libmimalloc_sys::mi_option_set(PURGE_DELAY, 0);
+        libmimalloc_sys::mi_option_set(PURGE_DELAY, PURGE_DELAY_MS);
     }
 }
 
@@ -680,16 +685,16 @@ mod tests {
     }
 
     /// The option set is the purge delay: mimalloc v3's default for it is
-    /// 1000 ms, and it is 0 once configured.
+    /// 1000 ms, and it is `PURGE_DELAY_MS` once configured.
     #[test]
-    fn configuring_the_allocator_purges_at_once() {
+    fn configuring_the_allocator_purges_soon() {
         // SAFETY: reads and sets one integer option.
         let get = || unsafe { libmimalloc_sys::mi_option_get(super::PURGE_DELAY) };
         if std::env::var_os("MIMALLOC_PURGE_DELAY").is_none() {
             assert_eq!(get(), 1000);
         }
         super::configure_allocator();
-        assert_eq!(get(), 0);
+        assert_eq!(get(), super::PURGE_DELAY_MS);
     }
 }
 

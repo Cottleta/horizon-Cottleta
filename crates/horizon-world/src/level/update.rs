@@ -81,7 +81,7 @@ enum Update {
     },
 }
 
-enum Step {
+pub(crate) enum Step {
     Shape {
         direction: Direction,
         neighbor_state: BlockStateId,
@@ -640,7 +640,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         updater.added.clear();
         updater.count = 0;
     }
-    fn execute(&mut self, step: Step) {
+    pub(crate) fn execute(&mut self, step: Step) {
         match step {
             Step::Shape {
                 direction,

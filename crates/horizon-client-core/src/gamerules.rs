@@ -129,6 +129,10 @@ pub const RULES: &[Rule] = &[
 pub const MAX_MINECART_SPEED: Rule = i("max_minecart_speed", "misc", 8, 1, 1000);
 pub const MINECART_IMPROVEMENTS: &str = "minecraft:minecart_improvements";
 
+/// Horizon's own, for `/gamerule`: wires update as in the Alternate Current mod, off by default.
+/// Left out of the vanilla list and, while off, of the saved file.
+pub const ALTERNATE_CURRENT: Rule = b("alternate_current", "updates", false);
+
 pub fn available_rules(minecart_improvements: bool) -> impl Iterator<Item = &'static Rule> {
     RULES
         .iter()
@@ -137,7 +141,9 @@ pub fn available_rules(minecart_improvements: bool) -> impl Iterator<Item = &'st
 
 pub fn rule(name: &str) -> Option<&'static Rule> {
     let name = name.strip_prefix("minecraft:").unwrap_or(name);
-    available_rules(true).find(|r| r.name == name)
+    available_rules(true)
+        .chain(std::iter::once(&ALTERNATE_CURRENT))
+        .find(|r| r.name == name)
 }
 
 /// Current values (defaults unless set).
@@ -224,6 +230,10 @@ impl GameRules {
     pub fn to_nbt(&self) -> NamedTag {
         let data: Vec<(horizon_world::nbt::JavaString, Tag)> = self
             .available_rules()
+            .chain(
+                (self.values.get(ALTERNATE_CURRENT.name) == Some(&Value::Bool(true)))
+                    .then_some(&ALTERNATE_CURRENT),
+            )
             .map(|r| {
                 let v = self.values.get(r.name).copied().unwrap_or(r.default);
                 let tag = match v {
@@ -252,7 +262,10 @@ impl GameRules {
         let Some(data) = root.get("data") else {
             return rules;
         };
-        for r in rules.available_rules() {
+        for r in rules
+            .available_rules()
+            .chain(std::iter::once(&ALTERNATE_CURRENT))
+        {
             let key = format!("minecraft:{}", r.name);
             let value = data.get(&key).or_else(|| data.get(r.name));
             match (r.default, value) {

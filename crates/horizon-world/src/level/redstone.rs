@@ -17,6 +17,7 @@ use horizon_core::{
     ticks::TickPriority,
 };
 
+pub(crate) mod alternate;
 mod experimental;
 
 const SIGNAL_ORDER: [Direction; 6] = [
@@ -443,6 +444,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         orientation: Option<super::orientation::Orientation>,
         update_shape: bool,
     ) {
+        if self.alternate_current() {
+            return;
+        }
         if self.level.redstone_experiments() {
             self.experimental_wire_update(pos, orientation, update_shape);
             return;

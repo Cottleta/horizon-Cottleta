@@ -98,6 +98,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 Class::RedstoneLamp => self.lamp_neighbor_changed(pos, state),
                 Class::RedstoneTorch => self.torch_neighbor_changed(pos, state),
                 Class::RedstoneWire => {
+                    if self.alternate_current() {
+                        self.alternate_wire_updated(pos, state, orientation);
+                        return;
+                    }
                     if self.level.redstone_experiments() && changed == b.named.redstone_wire {
                         return;
                     }
@@ -210,6 +214,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 Class::RedstoneTorch => self.torch_notify_neighbors(pos, state),
                 Class::RedstoneWire => {
                     if !same {
+                        if self.alternate_current() {
+                            self.alternate_wire_added(pos, state);
+                        }
                         self.wire_update_power(pos, state, None, true);
                         for direction in [Direction::Up, Direction::Down] {
                             self.update_neighbors_at(rel(pos, direction), block);
@@ -381,6 +388,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     if !moved {
                         for direction in Direction::ALL {
                             self.update_neighbors_at(rel(pos, direction), block);
+                        }
+                        if self.alternate_current() {
+                            self.alternate_wire_removed(pos, state);
                         }
                         self.wire_update_power(pos, state, None, false);
                         self.wire_update_neighbors_of_neighboring_wires(pos);

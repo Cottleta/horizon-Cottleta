@@ -188,6 +188,8 @@ pub struct GameRules {
     /// `fire_spread_radius_around_player`: -1 spreads everywhere.
     pub fire_spread_radius_around_player: i32,
     pub spread_vines: bool,
+    /// Horizon's own: wires update as in the Alternate Current mod (`redstone/alternate.rs`).
+    pub alternate_current: bool,
 }
 impl Default for GameRules {
     fn default() -> Self {
@@ -202,6 +204,7 @@ impl Default for GameRules {
             spawn_monsters: true,
             fire_spread_radius_around_player: 128,
             spread_vines: true,
+            alternate_current: false,
         }
     }
 }
@@ -1264,6 +1267,8 @@ pub(crate) struct Sim<'a, L: LevelAccess + ?Sized> {
     /// `RedstoneWireBlock.shouldSignal` is false while a wire samples its
     /// neighbours (`getBlockSignal`).
     pub wire_signal_off: std::cell::Cell<bool>,
+    /// The wire handler of the `alternate_current` rule, once a wire needed it.
+    pub alternate: Option<Box<redstone::alternate::WireHandler>>,
 }
 impl Behaviours {
     pub(crate) fn sim<'a, L: LevelAccess + ?Sized>(
@@ -1276,6 +1281,7 @@ impl Behaviours {
             level,
             ticks,
             wire_signal_off: std::cell::Cell::new(false),
+            alternate: None,
         }
     }
 }

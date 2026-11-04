@@ -41,6 +41,8 @@ fn fixture() -> Option<&'static Fixture> {
 }
 
 pub(crate) struct TestLevel {
+    alternate_current: bool,
+    neighbor_updates: std::cell::Cell<u64>,
     blocks: HashMap<BlockPos, BlockStateId>,
     air: BlockStateId,
     random: LegacyRandom,
@@ -72,6 +74,8 @@ pub(crate) struct TestLevel {
 impl TestLevel {
     fn new(b: &Behaviours) -> Self {
         Self {
+            alternate_current: false,
+            neighbor_updates: std::cell::Cell::new(0),
             blocks: HashMap::new(),
             air: b.air(),
             random: LegacyRandom::new(42),
@@ -92,6 +96,21 @@ impl TestLevel {
     }
 }
 impl LevelAccess for TestLevel {
+    fn game_rules(&self) -> GameRules {
+        GameRules {
+            alternate_current: self.alternate_current,
+            ..GameRules::default()
+        }
+    }
+    fn observe_neighbor_changed(
+        &self,
+        _pos: BlockPos,
+        _state: BlockStateId,
+        _changed: BlockId,
+        _moved: bool,
+    ) {
+        self.neighbor_updates.set(self.neighbor_updates.get() + 1);
+    }
     fn recheck_container_openers(&mut self, pos: BlockPos) -> Option<(i32, i32)> {
         self.opener_rechecks.push(pos);
         self.openers.get(&pos).copied()
@@ -3656,4 +3675,161 @@ fn a_level_can_answer_what_makes_a_campfire_signal() {
     assert_eq!(w.prop(campfire, "signal_fire"), "true");
     w.set(ground, hay);
     assert_eq!(w.prop(campfire, "signal_fire"), "false");
+}
+
+/// One circuit's wires, sources and lamps on a stone floor, built the same in any world.
+fn alternate_circuit(w: &mut World<'_>, seed: u64) -> Vec<BlockPos> {
+    let mut next = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut roll = move |n: u64| {
+        next ^= next << 13;
+        next ^= next >> 7;
+        next ^= next << 17;
+        next % n
+    };
+    w.floor(0, 16, "stone");
+    // As placed by a player: every side open until its neighbors say otherwise.
+    let wire = w.id(
+        "redstone_wire",
+        &[
+            ("north", "side"),
+            ("east", "side"),
+            ("south", "side"),
+            ("west", "side"),
+        ],
+    );
+    let block = w.id("redstone_block", &[]);
+    let stone = w.id("stone", &[]);
+    let lamp = w.id("redstone_lamp", &[]);
+    let mut wires = Vec::new();
+    for x in -8..8 {
+        for z in -8..8 {
+            let pos = BlockPos::new(x, 1, z);
+            match roll(10) {
+                0..=5 => {
+                    let placed = w
+                        .f
+                        .behaviours
+                        .sim(&mut w.level, &mut w.ticks)
+                        .wire_connection_state(wire, pos);
+                    w.set(pos, placed);
+                    wires.push(pos);
+                }
+                6 => {
+                    w.set(pos, lamp);
+                    wires.push(pos);
+                }
+                7 => {
+                    // A step up, wire on top.
+                    w.set(pos, stone);
+                    let top = BlockPos::new(x, 2, z);
+                    let placed = w
+                        .f
+                        .behaviours
+                        .sim(&mut w.level, &mut w.ticks)
+                        .wire_connection_state(wire, top);
+                    w.set(top, placed);
+                    wires.push(top);
+                }
+                _ => {}
+            }
+        }
+    }
+    // Sources come and go after the wires exist.
+    let sources: Vec<BlockPos> = (0..6)
+        .map(|_| BlockPos::new(roll(16) as i32 - 8, 3, roll(16) as i32 - 8))
+        .collect();
+    for at in &sources {
+        w.set(*at, block);
+    }
+    for at in &sources[..3] {
+        w.set(*at, w.b().air());
+    }
+    wires
+}
+
+#[test]
+fn alternate_current_powers_a_line_and_leaves_vanilla_alone_when_off() {
+    let mut w = world!();
+    w.level.alternate_current = true;
+    w.floor(0, 20, "stone");
+    let wire = w.id("redstone_wire", &[]);
+    let lamp = w.id("redstone_lamp", &[]);
+    let block = w.id("redstone_block", &[]);
+    for x in 1..=5 {
+        w.set(BlockPos::new(x, 1, 0), wire);
+    }
+    w.set(BlockPos::new(6, 1, 0), lamp);
+    w.set(BlockPos::new(0, 1, 0), block);
+    assert_eq!(w.prop(BlockPos::new(1, 1, 0), "power"), "15");
+    assert_eq!(w.prop(BlockPos::new(5, 1, 0), "power"), "11");
+    assert_eq!(w.prop(BlockPos::new(6, 1, 0), "lit"), "true");
+    w.set(BlockPos::new(0, 1, 0), w.b().air());
+    assert_eq!(w.prop(BlockPos::new(1, 1, 0), "power"), "0");
+    assert_eq!(w.prop(BlockPos::new(5, 1, 0), "power"), "0");
+}
+
+#[test]
+fn alternate_current_cuts_a_line_and_breaks_wire_that_lost_its_floor() {
+    let mut w = world!();
+    w.level.alternate_current = true;
+    w.floor(0, 20, "stone");
+    let wire = w.id("redstone_wire", &[]);
+    let block = w.id("redstone_block", &[]);
+    for x in 1..=6 {
+        w.set(BlockPos::new(x, 1, 0), wire);
+    }
+    w.set(BlockPos::new(0, 1, 0), block);
+    assert_eq!(w.prop(BlockPos::new(6, 1, 0), "power"), "10");
+    // Taking a wire out cuts what follows it off.
+    w.set(BlockPos::new(3, 1, 0), w.b().air());
+    assert_eq!(w.prop(BlockPos::new(2, 1, 0), "power"), "14");
+    assert_eq!(w.prop(BlockPos::new(4, 1, 0), "power"), "0");
+    // Without the block under it, a wire can't stay.
+    w.set(BlockPos::new(5, 0, 0), w.b().air());
+    assert_eq!(w.get(BlockPos::new(5, 1, 0)), w.b().air());
+}
+
+#[test]
+fn alternate_current_ends_where_vanilla_ends() {
+    for seed in 1..=40 {
+        let mut vanilla = world!();
+        let mut alternate = world!();
+        alternate.level.alternate_current = true;
+        let wires = alternate_circuit(&mut vanilla, seed);
+        assert_eq!(wires, alternate_circuit(&mut alternate, seed));
+        for pos in wires {
+            assert_eq!(
+                vanilla.get(pos),
+                alternate.get(pos),
+                "seed {seed} at {pos:?}: {} vs {}",
+                vanilla.name(pos),
+                alternate.name(pos),
+            );
+        }
+    }
+}
+
+#[test]
+fn alternate_current_does_fewer_updates_than_vanilla() {
+    fn updates(on: bool, f: &Fixture) -> u64 {
+        let mut w = World::new(f);
+        w.level.alternate_current = on;
+        w.floor(0, 40, "stone");
+        let wire = w.id("redstone_wire", &[]);
+        let block = w.id("redstone_block", &[]);
+        for x in 1..=15 {
+            w.set(BlockPos::new(x, 1, 0), wire);
+        }
+        let before = w.level.neighbor_updates.get();
+        for _ in 0..5 {
+            w.set(BlockPos::new(0, 1, 0), block);
+            w.set(BlockPos::new(0, 1, 0), w.b().air());
+        }
+        w.level.neighbor_updates.get() - before
+    }
+    let Some(f) = fixture() else {
+        return;
+    };
+    let (vanilla, alternate) = (updates(false, f), updates(true, f));
+    assert!(alternate * 2 < vanilla, "{alternate} vs {vanilla}");
 }

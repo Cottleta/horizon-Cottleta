@@ -288,6 +288,41 @@ impl Game<'_> {
         }
         hits as f32 / count as f32
     }
+    /// The `fast_tnt` rule's exposure: one ray, from the middle of the box, says all or nothing.
+    fn seen_at_all(&self, center: [f64; 3], min: [f64; 3], max: [f64; 3]) -> f32 {
+        let mut rays = ColliderRays {
+            scene: SceneCollisions {
+                world: &self.world,
+                binding: self.collision,
+                subject: None,
+            },
+            context: CollisionContext::for_entity(
+                CollisionEntity {
+                    identity: EntityIdentity(0),
+                    y: min[1],
+                    descending: false,
+                    main_hand: Some(CollisionItem::EMPTY),
+                },
+                false,
+            ),
+        };
+        let from = Vec3::new(
+            (min[0] + max[0]) / 2.0,
+            (min[1] + max[1]) / 2.0,
+            (min[2] + max[2]) / 2.0,
+        );
+        let to = Vec3::new(center[0], center[1], center[2]);
+        let clear = clip_world(
+            &mut rays,
+            from,
+            to,
+            RayBlockMode::Collider,
+            RayFluidMode::None,
+            4096,
+        )
+        .is_ok_and(|r| r.miss);
+        f32::from(u8::from(clear))
+    }
     /// `ServerExplosion.calculateExplodedPositions`; `resists` overrides one
     /// block's resistance (`ExplosionDamageCalculator.getBlockExplosionResistance`).
     fn exploded_positions(
@@ -538,7 +573,11 @@ impl Game<'_> {
         }
         let b = entity.explosion_box();
         let (lo, hi) = (b.min_position(), b.max_position());
-        let exposure = self.seen_percent(center, [lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]);
+        let exposure = if self.ui.rules.bool("fast_tnt") {
+            self.seen_at_all(center, [lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z])
+        } else {
+            self.seen_percent(center, [lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z])
+        };
         let dir = blast_direction(
             center,
             [feet.x, feet.y + entity.explosion_eye_height(), feet.z],

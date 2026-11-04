@@ -129,9 +129,13 @@ pub const RULES: &[Rule] = &[
 pub const MAX_MINECART_SPEED: Rule = i("max_minecart_speed", "misc", 8, 1, 1000);
 pub const MINECART_IMPROVEMENTS: &str = "minecraft:minecart_improvements";
 
-/// Horizon's own, for `/gamerule`: wires update as in the Alternate Current mod, off by default.
-/// Left out of the vanilla list and, while off, of the saved file.
-pub const ALTERNATE_CURRENT: Rule = b("alternate_current", "updates", false);
+/// Horizon's own, for `/gamerule`, off by default, left out of the vanilla list and, while off, of
+/// the saved file. `alternate_current`: wires update as in the Alternate Current mod.
+/// `fast_tnt`: a blast checks how exposed an entity other than a player is with one ray.
+pub const OWN_RULES: [Rule; 2] = [
+    b("alternate_current", "updates", false),
+    b("fast_tnt", "misc", false),
+];
 
 pub fn available_rules(minecart_improvements: bool) -> impl Iterator<Item = &'static Rule> {
     RULES
@@ -142,7 +146,7 @@ pub fn available_rules(minecart_improvements: bool) -> impl Iterator<Item = &'st
 pub fn rule(name: &str) -> Option<&'static Rule> {
     let name = name.strip_prefix("minecraft:").unwrap_or(name);
     available_rules(true)
-        .chain(std::iter::once(&ALTERNATE_CURRENT))
+        .chain(&OWN_RULES)
         .find(|r| r.name == name)
 }
 
@@ -231,8 +235,9 @@ impl GameRules {
         let data: Vec<(horizon_world::nbt::JavaString, Tag)> = self
             .available_rules()
             .chain(
-                (self.values.get(ALTERNATE_CURRENT.name) == Some(&Value::Bool(true)))
-                    .then_some(&ALTERNATE_CURRENT),
+                OWN_RULES
+                    .iter()
+                    .filter(|r| self.values.get(r.name) == Some(&Value::Bool(true))),
             )
             .map(|r| {
                 let v = self.values.get(r.name).copied().unwrap_or(r.default);
@@ -262,10 +267,7 @@ impl GameRules {
         let Some(data) = root.get("data") else {
             return rules;
         };
-        for r in rules
-            .available_rules()
-            .chain(std::iter::once(&ALTERNATE_CURRENT))
-        {
+        for r in rules.available_rules().chain(&OWN_RULES) {
             let key = format!("minecraft:{}", r.name);
             let value = data.get(&key).or_else(|| data.get(r.name));
             match (r.default, value) {

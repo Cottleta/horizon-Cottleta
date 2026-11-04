@@ -296,6 +296,52 @@ impl FarDetail {
     }
 }
 
+/// What far terrain's surface is made of. Slopes join neighboring cells into one surface, with
+/// no steps or the brown stripes on their walls, at about the same cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FarShape {
+    #[default]
+    Blocks,
+    SlopesFar,
+    SlopesMid,
+    SlopesAll,
+}
+impl FarShape {
+    pub fn name(self) -> &'static str {
+        match self {
+            FarShape::Blocks => "blocks",
+            FarShape::SlopesFar => "slopes-far",
+            FarShape::SlopesMid => "slopes-mid",
+            FarShape::SlopesAll => "slopes-all",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            FarShape::Blocks => "Blocks",
+            FarShape::SlopesFar => "Slopes, Far",
+            FarShape::SlopesMid => "Slopes, Mid",
+            FarShape::SlopesAll => "Slopes, All",
+        }
+    }
+    /// The narrowest cell drawn as a slope, in blocks; 0 for none.
+    pub fn min_stride(self) -> i32 {
+        match self {
+            FarShape::Blocks => 0,
+            FarShape::SlopesFar => 4,
+            FarShape::SlopesMid => 2,
+            FarShape::SlopesAll => 1,
+        }
+    }
+    fn parse(s: &str) -> Self {
+        match s {
+            "slopes-far" => FarShape::SlopesFar,
+            "slopes-mid" => FarShape::SlopesMid,
+            "slopes-all" => FarShape::SlopesAll,
+            _ => FarShape::Blocks,
+        }
+    }
+}
+
 /// Frame generation: a frame made between each two real ones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FrameGeneration {
@@ -555,6 +601,7 @@ pub struct Graphics {
     pub lod_distance: u32,
     /// How finely far terrain is drawn; Full unless the player picks Reduced.
     pub far_detail: FarDetail,
+    pub far_shape: FarShape,
     /// Far terrain from servers' BlueMap web maps; no server has one unless
     /// the player names it (`blueMap:` lines) or turns on auto-detect.
     pub blue_map: crate::bluemap::Settings,
@@ -662,6 +709,7 @@ impl Default for Graphics {
             preset: Preset::Custom,
             lod_distance: 0,
             far_detail: FarDetail::Full,
+            far_shape: FarShape::Blocks,
             blue_map: crate::bluemap::Settings::default(),
             cave_culling: true,
             entity_culling: EntityCullingMode::Off,
@@ -765,6 +813,7 @@ impl Graphics {
                     g.lod_distance = number(g.lod_distance).min(crate::lod::MAX_CHUNKS)
                 }
                 "farDetail" => g.far_detail = FarDetail::parse(value),
+                "farShape" => g.far_shape = FarShape::parse(value),
                 "blueMapRadius" => {
                     if let Some(radius) = crate::bluemap::Settings::parse_radius(value) {
                         g.blue_map.radius = radius;
@@ -865,10 +914,11 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\ndynamicHud:{}\nautoTargetFps:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\nfarShape:{}\ncaveCulling:{}\nentityCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\ndynamicHud:{}\nautoTargetFps:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
+            self.far_shape.name(),
             bool_text(self.cave_culling),
             self.entity_culling.name(),
             self.leaf_culling.name(),
@@ -1062,6 +1112,7 @@ mod tests {
             preset: Preset::Balanced,
             lod_distance: 256,
             far_detail: FarDetail::Reduced,
+            far_shape: FarShape::Blocks,
             blue_map: crate::bluemap::Settings {
                 radius: 40,
                 auto_detect: true,

@@ -6,7 +6,7 @@
 //! looks comes from `graphics_style`.
 use crate::{
     graphics::{
-        EntityCullingMode, FarDetail, FrameGeneration, GraphicsApi, LeafCullingMode, Overlay,
+        EntityCullingMode, FarDetail, FarShape, FrameGeneration, GraphicsApi, LeafCullingMode, Overlay,
         Pacing, PresentMode, Preset, Upscaling,
     },
     graphics_style::{self as style, Cost},
@@ -67,6 +67,7 @@ pub enum H {
     Preset,
     LodDistance,
     FarDetail,
+    FarShape,
     BlueMapAutoDetect,
     BlueMapRadius,
     CaveCulling,
@@ -188,6 +189,11 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                             "Coarse distant terrain in local worlds. Integrated GPUs stop at 128 chunks.",
                         ),
                         h(H::FarDetail, Medium, far),
+                        h(
+                            H::FarShape,
+                            None,
+                            "Slopes join far terrain's cells: no stair steps, softer hills.",
+                        ),
                         h(
                             H::BlueMapAutoDetect,
                             None,
@@ -783,6 +789,7 @@ impl H {
                 n => labelled("LOD Distance", lang::tr("%s chunks", &[&n])),
             },
             H::FarDetail => labelled("Far Detail", g.far_detail.label()),
+            H::FarShape => labelled("Far Shape", g.far_shape.label()),
             H::BlueMapAutoDetect => labelled("Find BlueMap", on_off(g.blue_map.auto_detect)),
             H::BlueMapRadius => labelled(
                 "BlueMap Radius",
@@ -953,6 +960,18 @@ impl H {
         match self {
             H::FarDetail => {
                 g.far_detail = step(&[FarDetail::Full, FarDetail::Reduced], g.far_detail, back)
+            }
+            H::FarShape => {
+                g.far_shape = step(
+                    &[
+                        FarShape::Blocks,
+                        FarShape::SlopesFar,
+                        FarShape::SlopesMid,
+                        FarShape::SlopesAll,
+                    ],
+                    g.far_shape,
+                    back,
+                )
             }
             H::BlueMapAutoDetect => g.blue_map.auto_detect = !g.blue_map.auto_detect,
             H::BlueMapRadius => {

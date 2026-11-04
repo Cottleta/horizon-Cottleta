@@ -14302,6 +14302,12 @@ impl Game<'_> {
         }
     }
     fn apply_settings(&mut self) {
+        // Far terrain's tiles are meshed in the shape they have: start them over.
+        let slopes = self.settings.horizon.far_shape.min_stride();
+        if horizon_client::lod::slope_stride() != slopes {
+            horizon_client::lod::set_slope_stride(slopes);
+            self.clear_lod();
+        }
         // LocalPlayer.refreshChatAbilities: the chat shows what the Chat option allows.
         let abilities = self.chat_abilities();
         self.ui.chat.set_abilities(&self.gui.atlas.font, abilities);

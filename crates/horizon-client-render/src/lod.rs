@@ -21,6 +21,15 @@ use std::{
 };
 
 const CELLS: usize = 16;
+/// Far terrain's cells this wide and wider are drawn as slopes; 0 for square columns
+/// (`graphics::FarShape`).
+static SLOPE_STRIDE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+pub fn slope_stride() -> i32 {
+    SLOPE_STRIDE.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn set_slope_stride(stride: i32) {
+    SLOPE_STRIDE.store(stride, std::sync::atomic::Ordering::Relaxed);
+}
 const MAX_SAVED: usize = 1024;
 /// How many resident chunks may wait for the worker's summary at once
 /// (`Lod::observing`).

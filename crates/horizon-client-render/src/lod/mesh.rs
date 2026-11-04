@@ -336,6 +336,53 @@ fn mesh_columns_with_neighbors(
         material,
     )
 }
+/// How far a slope's skirt reaches down at a tile's edge, in cells, to close any crack.
+const SKIRT_CELLS: f32 = 2.0;
+/// A slope's colour by how steep it is: hills keep their shape without walls to shade them.
+/// The top byte holds flags, the others the colour.
+fn slope_shade(color: u32, normal_y: f32) -> u32 {
+    let shade = 0.6 + 0.4 * normal_y.clamp(0.0, 1.0);
+    let channel = |shift: u32| {
+        let value = ((color >> shift) & 0xff) as f32;
+        ((value * shade) as u32) << shift
+    };
+    color & 0xff00_0000 | channel(0) | channel(8) | channel(16)
+}
+/// A quad at these points, winding as given, in each of the material's paints.
+fn emit_slope(
+    mesh: &mut SectionMesh,
+    material: Material,
+    points: [[f32; 3]; 4],
+    uvs: [[f32; 2]; 4],
+    normal_y: f32,
+    extent: f32,
+) {
+    let scale = (MAX_FACE / extent).min(1.0);
+    let corner = [0, 1].map(|i| {
+        uvs.iter()
+            .map(|uv| uv[i])
+            .fold(f32::INFINITY, f32::min)
+            .floor()
+    });
+    for paint in material.faces.into_iter().flatten() {
+        mesh.note_sprite_layer(paint.layer);
+        let color = slope_shade(paint.color, normal_y);
+        let out = if paint.translucent {
+            &mut mesh.translucent
+        } else {
+            &mut mesh.solid
+        };
+        out.extend(points.into_iter().zip(uvs).map(|(pos, uv)| {
+            TerrainVertex::tiled(
+                pos,
+                [(uv[0] - corner[0]) * scale, (uv[1] - corner[1]) * scale],
+                paint.layer,
+                color,
+                paint.light,
+            )
+        }));
+    }
+}
 /// From this tile level up a cell is 64 blocks wide or more: the strata
 /// inside the ground cannot be told apart, so a column is its surface.
 const HEIGHTMAP_LEVEL: u8 = 6;
@@ -499,6 +546,47 @@ fn mesh_columns_with_edges(
         })
         .collect();
     let mut faces = Faces::new();
+    let mut slope_mesh = SectionMesh::default();
+    // The top of a cell, inside this tile or along its edges; and whether that top is fluid.
+    let top_at = |cx: i32, cz: i32| -> Option<(f32, bool)> {
+        let top = |segments: &[Segment<'_>]| {
+            segments
+                .last()
+                .map(|t| (t.max, t.material.fluid != 0))
+        };
+        let inside = |v: i32| (0..CELLS as i32).contains(&v);
+        if inside(cx) && inside(cz) {
+            return top(&prepared[cz as usize * CELLS + cx as usize]);
+        }
+        let (side, row) = match (cx, cz) {
+            (-1, z) if inside(z) => (0, z),
+            (x, _) if x == CELLS as i32 && inside(cz) => (1, cz),
+            (x, -1) if inside(x) => (2, x),
+            (x, z) if z == CELLS as i32 && inside(x) => (3, x),
+            _ => return None,
+        };
+        let at = row * stride + stride / 2;
+        let found = neighbors[side]
+            .iter()
+            .enumerate()
+            .find(|(_, edge)| !edge.unknown && edge.start <= at && at < edge.end);
+        found.and_then(|(i, _)| top(&prepared[edge_offsets[side] + i]))
+    };
+    // A corner's height: the tops around it, or the water's, so land meets water at its edge.
+    let corner_at = |cx: i32, cz: i32, own: f32| -> f32 {
+        let (mut sum, mut count, mut water) = (0.0, 0.0, None);
+        for (x, z) in [(cx - 1, cz - 1), (cx, cz - 1), (cx - 1, cz), (cx, cz)] {
+            match top_at(x, z) {
+                Some((height, true)) => water = Some(height),
+                Some((height, false)) => {
+                    sum += height;
+                    count += 1.0;
+                }
+                None => {}
+            }
+        }
+        water.unwrap_or(if count > 0.0 { sum / count } else { own })
+    };
     let finer_keys: FxHashSet<_> = finer.iter().copied().collect();
     let mut finer_levels: Vec<_> = finer.iter().map(|key| key.level).collect();
     finer_levels.sort_unstable();
@@ -530,8 +618,62 @@ fn mesh_columns_with_edges(
                         (z as i32 * stride + dz) as f32,
                     );
                     let (x1, z1) = (x0 + step as f32, z0 + step as f32);
-                    for segment in column {
-                        if segment.top {
+                    let min_stride = super::slope_stride();
+                    let sloped = min_stride > 0
+                        && stride >= min_stride
+                        && step == stride
+                        && column
+                            .last()
+                            .is_some_and(|top| top.top && top.material.fluid == 0);
+                    let slope_corners = sloped.then(|| {
+                        let own = column.last().map_or(0.0, |top| top.max);
+                        let (cx, cz) = (x as i32, z as i32);
+                        [
+                            corner_at(cx, cz, own),
+                            corner_at(cx + 1, cz, own),
+                            corner_at(cx + 1, cz + 1, own),
+                            corner_at(cx, cz + 1, own),
+                        ]
+                    });
+                    for (segment_index, segment) in column.iter().enumerate() {
+                        let is_slope = slope_corners.is_some() && segment_index + 1 == column.len();
+                        if let (true, Some(corners)) = (is_slope, slope_corners) {
+                            let [a, b, c, d] = corners;
+                            if a == b && b == c && c == d {
+                                add_face(
+                                    &mut faces,
+                                    Direction::Up,
+                                    a,
+                                    Rect {
+                                        u0: x0,
+                                        v0: z0,
+                                        u1: x1,
+                                        v1: z1,
+                                    },
+                                    segment.material,
+                                );
+                            } else {
+                                let width = step as f32;
+                                let slope_x = ((b + c) - (a + d)) / (2.0 * width);
+                                let slope_z = ((c + d) - (a + b)) / (2.0 * width);
+                                let normal_y =
+                                    1.0 / (1.0 + slope_x * slope_x + slope_z * slope_z).sqrt();
+                                let points = [
+                                    [x0, d, z1],
+                                    [x1, c, z1],
+                                    [x1, b, z0],
+                                    [x0, a, z0],
+                                ];
+                                emit_slope(
+                                    &mut slope_mesh,
+                                    segment.material,
+                                    points,
+                                    points.map(|p| [p[0], -p[2]]),
+                                    normal_y,
+                                    width,
+                                );
+                            }
+                        } else if segment.top {
                             add_face(
                                 &mut faces,
                                 Direction::Up,
@@ -601,6 +743,53 @@ fn mesh_columns_with_edges(
                                 x1,
                             ),
                         ] {
+                            if let (true, Some([a, b, c, d])) = (is_slope, slope_corners) {
+                                // Inside a tile the corners are shared, so nothing shows
+                                // between cells. A tile's edge and the cut to nearer terrain
+                                // get a skirt under the slope instead of a wall.
+                                let inner = !edge
+                                    || ((0..CELLS as i32).contains(&nx)
+                                        && (0..CELLS as i32).contains(&nz));
+                                if inner && !is_covered(nw[0], nw[1]) {
+                                    continue;
+                                }
+                                let (h0, h1) = match direction {
+                                    Direction::West => (a, d),
+                                    Direction::East => (b, c),
+                                    Direction::North => (a, b),
+                                    _ => (d, c),
+                                };
+                                let low = if is_covered(nw[0], nw[1]) {
+                                    segment.min
+                                } else {
+                                    (h0.min(h1) - SKIRT_CELLS * stride as f32).max(segment.min)
+                                };
+                                let mut points = match direction {
+                                    Direction::North | Direction::South => [
+                                        [u0, h0, plane],
+                                        [u1, h1, plane],
+                                        [u1, low, plane],
+                                        [u0, low, plane],
+                                    ],
+                                    _ => [
+                                        [plane, h1, u1],
+                                        [plane, h0, u0],
+                                        [plane, low, u0],
+                                        [plane, low, u1],
+                                    ],
+                                };
+                                if matches!(direction, Direction::South | Direction::East) {
+                                    points.reverse();
+                                }
+                                let uvs = points.map(|p| match direction {
+                                    Direction::North | Direction::South => [p[0], -p[1]],
+                                    _ => [p[2], -p[1]],
+                                });
+                                let side = material(segment.span, direction, centre(z * CELLS + x));
+                                let extent = (u1 - u0).max(h0.max(h1) - low);
+                                emit_slope(&mut slope_mesh, side, points, uvs, 0.5, extent);
+                                continue;
+                            }
                             // Near meshes may have culled against the real neighbor.
                             // Keep a finite seal where their full-detail area begins:
                             // opaque only, as the near water carries on into the far
@@ -701,7 +890,7 @@ fn mesh_columns_with_edges(
             }
         }
     }
-    let mut mesh = SectionMesh::default();
+    let mut mesh = slope_mesh;
     for (key, mut rects) in faces {
         merge(&mut rects);
         for rect in rects {

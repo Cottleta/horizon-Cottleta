@@ -1576,7 +1576,7 @@ impl Game<'_> {
                 }
                 ok(json!({ "ok": true, "menu": self.title_value() }))
             }
-            "type" if self.title.is_some() => {
+            "type" if self.title.is_some() && self.screen != Screen::Options => {
                 // type [--field name|seed] [--replace] TEXT on the title screens.
                 let mut text = line
                     .trim_start()

@@ -475,6 +475,12 @@ impl Game<'_> {
                     )
                     .into());
                 }
+                if self.screen == Screen::Options {
+                    if arg(2)? != "up" {
+                        self.options_key(key, None)?;
+                    }
+                    return ok();
+                }
                 // The command confirmation takes the keys; none go past it.
                 if self.command_prompt.is_some() {
                     if arg(2)? != "up" {
@@ -865,6 +871,13 @@ impl Game<'_> {
                     .unwrap_or("");
                 // A server's dialog, in configuration too.
                 if self.dialog_type(text) {
+                    return ok();
+                }
+                // The options screens' text boxes, as the window's key events reach them.
+                if self.screen == Screen::Options {
+                    for c in text.chars() {
+                        self.options_key(KeyCode::F35, Some(&c.to_string()))?;
+                    }
                     return ok();
                 }
                 self.require_world()?;

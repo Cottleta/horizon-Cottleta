@@ -2191,7 +2191,8 @@ impl GraphicsUi {
         {
             self.focus = Some(Target::FpsBox);
             self.fps_box.reset_blink();
-            self.fps_box.move_cursor_to_end(false);
+            // Typing replaces the number, as the box shows one even when nobody has set it.
+            crate::clipboard::Editable::select_all(&mut self.fps_box);
             return Vec::new();
         }
         self.focus = Some(Target::Item(item));
@@ -2929,6 +2930,11 @@ mod tests {
         ui.fps_box.set_value("1");
         ui.commit_fps_box(&mut s);
         assert_eq!(s.horizon.auto_target_fps, crate::auto_settings::MIN_TARGET);
+        // Clicked, the shown number is replaced by what's typed.
+        ui.fps_box.set_value("245");
+        crate::clipboard::Editable::select_all(&mut ui.fps_box);
+        ui.type_text("500");
+        assert_eq!(ui.fps_box.value, "500");
     }
 
     #[test]

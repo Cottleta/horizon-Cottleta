@@ -614,25 +614,39 @@ impl Game<'_> {
                 background,
                 &mut patches,
                 |vertices, behind| {
+                    // Only these stores for every corner of every tag, every frame: the rest
+                    // of a vertex is the same throughout.
                     let quads = vertices.as_chunks::<6>().0;
-                    out.reserve(quads.len() * 4);
-                    out.extend(quads.iter().enumerate().flat_map(|(i, quad)| {
-                        let shift = if i * 6 < behind {
-                            away
-                        } else {
-                            glam::Vec3::ZERO
-                        };
+                    let template = Vertex {
+                        normal: [0; 4],
+                        pos: [0.0; 3],
+                        uv: [0.0; 2],
+                        layer: text_layer,
+                        color: 0,
+                        light,
+                        glint_uv: [0.0, 0.0],
+                    };
+                    let start = out.len();
+                    out.resize(start + quads.len() * 4, template);
+                    let (o, r, u) = (
+                        glam::Vec3A::from(o),
+                        glam::Vec3A::from(r),
+                        glam::Vec3A::from(u),
+                    );
+                    let away = glam::Vec3A::from(away);
+                    let corners = out[start..].as_chunks_mut::<4>().0;
+                    for (i, (quad, corners)) in quads.iter().zip(corners).enumerate() {
+                        let shift = if i * 6 < behind { away } else { glam::Vec3A::ZERO };
                         // The corners from the bottom left, as the world draws quads.
-                        [&quad[5], &quad[2], &quad[1], &quad[0]].map(|v| Vertex {
-                            normal: [0; 4],
-                            pos: (at(v.pos[0], v.pos[1]) + shift).to_array(),
-                            uv: v.uv,
-                            layer: text_layer,
-                            color: v.color,
-                            light,
-                            glint_uv: [0.0, 0.0],
-                        })
-                    }));
+                        for (corner, v) in corners
+                            .iter_mut()
+                            .zip([&quad[5], &quad[2], &quad[1], &quad[0]])
+                        {
+                            corner.pos = (o + r * v.pos[0] - u * v.pos[1] + shift).to_array();
+                            corner.uv = v.uv;
+                            corner.color = v.color;
+                        }
+                    }
                 },
             );
             if let Some(style) = style.filter(|_| n == last) {

@@ -7646,7 +7646,7 @@ impl Renderer {
                 Some(_) => 1,
             };
             self.translucent_draws
-                .sort_unstable_by_key(|&(distance, instance, ..)| {
+                .sort_by_cached_key(|&(distance, instance, ..)| {
                     (
                         tier(instance),
                         std::cmp::Reverse(distance),

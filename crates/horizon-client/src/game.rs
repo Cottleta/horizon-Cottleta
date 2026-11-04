@@ -447,6 +447,8 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
+/// How long frames may run before the window system is read again: input waits at most this.
+const WINDOW_CHECK_INTERVAL: Duration = Duration::from_micros(500);
 /// The time a frame spends uploading chunk meshes when the player set no
 /// Chunk Updates or Upload Budget: a burst past it waits for the next frames.
 const AUTO_UPLOAD_TIME: Duration = Duration::from_millis(2);
@@ -2451,6 +2453,8 @@ struct Game<'a> {
     keyboard_mouse: bool,
     /// Offscreen rendering into a visible splitscreen window still accepts native input.
     split_window: bool,
+    /// Between frames of `frames_until_window_check`: the next one needs no redraw request.
+    next_frame_in_place: bool,
     /// This view's corner in its shared window; cursor warps include the offset.
     view_at: [u32; 2],
     /// Splitscreen: what it draws over this player's view (its badge, questions, notices).
@@ -17258,9 +17262,14 @@ impl ApplicationHandler for Game<'_> {
         } else {
             None
         };
+        let redraw = matches!(event, WindowEvent::RedrawRequested);
+        let started = Instant::now();
         self.handle_window_event(event_loop, id, event, input_trace::InputOrigin::User);
         if let Some((event, modifiers)) = key {
             self.native_input_key(&event, modifiers);
+        }
+        if redraw {
+            self.frames_until_window_check(event_loop, id, started);
         }
     }
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
@@ -18847,6 +18856,39 @@ impl Game<'_> {
     }
     /// winit's `about_to_wait`: what happens between frames (stop requests, the closing
     /// save, world entry, the control socket, pads), then the next frame.
+    /// More frames before the window system is read again, while the frame rate is so high
+    /// that reading it each frame costs more than it gives: about nine system calls a frame,
+    /// for input no faster than the mouse sends it. A slower frame ends this at once.
+    fn frames_until_window_check(
+        &mut self,
+        event_loop: &dyn EventLoopCtl,
+        id: WindowId,
+        started: Instant,
+    ) {
+        if self.window.is_none()
+            || self.options.offscreen
+            || self.options.split_guest
+            || self.split_window
+        {
+            return;
+        }
+        while self.frame_drawn
+            && self.focused
+            && self.error.is_none()
+            && self.pending_save.is_none()
+            && started.elapsed() < WINDOW_CHECK_INTERVAL
+        {
+            self.next_frame_in_place = true;
+            self.idle(event_loop);
+            self.next_frame_in_place = false;
+            self.handle_window_event(
+                event_loop,
+                id,
+                WindowEvent::RedrawRequested,
+                input_trace::InputOrigin::Game,
+            );
+        }
+    }
     pub(super) fn idle(&mut self, event_loop: &dyn EventLoopCtl) {
         // A splitscreen player's game has nothing to save: P1's shuts the process down.
         if horizon_threads::stop_requests() > 0
@@ -18916,7 +18958,7 @@ impl Game<'_> {
                     WindowEvent::RedrawRequested,
                     input_trace::InputOrigin::Game,
                 );
-            } else {
+            } else if !self.next_frame_in_place {
                 w.request_redraw();
             }
         } else if self.options.headless {
@@ -19089,6 +19131,7 @@ impl<'a> Game<'a> {
             regrab_on_refocus: false,
             keyboard_mouse: true,
             split_window: false,
+            next_frame_in_place: false,
             view_at: [0, 0],
             split_hud: Default::default(),
             split_auth: None,

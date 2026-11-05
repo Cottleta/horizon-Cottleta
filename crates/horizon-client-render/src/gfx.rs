@@ -6662,8 +6662,13 @@ impl Renderer {
         // A frame that wasn't detached lands here. A detached one left nothing to land: it
         // needs nothing of the previous one, and its timer reads on the submit thread.
         self.land_frame();
-        if detached_frame && let Some(timer) = &mut self.gpu_timer {
-            timer.collect(&self.device, &mut self.gpu_times);
+        if detached_frame {
+            if let Some(timer) = &mut self.gpu_timer {
+                timer.collect(&self.device, &mut self.gpu_times);
+            }
+        } else {
+            // The window's image can't be acquired while a detached frame holds it.
+            self.queue.wait();
         }
         // Waiting for the previous frame (offscreen: at most two on the GPU), not work.
         let landed = landing.elapsed();

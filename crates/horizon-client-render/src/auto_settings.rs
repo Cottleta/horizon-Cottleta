@@ -274,6 +274,10 @@ fn parse_tested(text: &str) -> Option<[f32; LEVELS]> {
 }
 
 pub fn tested() -> Option<[f32; LEVELS]> {
+    // Tests don't go by this PC's results in the real game folder.
+    if cfg!(test) {
+        return None;
+    }
     let mut tested = TESTED.lock().unwrap_or_else(|e| e.into_inner());
     *tested.get_or_insert_with(|| {
         parse_tested(&std::fs::read_to_string(tested_file()).unwrap_or_default())

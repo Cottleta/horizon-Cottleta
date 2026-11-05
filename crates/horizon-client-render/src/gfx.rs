@@ -9616,39 +9616,58 @@ impl Renderer {
                     };
                     // The draw closure below borrows all of `self`, so the timer is taken out.
                     let mut own_timing = self.own_timing.take();
-                    oit.run(
-                        &mut encoder,
-                        world_view,
-                        world_depth,
-                        &|pass, stage| {
-                            pass.set_bind_group(0, &self.group, &[]);
-                            // Flat section draws take the flat pipelines.
-                            if let Some((flat, pipeline)) = flat.zip(oit.flat(stage)) {
-                                pass.set_pipeline(pipeline);
-                                flat.draw(
-                                    pass,
-                                    flat.translucent_calls(),
-                                    flat_vertices(&self.arena, self.translucent_arena.as_ref()),
+                    // Nothing see-through in view: its passes would leave the picture as it is.
+                    let nothing_to_blend = translucent_draws == 0
+                        && flat.is_none_or(|f| f.translucent_calls().is_empty())
+                        && text_quads == 0
+                        && crumbling_quads == 0
+                        && translucent_crumbling_quads == 0
+                        && water_mask_quads == 0
+                        && swirl_quads == 0
+                        && shadow_quads == 0
+                        && translucent_particle_quads == 0
+                        && translucent_item_quads == 0
+                        && oit_entity_quads == 0
+                        && additive_quads == 0
+                        && cloud_quads == 0
+                        && weather_quads == 0
+                        && frame.lightning.bolts.is_empty()
+                        && frame.border.is_none();
+                    if !nothing_to_blend {
+                        oit.run(
+                            &mut encoder,
+                            world_view,
+                            world_depth,
+                            &|pass, stage| {
+                                pass.set_bind_group(0, &self.group, &[]);
+                                // Flat section draws take the flat pipelines.
+                                if let Some((flat, pipeline)) = flat.zip(oit.flat(stage)) {
+                                    pass.set_pipeline(pipeline);
+                                    flat.draw(
+                                        pass,
+                                        flat.translucent_calls(),
+                                        flat_vertices(&self.arena, self.translucent_arena.as_ref()),
+                                    );
+                                    return;
+                                }
+                                pass.set_pipeline(oit.terrain(stage));
+                                pass.set_index_buffer(
+                                    self.indices.slice(..),
+                                    wgpu::IndexFormat::Uint32,
                                 );
-                                return;
-                            }
-                            pass.set_pipeline(oit.terrain(stage));
-                            pass.set_index_buffer(
-                                self.indices.slice(..),
-                                wgpu::IndexFormat::Uint32,
-                            );
-                            pass.set_vertex_buffer(1, self.instances.slice(..));
-                            self.draw_sections(
-                                pass,
-                                &self.indirect,
-                                0,
-                                solid_draws,
-                                translucent_draws,
-                            );
-                        },
-                        &extras,
-                        own_timing.as_mut(),
-                    );
+                                pass.set_vertex_buffer(1, self.instances.slice(..));
+                                self.draw_sections(
+                                    pass,
+                                    &self.indirect,
+                                    0,
+                                    solid_draws,
+                                    translucent_draws,
+                                );
+                            },
+                            &extras,
+                            own_timing.as_mut(),
+                        );
+                    }
                     self.own_timing = own_timing;
                     pass = world_pass_after_culling(
                         &mut encoder,

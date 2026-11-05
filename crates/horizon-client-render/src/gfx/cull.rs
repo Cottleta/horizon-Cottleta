@@ -163,6 +163,8 @@ pub struct Cull {
     results: wgpu::Buffer,
     readbacks: Vec<Readback>,
     next: usize,
+    /// When the device was last polled for results.
+    polled: std::time::Instant,
     current: Option<usize>,
     /// Per resident slot: whether the last result read back saw it; and per
     /// far tile's slot (`TILE`).
@@ -369,6 +371,7 @@ impl Cull {
                 })
                 .collect(),
             next: 0,
+            polled: std::time::Instant::now() - super::timing::POLL_EVERY,
             current: None,
             seen: Vec::new(),
             seen_tiles: Vec::new(),
@@ -382,7 +385,11 @@ impl Cull {
     /// Start a frame: take in the results that came back, and tell whether
     /// the frame culls.
     pub fn begin(&mut self, device: &wgpu::Device) -> bool {
-        let _ = device.poll(wgpu::PollType::Poll);
+        // Each poll is several system calls; results can wait this long at thousands of frames.
+        if self.polled.elapsed() >= super::timing::POLL_EVERY {
+            self.polled = std::time::Instant::now();
+            let _ = device.poll(wgpu::PollType::Poll);
+        }
         for i in 0..READBACKS {
             let r = &mut self.readbacks[(self.next + i) % READBACKS];
             if r.state.load(Ordering::Acquire) != MAPPED {

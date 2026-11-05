@@ -16,6 +16,9 @@ use std::sync::{
     atomic::{AtomicU8, Ordering},
 };
 
+/// How often a frame polls the device for finished readbacks.
+pub(super) const POLL_EVERY: std::time::Duration = std::time::Duration::from_micros(500);
+
 /// Frames in flight at once; on Metal a slot is busy for about five frames.
 const SLOTS: usize = 8;
 /// Each slot's timestamps have their own queries and resolve range.
@@ -45,6 +48,8 @@ pub struct GpuTimer {
     /// The slot this frame writes into, when one was free at `begin`.
     current: Option<usize>,
     next: usize,
+    /// When the device was last polled for readbacks.
+    polled: std::time::Instant,
     period_ns: f32,
     /// Timestamps between commands, or else these passes' boundaries.
     markers: Option<Markers>,
@@ -107,6 +112,7 @@ impl GpuTimer {
             slots,
             current: None,
             next: 0,
+            polled: std::time::Instant::now() - POLL_EVERY,
             period_ns: queue.get_timestamp_period(),
             markers: (!device
                 .features()
@@ -272,8 +278,11 @@ impl GpuTimer {
     }
     /// GPU milliseconds of frames whose timestamps have arrived, oldest first.
     pub fn collect(&mut self, device: &wgpu::Device, out: &mut Vec<f32>) {
-        if device.poll(wgpu::PollType::Poll).is_err() {
-            return;
+        if self.polled.elapsed() >= POLL_EVERY {
+            self.polled = std::time::Instant::now();
+            if device.poll(wgpu::PollType::Poll).is_err() {
+                return;
+            }
         }
         for i in 0..SLOTS {
             let slot = &self.slots[(self.next + i) % SLOTS];

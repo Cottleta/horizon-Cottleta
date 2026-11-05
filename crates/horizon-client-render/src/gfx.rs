@@ -6654,10 +6654,16 @@ impl Renderer {
             && self.screenshot.is_none()
             && self.first_frame != FirstFrame::Submit
             && self.config.present_mode != wgpu::PresentMode::Fifo
-            && self.frame_format == self.config.format;
-        // A detached frame needs nothing of the previous one until it is handed over.
-        if !detached_frame {
-            self.land_frame();
+            && self.frame_format == self.config.format
+            && !self.pass_timing
+            && self.pack_post.is_none()
+            && self.native.is_none()
+            && self.gpu_timer.as_ref().is_none_or(|t| !t.has_markers());
+        // A frame that wasn't detached lands here. A detached one left nothing to land: it
+        // needs nothing of the previous one, and its timer reads on the submit thread.
+        self.land_frame();
+        if detached_frame && let Some(timer) = &mut self.gpu_timer {
+            timer.collect(&self.device, &mut self.gpu_times);
         }
         // Waiting for the previous frame (offscreen: at most two on the GPU), not work.
         let landed = landing.elapsed();
@@ -10127,11 +10133,6 @@ impl Renderer {
             && (surface_frame.is_none() || self.config.present_mode != wgpu::PresentMode::Fifo)
         {
             let offscreen = surface_frame.is_none() && !detached_frame;
-            if detached_frame {
-                let waiting = Instant::now();
-                self.land_frame();
-                self.last_wait += waiting.elapsed();
-            }
             // Culling and a shader pack's centre depth read back as soon as the frame is
             // submitted, as here.
             let cull = self.cull.as_mut().and_then(|c| c.submitted());
@@ -10139,12 +10140,18 @@ impl Renderer {
                 Some((_, Some(post))) => post.submitted(),
                 _ => None,
             };
-            let after = (cull.is_some() || center.is_some()).then(|| {
+            let timer = detached_frame
+                .then(|| self.gpu_timer.as_mut().map(|t| t.submitted_later()))
+                .flatten();
+            let after = (cull.is_some() || center.is_some() || timer.is_some()).then(|| {
                 Box::new(move || {
                     if let Some(read) = cull {
                         read();
                     }
                     if let Some(read) = center {
+                        read();
+                    }
+                    if let Some(read) = timer {
                         read();
                     }
                 }) as submit::AfterSubmit
@@ -10160,7 +10167,7 @@ impl Renderer {
             };
             match self.queue.submit_later(job) {
                 Ok(()) => {
-                    self.deferred = Some(offscreen);
+                    self.deferred = (!detached_frame).then_some(offscreen);
                     // The frame's waits for the previous one on the submit thread.
                     self.last_wait += self.queue.take_waited();
                     // `started` came after the wait for the previous frame.

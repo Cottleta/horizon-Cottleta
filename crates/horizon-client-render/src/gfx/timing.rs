@@ -215,6 +215,35 @@ impl GpuTimer {
         self.slots[slot].state.store(RUNNING, Ordering::Release);
         self.resolved.push(slot);
     }
+    /// Whether `submitted` needs the queue: with markers it follows the GPU's progress.
+    pub fn has_markers(&self) -> bool {
+        self.markers.is_some()
+    }
+    /// `submitted` for a frame submitted on another thread, without markers: what to run
+    /// there after the submission. A buffer mapped before its frame is submitted fails it.
+    pub fn submitted_later(&mut self) -> impl FnOnce() + Send + 'static + use<> {
+        let reads: Vec<_> = self
+            .resolved
+            .drain(..)
+            .map(|slot| (self.slots[slot].buffer.clone(), self.slots[slot].state.clone()))
+            .collect();
+        if self.current.take().is_some() {
+            self.next = (self.next + 1) % SLOTS;
+        }
+        move || {
+            for (buffer, state) in reads {
+                state.store(PENDING, Ordering::Release);
+                buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        state.store(
+                            if result.is_ok() { MAPPED } else { FAILED },
+                            Ordering::Release,
+                        );
+                    });
+            }
+        }
+    }
     /// After the frame's submission: start reading back what it resolved,
     /// and with markers, wait for the GPU to finish the frame it timed.
     pub fn submitted(&mut self, queue: &wgpu::Queue) {

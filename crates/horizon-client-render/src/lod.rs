@@ -1024,6 +1024,9 @@ struct Shared {
     /// The latest chunk to summarize per column, queued as `Job::Observe`
     /// once: edits made before the worker gets to it are summarized once.
     observed: Mutex<FxHashMap<(i32, i32), Arc<Chunk>>>,
+    /// Each column's last summary, while `Lod::saved` keeps it: a chunk that summarizes the
+    /// same again needs no reductions. A lobby's chunks come back many times a second.
+    summaries: Mutex<FxHashMap<(i32, i32), Arc<[Column; 256]>>>,
     /// `state_kinds`, from the first observed chunk's facts.
     kinds: std::sync::OnceLock<Vec<u8>>,
     wake: Condvar,
@@ -1167,6 +1170,7 @@ impl Lod {
             jobs: Mutex::new(VecDeque::new()),
             mesh_jobs: Mutex::new(std::collections::BinaryHeap::new()),
             observed: Mutex::new(FxHashMap::default()),
+            summaries: Mutex::new(FxHashMap::default()),
             kinds: std::sync::OnceLock::new(),
             wake: Condvar::new(),
             mesh_wake: Condvar::new(),
@@ -1395,6 +1399,14 @@ impl Lod {
                                         continue;
                                     };
                                     let columns = summarize(&chunk, kinds);
+                                    {
+                                        let mut summaries = worker.summaries.lock().unwrap();
+                                        if summaries.get(&key).is_some_and(|last| **last == *columns)
+                                        {
+                                            continue;
+                                        }
+                                        summaries.insert(key, columns.clone());
+                                    }
                                     sampler.observed(key, &columns);
                                     Done::Observed(key, ReducedColumns::new(columns))
                                 }
@@ -1920,6 +1932,7 @@ impl Lod {
                 if let Some(old) = self.saved_order.pop_front() {
                     self.saved.remove(&old);
                     self.reduced.remove(&old);
+                    self.shared.summaries.lock().unwrap().remove(&old);
                 }
             }
             self.saved_order.push_back(key);

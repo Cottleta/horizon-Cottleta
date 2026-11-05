@@ -303,6 +303,7 @@ mod tests {
                 encoder,
                 surface: None,
                 after,
+                detached: None,
             };
             assert!(queue.submit_later(job).is_ok());
             queue.wait();

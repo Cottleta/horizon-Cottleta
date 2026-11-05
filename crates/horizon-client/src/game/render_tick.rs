@@ -594,7 +594,7 @@ impl Game<'_> {
                 .as_ref()
                 .map(|p| ([p.position.x, p.position.y, p.position.z], p.velocity.y)),
         };
-        self.particles.tick(&level);
+        horizon_client::spans::time("particles_tick", || self.particles.tick(&level));
         self.tick_pickups();
         let camera = self.particles.camera;
         for (name, at, volume, pitch, delayed) in std::mem::take(&mut self.particles.sounds) {

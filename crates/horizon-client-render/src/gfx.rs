@@ -10148,8 +10148,16 @@ impl Renderer {
             let timer = detached_frame
                 .then(|| self.gpu_timer.as_mut().map(|t| t.submitted_later()))
                 .flatten();
-            let after = (cull.is_some() || center.is_some() || timer.is_some()).then(|| {
+            let queue = (*self.queue).clone();
+            let passes = self
+                .own_timing
+                .as_mut()
+                .and_then(|t| t.submitted_later(&queue));
+            let after = (cull.is_some() || center.is_some() || timer.is_some() || passes.is_some()).then(|| {
                 Box::new(move || {
+                    if let Some(read) = passes {
+                        read();
+                    }
                     if let Some(read) = cull {
                         read();
                     }

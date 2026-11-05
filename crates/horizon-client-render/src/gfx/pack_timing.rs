@@ -211,6 +211,22 @@ impl PassTiming {
         self.stage = Stage::Running(done);
     }
 
+    /// `submitted` for a frame the submit thread hands to the queue: the returned closure runs
+    /// on that thread after the submit, so the wait is for this frame's work and not the last's.
+    pub fn submitted_later(&mut self, queue: &wgpu::Queue) -> Option<impl FnOnce() + Send + use<>> {
+        if !matches!(self.stage, Stage::Recording) {
+            return None;
+        }
+        if self.names.is_empty() {
+            self.stage = Stage::Idle;
+            return None;
+        }
+        let done = Arc::new(AtomicBool::new(false));
+        self.stage = Stage::Running(done.clone());
+        let queue = queue.clone();
+        Some(move || queue.on_submitted_work_done(move || done.store(true, Ordering::Release)))
+    }
+
     fn collect(&mut self, bytes: u64) {
         let slice = self.read.slice(..bytes);
         let Ok(data) = slice.get_mapped_range() else {

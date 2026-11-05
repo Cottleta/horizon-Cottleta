@@ -5932,7 +5932,7 @@ impl Game<'_> {
         // Minecraft.handleKeybinds precedes entity ticking and sendChanges.
         // Window callbacks only queue clicks, so an interaction cannot leak
         // between CLIENT_TICK_END and a later pong.
-        self.remote_handle_input();
+        horizon_client::spans::time("rt_remote_handle_input", || self.remote_handle_input());
         // Player.tick's ItemCooldowns.tick, in ClientLevel.tickEntities after
         // handleKeybinds: this path replaces `tick_world`'s for a server's
         // client (multiplayer and the default single player), so the entries
@@ -5948,7 +5948,7 @@ impl Game<'_> {
         // ClientLevel.tick: the border's size change.
         self.border.tick();
         self.player_border();
-        self.tick_remote_entities(running);
+        horizon_client::spans::time("tick_remote_entities", || self.tick_remote_entities(running));
         self.tick_random_textures();
         // Breeze.tick's block dust: drawn by each client for the breezes it sees.
         if running {
@@ -5959,7 +5959,7 @@ impl Game<'_> {
         // A step advances the moving pistons created by the block event once,
         // rather than finishing them during the frozen ticks between steps.
         if running {
-            self.tick_block_entity_anims();
+            horizon_client::spans::time("tick_block_entity_anims", || self.tick_block_entity_anims());
             self.tick_remote_spawners();
             self.client_tick_beacons();
             self.tick_remote_potent_sulfur();
@@ -5972,16 +5972,16 @@ impl Game<'_> {
         }
         self.tick_hand();
         if running {
-            self.tick_particles();
+            horizon_client::spans::time("tick_particles", || self.tick_particles());
         }
-        self.tick_client_ambient();
-        self.tick_client_effects();
+        horizon_client::spans::time("tick_client_ambient", || self.tick_client_ambient());
+        horizon_client::spans::time("tick_client_effects", || self.tick_client_effects());
         // Player.tick's sleep counter (the darkening and the wake-up fade).
         self.sleep_timer = super::tick_sleep_timer(self.sleep_timer, self.sleeping.is_some());
         // Gui.tick: the titles, the action bar and the held item's name.
-        self.tick_hud();
+        horizon_client::spans::time("tick_hud", || self.tick_hud());
         self.tick_subtitles();
-        self.tick_client_load();
+        horizon_client::spans::time("tick_client_load", || self.tick_client_load());
         let entity_collisions = self.player_entity_collisions();
         let pushed = self.remote_pushes();
         let sprint_window = self.settings.sprint_window;

@@ -643,6 +643,9 @@ pub struct ItemRenderer {
     library: Arc<ModelLibrary>,
     sprites: FileSprites,
     baked: Mutex<HashMap<String, Arc<BakedItemModel>>>,
+    /// Items that resolve alike every time (`ItemModels::resolves_alike`): each display's state,
+    /// so what many item displays and armor stands hold isn't worked out each frame.
+    alike: Mutex<rustc_hash::FxHashMap<String, Option<Vec<ItemRenderState>>>>,
     extents: Mutex<HashMap<String, Arc<Vec<Vec3>>>>,
     /// GUI items already drawn: the HUD vertices of a static item at a GUI position
     /// (`gui::draw`), which are the same every frame it stays there.
@@ -772,6 +775,7 @@ impl ItemRenderer {
                 translucent: Mutex::default(),
             },
             baked: Mutex::default(),
+            alike: Default::default(),
             extents: Mutex::default(),
             gui_drawn: Mutex::default(),
             parts,
@@ -848,6 +852,42 @@ impl ItemRenderer {
     /// swaps them for.
     #[allow(clippy::too_many_arguments)]
     pub fn resolve_with_rule(
+        &self,
+        stack: &StackView,
+        display: DisplayContext,
+        owner: Option<&OwnerState>,
+        level: Option<&LevelState>,
+        seed: i32,
+        env: &dyn ItemEnv,
+        rule: Option<usize>,
+    ) -> ItemRenderState {
+        let alike = rule.is_none() && stack.count > 0 && stack.patch.is_empty();
+        if alike
+            && let Ok(mut cache) = self.alike.lock()
+        {
+            if let Some(known) = cache.get(stack.item.as_str()) {
+                if let Some(state) = known
+                    .as_ref()
+                    .and_then(|states| states.iter().find(|s| s.display == display))
+                {
+                    return state.clone();
+                }
+            } else {
+                let states = self.models.resolves_alike(&stack.item).then(Vec::new);
+                cache.insert(stack.item.clone(), states);
+            }
+        }
+        let state = self.resolve_uncached(stack, display, owner, level, seed, env, rule);
+        if alike
+            && let Ok(mut cache) = self.alike.lock()
+            && let Some(Some(states)) = cache.get_mut(stack.item.as_str())
+        {
+            states.push(state.clone());
+        }
+        state
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_uncached(
         &self,
         stack: &StackView,
         display: DisplayContext,

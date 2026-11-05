@@ -1096,6 +1096,28 @@ impl ItemModels {
         }
         std::borrow::Cow::Owned(out)
     }
+    /// Whether an item with no component changes resolves the same way everywhere: its
+    /// definition is plain models without tints, so nothing about the moment can change them.
+    pub fn resolves_alike(&self, item: &str) -> bool {
+        fn constant(node: &ItemModelNode) -> bool {
+            match node {
+                ItemModelNode::Empty => true,
+                ItemModelNode::Model(leaf) => leaf.tints.is_empty(),
+                ItemModelNode::Composite { models, .. } => models.iter().all(constant),
+                _ => false,
+            }
+        }
+        let Some(Value::String(id)) = self
+            .prototypes
+            .get(item)
+            .and_then(|components| components.get("minecraft:item_model"))
+        else {
+            return false;
+        };
+        self.definitions
+            .get(id.as_str())
+            .is_some_and(|definition| constant(&definition.model))
+    }
     /// `ItemModelResolver.updateForTopItem`.
     pub fn resolve(&self, stack: &StackView, ctx: &Context, env: &dyn ItemEnv) -> ResolvedItem {
         let mut out = ResolvedItem::default();
@@ -1116,8 +1138,11 @@ impl ItemModels {
         let Some(Value::String(model_id)) = components.get("minecraft:item_model") else {
             return;
         };
-        let id = identifier(model_id).unwrap_or_else(|_| model_id.clone());
-        let definition = self.definitions.get(&id);
+        // The usual case without making the identifier: definitions are keyed by the full name.
+        let definition = self.definitions.get(model_id.as_str()).or_else(|| {
+            let id = identifier(model_id).unwrap_or_else(|_| model_id.clone());
+            self.definitions.get(&id)
+        });
         out.oversized_in_gui = definition.is_some_and(|d| d.oversized_in_gui);
         let mut state = Resolve {
             models: self,

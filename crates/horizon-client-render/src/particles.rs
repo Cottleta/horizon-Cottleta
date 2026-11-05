@@ -1180,6 +1180,610 @@ impl ParticleLevel<'_> {
     }
 }
 
+/// What a particle that needs nothing else of the engine reads while it ticks, so that
+/// many of them can tick on a few threads with the same results: each has its own random.
+struct TickAlone<'a> {
+    set_sprites: &'a [Vec<u32>],
+    scope_eye: Option<[f64; 3]>,
+}
+impl TickAlone<'_> {
+    fn tick(&self, p: &mut Particle, level: &ParticleLevel) {
+        match p.behaviour {
+            Behaviour::Base => p.base_tick(level),
+            Behaviour::Mod { size, alpha } => {
+                p.base_tick(level);
+                p.size = mod_curve(size, p.age, p.lifetime);
+                p.rgba[3] = mod_curve(alpha, p.age, p.lifetime);
+                self.sprite_from_age(p);
+            }
+            Behaviour::Animated => {
+                p.base_tick(level);
+                self.sprite_from_age(p);
+            }
+            Behaviour::Snowflake => {
+                p.base_tick(level);
+                self.sprite_from_age(p);
+                p.velocity[0] *= f64::from(0.95f32);
+                p.velocity[1] *= f64::from(0.9f32);
+                p.velocity[2] *= f64::from(0.95f32);
+            }
+            Behaviour::Crit => {
+                p.base_tick(level);
+                p.rgba[1] *= 0.96;
+                p.rgba[2] *= 0.9;
+            }
+            Behaviour::WaterDrop => {
+                p.previous = p.position;
+                let lifetime = p.lifetime;
+                p.lifetime -= 1;
+                if lifetime <= 0 {
+                    p.removed = true;
+                    return;
+                }
+                p.velocity[1] -= f64::from(p.gravity);
+                p.move_by(level, p.velocity);
+                for c in &mut p.velocity {
+                    *c *= f64::from(0.98f32);
+                }
+                if p.on_ground {
+                    if p.random.next_float() < 0.5 {
+                        p.removed = true;
+                    }
+                    p.velocity[0] *= f64::from(0.7f32);
+                    p.velocity[2] *= f64::from(0.7f32);
+                }
+                let b = ParticleLevel::block_at(p.position);
+                let top = level.collision_top(
+                    b,
+                    p.position[0] - f64::from(b[0]),
+                    p.position[2] - f64::from(b[2]),
+                );
+                let offset = top.max(level.fluid(b).1);
+                if offset > 0.0 && p.position[1] < f64::from(b[1]) + offset {
+                    p.removed = true;
+                }
+            }
+            Behaviour::Bubble => {
+                p.previous = p.position;
+                let lifetime = p.lifetime;
+                p.lifetime -= 1;
+                if lifetime <= 0 {
+                    p.removed = true;
+                    return;
+                }
+                p.velocity[1] += 0.002;
+                p.move_by(level, p.velocity);
+                for c in &mut p.velocity {
+                    *c *= f64::from(0.85f32);
+                }
+                if level.fluid(ParticleLevel::block_at(p.position)).0 != Fluid::Water {
+                    p.removed = true;
+                }
+            }
+            Behaviour::SulfurBubble {
+                y_start,
+                y_end,
+                size_start,
+                y_prev,
+            } => {
+                p.base_tick(level);
+                let (fluid, source) = level.fluid_source(ParticleLevel::block_at(p.position));
+                if !(p.removed || (fluid == Fluid::Water && source)) {
+                    p.removed = true;
+                }
+                if !p.removed && p.position[1] >= y_end {
+                    p.removed = true;
+                }
+                if !p.removed && p.position[1] <= y_prev {
+                    p.removed = true;
+                }
+                // randomHorizontalWiggling, then a second, horizontal move.
+                let wiggle = |r: &mut LegacyRandom| {
+                    let f = r.next_float() * 0.003;
+                    f64::from(if r.next_boolean() { f } else { -f }) * 0.5
+                };
+                p.velocity[0] += wiggle(&mut p.random);
+                p.velocity[2] += wiggle(&mut p.random);
+                p.move_by(level, [p.velocity[0], 0.0, p.velocity[2]]);
+                let progress = ((p.position[1] - y_start) / (y_end - y_start)) as f32;
+                p.size = size_start + progress * (0.15 - size_start);
+                p.behaviour = Behaviour::SulfurBubble {
+                    y_start,
+                    y_end,
+                    size_start,
+                    y_prev: p.position[1],
+                };
+            }
+            Behaviour::NoxiousGas { fade_start } => {
+                p.base_tick(level);
+                self.sprite_from_age(p);
+                if p.age as f32 > fade_start {
+                    let frames_since_fade_out_start = p.age as f32 - fade_start;
+                    p.rgba[3] =
+                        (p.lifetime as f32 - frames_since_fade_out_start) / p.lifetime as f32;
+                }
+            }
+            Behaviour::GeyserPlume {
+                start_y,
+                max_y,
+                propulsion,
+                spray,
+                min_size,
+                max_size,
+                mut done,
+            } => {
+                p.base_tick(level);
+                if !done
+                    && (p.velocity[1] < 0.0
+                        || p.position[1] > max_y
+                        || p.position[1] == p.previous[1])
+                {
+                    p.lifetime = p.lifetime.min(p.age + 5);
+                    p.friction = 0.0;
+                    done = true;
+                }
+                let y_progress_linear =
+                    ((p.position[1] - start_y) / (max_y - start_y)).clamp(0.0, 1.0);
+                let y_progress_exponential = horizon_core::jmath::pow(y_progress_linear, 3.0);
+                p.gravity = propulsion * y_progress_exponential as f32 * 0.12;
+                p.velocity[0] = y_progress_linear * f64::from(spray[0]);
+                p.velocity[2] = y_progress_linear * f64::from(spray[1]);
+                self.sprite_from_age(p);
+                p.size = min_size + (y_progress_linear * f64::from(max_size - min_size)) as f32;
+                p.behaviour = Behaviour::GeyserPlume {
+                    start_y,
+                    max_y,
+                    propulsion,
+                    spray,
+                    min_size,
+                    max_size,
+                    done,
+                };
+            }
+            Behaviour::BubbleColumnUp => {
+                p.base_tick(level);
+                if !p.removed && level.fluid(ParticleLevel::block_at(p.position)).0 != Fluid::Water
+                {
+                    p.removed = true;
+                }
+            }
+            Behaviour::BubblePop => {
+                p.previous = p.position;
+                let age = p.age;
+                p.age += 1;
+                if age >= p.lifetime {
+                    p.removed = true;
+                    return;
+                }
+                p.velocity[1] -= f64::from(p.gravity);
+                p.move_by(level, p.velocity);
+                self.sprite_from_age(p);
+            }
+            Behaviour::CurrentDown { angle } => {
+                p.previous = p.position;
+                let age = p.age;
+                p.age += 1;
+                if age >= p.lifetime {
+                    p.removed = true;
+                    return;
+                }
+                p.velocity[0] += f64::from(0.6 * angle.cos());
+                p.velocity[2] += f64::from(0.6 * angle.sin());
+                p.velocity[0] *= 0.07;
+                p.velocity[2] *= 0.07;
+                p.move_by(level, p.velocity);
+                if level.fluid(ParticleLevel::block_at(p.position)).0 != Fluid::Water || p.on_ground
+                {
+                    p.removed = true;
+                }
+                p.behaviour = Behaviour::CurrentDown {
+                    angle: angle + 0.08,
+                };
+            }
+            Behaviour::SuspendedTown => {
+                p.previous = p.position;
+                let lifetime = p.lifetime;
+                p.lifetime -= 1;
+                if lifetime <= 0 {
+                    p.removed = true;
+                    return;
+                }
+                p.move_by(level, p.velocity);
+                for c in &mut p.velocity {
+                    *c *= 0.99;
+                }
+            }
+            Behaviour::Portal { start } => {
+                p.previous = p.position;
+                let age = p.age;
+                p.age += 1;
+                if age >= p.lifetime {
+                    p.removed = true;
+                    return;
+                }
+                let a = p.age as f32 / p.lifetime as f32;
+                let pos = 1.0 - (-a + a * a * 2.0);
+                p.position = [
+                    start[0] + p.velocity[0] * f64::from(pos),
+                    start[1] + p.velocity[1] * f64::from(pos) + f64::from(1.0 - a),
+                    start[2] + p.velocity[2] * f64::from(pos),
+                ];
+            }
+            Behaviour::ReversePortal => {
+                p.previous = p.position;
+                let age = p.age;
+                p.age += 1;
+                if age >= p.lifetime {
+                    p.removed = true;
+                    return;
+                }
+                let m = f64::from(p.age as f32 / p.lifetime as f32);
+                for i in 0..3 {
+                    p.position[i] += p.velocity[i] * m;
+                }
+            }
+            Behaviour::FlyTowards { start, .. } => {
+                p.previous = p.position;
+                let age = p.age;
+                p.age += 1;
+                if age >= p.lifetime {
+                    p.removed = true;
+                    return;
+                }
+                let pos = 1.0 - p.age as f32 / p.lifetime as f32;
+                let mut pp = 1.0 - pos;
+                pp *= pp;
+                pp *= pp;
+                p.position = [
+                    start[0] + p.velocity[0] * f64::from(pos),
+                    start[1] + p.velocity[1] * f64::from(pos) - f64::from(pp * 1.2),
+                    start[2] + p.velocity[2] * f64::from(pos),
+                ];
+            }
+            Behaviour::Transition { .. } => {
+                p.base_tick(level);
+                self.sprite_from_age(p);
+            }
+            Behaviour::Shriek { delay } => {
+                if delay > 0 {
+                    p.behaviour = Behaviour::Shriek { delay: delay - 1 };
+                } else {
+                    p.base_tick(level);
+                }
+            }
+            Behaviour::Vibration {
+                dest, rot, pitch, ..
+            } => {
+                p.previous = p.position;
+                let age = p.age;
+                p.age += 1;
+                if age >= p.lifetime {
+                    p.removed = true;
+                    return;
+                }
+                let remaining = p.lifetime - p.age;
+                if remaining > 0 {
+                    let alpha = 1.0 / f64::from(remaining);
+                    for i in 0..3 {
+                        p.position[i] += (dest[i] - p.position[i]) * alpha;
+                    }
+                }
+                let d = [
+                    p.position[0] - dest[0],
+                    p.position[1] - dest[1],
+                    p.position[2] - dest[2],
+                ];
+                p.behaviour = Behaviour::Vibration {
+                    dest,
+                    rot: d[0].atan2(d[2]) as f32,
+                    rot_o: rot,
+                    pitch: d[1].atan2((d[0] * d[0] + d[2] * d[2]).sqrt()) as f32,
+                    pitch_o: pitch,
+                };
+                self.sprite_from_age(p);
+            }
+            Behaviour::Trail { target } => {
+                p.previous = p.position;
+                let age = p.age;
+                p.age += 1;
+                if age >= p.lifetime {
+                    p.removed = true;
+                    return;
+                }
+                // `Mth.lerp(1.0 / ticksRemaining, x, target)`, infinite on the last tick.
+                let alpha = 1.0 / f64::from(p.lifetime - p.age);
+                for i in 0..3 {
+                    p.position[i] += alpha * (target[i] - p.position[i]);
+                }
+            }
+            Behaviour::HugeExplosion => {
+                p.previous = p.position;
+                let age = p.age;
+                p.age += 1;
+                if age >= p.lifetime {
+                    p.removed = true;
+                    return;
+                }
+                self.sprite_from_age(p);
+            }
+            Behaviour::Campfire => {
+                p.previous = p.position;
+                let age = p.age;
+                p.age += 1;
+                if age < p.lifetime && p.rgba[3] > 0.0 {
+                    let r = &mut p.random;
+                    let dx = r.next_float() / 5000.0 * if r.next_boolean() { 1.0 } else { -1.0 };
+                    p.velocity[0] += f64::from(dx);
+                    let dz = r.next_float() / 5000.0 * if r.next_boolean() { 1.0 } else { -1.0 };
+                    p.velocity[2] += f64::from(dz);
+                    p.velocity[1] -= f64::from(p.gravity);
+                    p.move_by(level, p.velocity);
+                    if p.age >= p.lifetime - 60 && p.rgba[3] > 0.01 {
+                        p.rgba[3] -= 0.015;
+                    }
+                } else {
+                    p.removed = true;
+                }
+            }
+            Behaviour::SimpleAnimated { fade } => {
+                p.base_tick(level);
+                self.sprite_from_age(p);
+                if p.age > p.lifetime / 2 {
+                    p.rgba[3] = 1.0 - (p.age as f32 - (p.lifetime / 2) as f32) / p.lifetime as f32;
+                    if let Some(f) = fade {
+                        for i in 0..3 {
+                            p.rgba[i] += (f[i] - p.rgba[i]) * 0.2;
+                        }
+                    }
+                }
+            }
+            Behaviour::Spell { original_alpha } => {
+                p.base_tick(level);
+                self.sprite_from_age(p);
+                // SpellParticle.tick: alpha 0 while close, else eased back to originalAlpha.
+                if self.close_to_scoping_player(p.position) {
+                    p.rgba[3] = 0.0;
+                } else {
+                    p.rgba[3] += (original_alpha - p.rgba[3]) * 0.05;
+                }
+            }
+            Behaviour::Cloud => {
+                p.base_tick(level);
+                if !p.removed {
+                    self.sprite_from_age(p);
+                    if let Some((player, vy)) = level.player {
+                        let d2 = (player[0] - p.position[0]).powi(2)
+                            + (player[1] - p.position[1]).powi(2)
+                            + (player[2] - p.position[2]).powi(2);
+                        if d2 < 4.0 && p.position[1] > player[1] {
+                            let y = p.position[1] + (player[1] - p.position[1]) * 0.2;
+                            p.velocity[1] += (vy - p.velocity[1]) * 0.2;
+                            p.set_pos([p.position[0], y, p.position[2]]);
+                        }
+                    }
+                }
+            }
+            Behaviour::Leaves {
+                mut rot_speed,
+                spin,
+                wind,
+                swirl,
+                flow,
+                flow_scale,
+                swirl_period,
+            } => {
+                p.previous = p.position;
+                let lifetime = p.lifetime;
+                p.lifetime -= 1;
+                if lifetime <= 0 {
+                    p.removed = true;
+                }
+                if !p.removed {
+                    let alive = (300 - p.lifetime) as f32;
+                    let relative = (alive / 300.0).min(1.0);
+                    let (mut xa, mut za) = (0.0f64, 0.0f64);
+                    if flow {
+                        xa += flow_scale[0] * f64::from(relative).powf(1.25);
+                        za += flow_scale[1] * f64::from(relative).powf(1.25);
+                    }
+                    if swirl {
+                        let rel = f64::from(relative);
+                        xa += rel * (rel * swirl_period).cos() * f64::from(wind);
+                        za += rel * (rel * swirl_period).sin() * f64::from(wind);
+                    }
+                    p.velocity[0] += xa * f64::from(0.0025f32);
+                    p.velocity[2] += za * f64::from(0.0025f32);
+                    p.velocity[1] -= f64::from(p.gravity);
+                    rot_speed += spin / 20.0;
+                    p.o_roll = p.roll;
+                    p.roll += rot_speed / 20.0;
+                    p.move_by(level, p.velocity);
+                    if p.on_ground
+                        || p.lifetime < 299 && (p.velocity[0] == 0.0 || p.velocity[2] == 0.0)
+                    {
+                        p.removed = true;
+                    }
+                    if !p.removed {
+                        let f = f64::from(p.friction);
+                        for c in &mut p.velocity {
+                            *c *= f;
+                        }
+                    }
+                }
+                p.behaviour = Behaviour::Leaves {
+                    rot_speed,
+                    spin,
+                    wind,
+                    swirl,
+                    flow,
+                    flow_scale,
+                    swirl_period,
+                };
+            }
+            Behaviour::FallingDust { rot_speed } => {
+                p.previous = p.position;
+                let age = p.age;
+                p.age += 1;
+                if age >= p.lifetime {
+                    p.removed = true;
+                    return;
+                }
+                self.sprite_from_age(p);
+                p.o_roll = p.roll;
+                p.roll += std::f32::consts::PI * rot_speed * 2.0;
+                if p.on_ground {
+                    p.o_roll = 0.0;
+                    p.roll = 0.0;
+                }
+                p.move_by(level, p.velocity);
+                p.velocity[1] -= f64::from(0.003f32);
+                p.velocity[1] = p.velocity[1].max(f64::from(-0.14f32));
+            }
+            Behaviour::SquidInk => {
+                // SimpleAnimatedParticle.tick, then SquidInkParticle's.
+                p.base_tick(level);
+                self.sprite_from_age(p);
+                let half = |p: &mut Particle| {
+                    if p.age > p.lifetime / 2 {
+                        p.rgba[3] =
+                            1.0 - (p.age as f32 - (p.lifetime / 2) as f32) / p.lifetime as f32;
+                    }
+                };
+                half(p);
+                if !p.removed {
+                    self.sprite_from_age(p);
+                    half(p);
+                    let b = ParticleLevel::block_at(p.position);
+                    if level.facts.is_air(level.world.block(b[0], b[1], b[2])) {
+                        p.velocity[1] -= f64::from(0.0074f32);
+                    }
+                }
+            }
+            Behaviour::Firefly => {
+                p.base_tick(level);
+                let b = ParticleLevel::block_at(p.position);
+                if !level.facts.is_air(level.world.block(b[0], b[1], b[2])) {
+                    p.removed = true;
+                } else {
+                    p.rgba[3] = fade_amount(p.lifetime_progress(p.age as f32), 0.3, 0.5);
+                    if p.random.next_float() > 0.95 || p.age == 1 {
+                        let r = &mut p.random;
+                        let mut speed = || f64::from(-0.05f32 + 0.1 * r.next_float());
+                        p.velocity = [speed(), speed(), speed()];
+                    }
+                }
+            }
+            Behaviour::Wake => {
+                p.previous = p.position;
+                let life = 60 - p.lifetime;
+                let lifetime = p.lifetime;
+                p.lifetime -= 1;
+                if lifetime <= 0 {
+                    p.removed = true;
+                    return;
+                }
+                p.velocity[1] -= f64::from(p.gravity);
+                p.move_by(level, p.velocity);
+                for c in &mut p.velocity {
+                    *c *= f64::from(0.98f32);
+                }
+                let size = life as f32 * 0.001;
+                p.set_size(size, size);
+                // SpriteSet.get(life % 4, 4).
+                if let Some(set) = p.set {
+                    let sprites = &self.set_sprites[set as usize];
+                    let index = (life % 4) as usize * (sprites.len() - 1) / 4;
+                    p.sprite = Sprite::Index(sprites[index]);
+                }
+            }
+            Behaviour::DustPlume => {
+                p.gravity *= 0.88;
+                p.friction *= 0.92;
+                p.base_tick(level);
+                self.sprite_from_age(p);
+            }
+            Behaviour::FlyStraight { start, colors } => {
+                p.previous = p.position;
+                let age = p.age;
+                p.age += 1;
+                if age >= p.lifetime {
+                    p.removed = true;
+                    return;
+                }
+                let normalized = p.age as f32 / p.lifetime as f32;
+                let along = 1.0 - normalized;
+                for i in 0..3 {
+                    p.position[i] = start[i] + p.velocity[i] * f64::from(along);
+                }
+                // ARGB.srgbLerp: Mth.lerpInt on each 8-bit channel.
+                let lerp = |shift: u32| {
+                    let (a, b) = (
+                        (colors[0] >> shift & 255) as i32,
+                        (colors[1] >> shift & 255) as i32,
+                    );
+                    (a + (normalized * (b - a) as f32).floor() as i32) as f32 / 255.0
+                };
+                p.set_color(lerp(16), lerp(8), lerp(0));
+                p.rgba[3] = lerp(24);
+            }
+            Behaviour::DragonBreath { mut hit_ground } => {
+                p.previous = p.position;
+                let age = p.age;
+                p.age += 1;
+                if age >= p.lifetime {
+                    p.removed = true;
+                    return;
+                }
+                self.sprite_from_age(p);
+                if p.on_ground {
+                    p.velocity[1] = 0.0;
+                    hit_ground = true;
+                }
+                if hit_ground {
+                    p.velocity[1] += 0.002;
+                }
+                p.move_by(level, p.velocity);
+                if p.position[1] == p.previous[1] {
+                    p.velocity[0] *= 1.1;
+                    p.velocity[2] *= 1.1;
+                }
+                let f = f64::from(p.friction);
+                p.velocity[0] *= f;
+                p.velocity[2] *= f;
+                if hit_ground {
+                    p.velocity[1] *= f;
+                }
+                p.behaviour = Behaviour::DragonBreath { hit_ground };
+            }
+            _ => {}
+        }
+    }
+    fn sprite_from_age(&self, p: &mut Particle) {
+        if p.removed {
+            return;
+        }
+        if let Some(set) = p.set {
+            // A sprite set's index can outlive the reload that rebuilt them.
+            let Some(sprites) = self.set_sprites.get(set as usize) else {
+                return;
+            };
+            let lifetime = p.lifetime.max(1);
+            let index = if p.frame_ticks > 0 {
+                (p.age.max(0) as i64 / i64::from(p.frame_ticks)) % sprites.len() as i64
+            } else {
+                (p.age.max(0) as i64 * (sprites.len() as i64 - 1) / i64::from(lifetime))
+                    .clamp(0, sprites.len() as i64 - 1)
+            };
+            p.sprite = Sprite::Index(sprites[index as usize]);
+        }
+    }
+    fn close_to_scoping_player(&self, pos: [f64; 3]) -> bool {
+        self.scope_eye.is_some_and(|eye| {
+            (eye[0] - pos[0]).powi(2) + (eye[1] - pos[1]).powi(2) + (eye[2] - pos[2]).powi(2) <= 9.0
+        })
+    }
+}
+
 /// `ParticleEngine` plus the sprite sets of `ParticleResources`.
 pub struct ParticleEngine {
     particles: Vec<Particle>,
@@ -1234,6 +1838,25 @@ const MAX_PARTICLES: usize = 16384;
 /// `ParticleLimit.SPORE_BLOSSOM`, the only limited particle.
 const SPORE_BLOSSOM_LIMIT: usize = 1000;
 const PARTICLE_LIGHT_CACHE_SIZE: usize = 64;
+/// Threads for this many particles on this many processors, the calling one among them.
+/// A usual tick stays on one: starting threads costs more than a few hundred particles do.
+fn particle_threads(particles: usize, processors: usize) -> usize {
+    const EACH: usize = 1500;
+    (particles / EACH).clamp(1, (processors / 2).clamp(1, 4))
+}
+/// Whether a particle's tick touches only itself (`TickAlone`): these seven spawn others.
+fn ticks_alone(behaviour: &Behaviour) -> bool {
+    !matches!(
+        behaviour,
+        Behaviour::Lava { .. }
+            | Behaviour::Drip { .. }
+            | Behaviour::NoxiousGasCloud { .. }
+            | Behaviour::GeyserEruption { .. }
+            | Behaviour::GustSeed { .. }
+            | Behaviour::ExplosionSeed { .. }
+            | Behaviour::Spark { .. }
+    )
+}
 
 #[derive(Clone, Copy)]
 struct CachedParticleLight {
@@ -1795,10 +2418,9 @@ impl ParticleEngine {
     }
     /// `SpellParticle.isCloseToScopingPlayer`: within 3 blocks of that eye.
     fn close_to_scoping_player(&self, pos: [f64; 3]) -> bool {
-        self.scope_eye.is_some_and(|eye| {
-            (eye[0] - pos[0]).powi(2) + (eye[1] - pos[1]).powi(2) + (eye[2] - pos[2]).powi(2) <= 9.0
-        })
+        self.alone().close_to_scoping_player(pos)
     }
+
     /// `ClientPacketListener.handleParticleEvent` for `ServerLevel.sendParticles`.
     pub fn send_particles(
         &mut self,
@@ -1950,24 +2572,15 @@ impl ParticleEngine {
     }
     /// `SingleQuadParticle.setSpriteFromAge`.
     fn sprite_from_age(&self, p: &mut Particle) {
-        if p.removed {
-            return;
-        }
-        if let Some(set) = p.set {
-            // A sprite set's index can outlive the reload that rebuilt them.
-            let Some(sprites) = self.set_sprites.get(set as usize) else {
-                return;
-            };
-            let lifetime = p.lifetime.max(1);
-            let index = if p.frame_ticks > 0 {
-                (p.age.max(0) as i64 / i64::from(p.frame_ticks)) % sprites.len() as i64
-            } else {
-                (p.age.max(0) as i64 * (sprites.len() as i64 - 1) / i64::from(lifetime))
-                    .clamp(0, sprites.len() as i64 - 1)
-            };
-            p.sprite = Sprite::Index(sprites[index as usize]);
+        self.alone().sprite_from_age(p);
+    }
+    fn alone(&self) -> TickAlone<'_> {
+        TickAlone {
+            set_sprites: &self.set_sprites,
+            scope_eye: self.scope_eye,
         }
     }
+
     #[allow(clippy::too_many_lines)]
     /// `ParticleProvider.createParticle`: provider draws use the engine's
     /// random, constructor and tick draws the particle's own (seeded `seed`).
@@ -3608,8 +4221,31 @@ impl ParticleEngine {
             }
         }
         let mut particles = std::mem::take(&mut self.particles);
-        for p in &mut particles {
-            self.tick_particle(p, level);
+        let parts = particle_threads(particles.len(), horizon_threads::worker_count());
+        if parts < 2 || self.requested.is_some() || self.created_requests.is_some() {
+            for p in &mut particles {
+                self.tick_particle(p, level);
+            }
+        } else {
+            // Those that touch the engine after, in order: nothing they read depends on the rest.
+            let alone = self.alone();
+            let size = particles.len().div_ceil(parts);
+            std::thread::scope(|scope| {
+                let mut chunks = particles.chunks_mut(size);
+                let first = chunks.next().unwrap_or_default();
+                let tick = |chunk: &mut [Particle]| {
+                    for p in chunk.iter_mut().filter(|p| ticks_alone(&p.behaviour)) {
+                        alone.tick(p, level);
+                    }
+                };
+                for chunk in chunks {
+                    scope.spawn(move || tick(chunk));
+                }
+                tick(first);
+            });
+            for p in particles.iter_mut().filter(|p| !ticks_alone(&p.behaviour)) {
+                self.tick_particle(p, level);
+            }
         }
         particles.retain(|p| !p.removed);
         self.particles = particles;
@@ -3712,24 +4348,6 @@ impl ParticleEngine {
     #[allow(clippy::too_many_lines)]
     fn tick_particle(&mut self, p: &mut Particle, level: &ParticleLevel) {
         match p.behaviour {
-            Behaviour::Base => p.base_tick(level),
-            Behaviour::Mod { size, alpha } => {
-                p.base_tick(level);
-                p.size = mod_curve(size, p.age, p.lifetime);
-                p.rgba[3] = mod_curve(alpha, p.age, p.lifetime);
-                self.sprite_from_age(p);
-            }
-            Behaviour::Animated => {
-                p.base_tick(level);
-                self.sprite_from_age(p);
-            }
-            Behaviour::Snowflake => {
-                p.base_tick(level);
-                self.sprite_from_age(p);
-                p.velocity[0] *= f64::from(0.95f32);
-                p.velocity[1] *= f64::from(0.9f32);
-                p.velocity[2] *= f64::from(0.95f32);
-            }
             Behaviour::Lava => {
                 p.base_tick(level);
                 if !p.removed {
@@ -3742,11 +4360,6 @@ impl ParticleEngine {
                         );
                     }
                 }
-            }
-            Behaviour::Crit => {
-                p.base_tick(level);
-                p.rgba[1] *= 0.96;
-                p.rgba[2] *= 0.9;
             }
             Behaviour::Drip {
                 fluid,
@@ -3810,97 +4423,6 @@ impl ParticleEngine {
                     }
                 }
             }
-            Behaviour::WaterDrop => {
-                p.previous = p.position;
-                let lifetime = p.lifetime;
-                p.lifetime -= 1;
-                if lifetime <= 0 {
-                    p.removed = true;
-                    return;
-                }
-                p.velocity[1] -= f64::from(p.gravity);
-                p.move_by(level, p.velocity);
-                for c in &mut p.velocity {
-                    *c *= f64::from(0.98f32);
-                }
-                if p.on_ground {
-                    if p.random.next_float() < 0.5 {
-                        p.removed = true;
-                    }
-                    p.velocity[0] *= f64::from(0.7f32);
-                    p.velocity[2] *= f64::from(0.7f32);
-                }
-                let b = ParticleLevel::block_at(p.position);
-                let top = level.collision_top(
-                    b,
-                    p.position[0] - f64::from(b[0]),
-                    p.position[2] - f64::from(b[2]),
-                );
-                let offset = top.max(level.fluid(b).1);
-                if offset > 0.0 && p.position[1] < f64::from(b[1]) + offset {
-                    p.removed = true;
-                }
-            }
-            Behaviour::Bubble => {
-                p.previous = p.position;
-                let lifetime = p.lifetime;
-                p.lifetime -= 1;
-                if lifetime <= 0 {
-                    p.removed = true;
-                    return;
-                }
-                p.velocity[1] += 0.002;
-                p.move_by(level, p.velocity);
-                for c in &mut p.velocity {
-                    *c *= f64::from(0.85f32);
-                }
-                if level.fluid(ParticleLevel::block_at(p.position)).0 != Fluid::Water {
-                    p.removed = true;
-                }
-            }
-            Behaviour::SulfurBubble {
-                y_start,
-                y_end,
-                size_start,
-                y_prev,
-            } => {
-                p.base_tick(level);
-                let (fluid, source) = level.fluid_source(ParticleLevel::block_at(p.position));
-                if !(p.removed || (fluid == Fluid::Water && source)) {
-                    p.removed = true;
-                }
-                if !p.removed && p.position[1] >= y_end {
-                    p.removed = true;
-                }
-                if !p.removed && p.position[1] <= y_prev {
-                    p.removed = true;
-                }
-                // randomHorizontalWiggling, then a second, horizontal move.
-                let wiggle = |r: &mut LegacyRandom| {
-                    let f = r.next_float() * 0.003;
-                    f64::from(if r.next_boolean() { f } else { -f }) * 0.5
-                };
-                p.velocity[0] += wiggle(&mut p.random);
-                p.velocity[2] += wiggle(&mut p.random);
-                p.move_by(level, [p.velocity[0], 0.0, p.velocity[2]]);
-                let progress = ((p.position[1] - y_start) / (y_end - y_start)) as f32;
-                p.size = size_start + progress * (0.15 - size_start);
-                p.behaviour = Behaviour::SulfurBubble {
-                    y_start,
-                    y_end,
-                    size_start,
-                    y_prev: p.position[1],
-                };
-            }
-            Behaviour::NoxiousGas { fade_start } => {
-                p.base_tick(level);
-                self.sprite_from_age(p);
-                if p.age as f32 > fade_start {
-                    let frames_since_fade_out_start = p.age as f32 - fade_start;
-                    p.rgba[3] =
-                        (p.lifetime as f32 - frames_since_fade_out_start) / p.lifetime as f32;
-                }
-            }
             Behaviour::NoxiousGasCloud => {
                 p.base_tick(level);
                 if p.age % 2 == 0 {
@@ -3947,209 +4469,6 @@ impl ParticleEngine {
                     }
                 }
             }
-            Behaviour::GeyserPlume {
-                start_y,
-                max_y,
-                propulsion,
-                spray,
-                min_size,
-                max_size,
-                mut done,
-            } => {
-                p.base_tick(level);
-                if !done
-                    && (p.velocity[1] < 0.0
-                        || p.position[1] > max_y
-                        || p.position[1] == p.previous[1])
-                {
-                    p.lifetime = p.lifetime.min(p.age + 5);
-                    p.friction = 0.0;
-                    done = true;
-                }
-                let y_progress_linear =
-                    ((p.position[1] - start_y) / (max_y - start_y)).clamp(0.0, 1.0);
-                let y_progress_exponential = horizon_core::jmath::pow(y_progress_linear, 3.0);
-                p.gravity = propulsion * y_progress_exponential as f32 * 0.12;
-                p.velocity[0] = y_progress_linear * f64::from(spray[0]);
-                p.velocity[2] = y_progress_linear * f64::from(spray[1]);
-                self.sprite_from_age(p);
-                p.size = min_size + (y_progress_linear * f64::from(max_size - min_size)) as f32;
-                p.behaviour = Behaviour::GeyserPlume {
-                    start_y,
-                    max_y,
-                    propulsion,
-                    spray,
-                    min_size,
-                    max_size,
-                    done,
-                };
-            }
-            Behaviour::BubbleColumnUp => {
-                p.base_tick(level);
-                if !p.removed && level.fluid(ParticleLevel::block_at(p.position)).0 != Fluid::Water
-                {
-                    p.removed = true;
-                }
-            }
-            Behaviour::BubblePop => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age >= p.lifetime {
-                    p.removed = true;
-                    return;
-                }
-                p.velocity[1] -= f64::from(p.gravity);
-                p.move_by(level, p.velocity);
-                self.sprite_from_age(p);
-            }
-            Behaviour::CurrentDown { angle } => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age >= p.lifetime {
-                    p.removed = true;
-                    return;
-                }
-                p.velocity[0] += f64::from(0.6 * angle.cos());
-                p.velocity[2] += f64::from(0.6 * angle.sin());
-                p.velocity[0] *= 0.07;
-                p.velocity[2] *= 0.07;
-                p.move_by(level, p.velocity);
-                if level.fluid(ParticleLevel::block_at(p.position)).0 != Fluid::Water || p.on_ground
-                {
-                    p.removed = true;
-                }
-                p.behaviour = Behaviour::CurrentDown {
-                    angle: angle + 0.08,
-                };
-            }
-            Behaviour::SuspendedTown => {
-                p.previous = p.position;
-                let lifetime = p.lifetime;
-                p.lifetime -= 1;
-                if lifetime <= 0 {
-                    p.removed = true;
-                    return;
-                }
-                p.move_by(level, p.velocity);
-                for c in &mut p.velocity {
-                    *c *= 0.99;
-                }
-            }
-            Behaviour::Portal { start } => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age >= p.lifetime {
-                    p.removed = true;
-                    return;
-                }
-                let a = p.age as f32 / p.lifetime as f32;
-                let pos = 1.0 - (-a + a * a * 2.0);
-                p.position = [
-                    start[0] + p.velocity[0] * f64::from(pos),
-                    start[1] + p.velocity[1] * f64::from(pos) + f64::from(1.0 - a),
-                    start[2] + p.velocity[2] * f64::from(pos),
-                ];
-            }
-            Behaviour::ReversePortal => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age >= p.lifetime {
-                    p.removed = true;
-                    return;
-                }
-                let m = f64::from(p.age as f32 / p.lifetime as f32);
-                for i in 0..3 {
-                    p.position[i] += p.velocity[i] * m;
-                }
-            }
-            Behaviour::FlyTowards { start, .. } => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age >= p.lifetime {
-                    p.removed = true;
-                    return;
-                }
-                let pos = 1.0 - p.age as f32 / p.lifetime as f32;
-                let mut pp = 1.0 - pos;
-                pp *= pp;
-                pp *= pp;
-                p.position = [
-                    start[0] + p.velocity[0] * f64::from(pos),
-                    start[1] + p.velocity[1] * f64::from(pos) - f64::from(pp * 1.2),
-                    start[2] + p.velocity[2] * f64::from(pos),
-                ];
-            }
-            Behaviour::Transition { .. } => {
-                p.base_tick(level);
-                self.sprite_from_age(p);
-            }
-            Behaviour::Shriek { delay } => {
-                if delay > 0 {
-                    p.behaviour = Behaviour::Shriek { delay: delay - 1 };
-                } else {
-                    p.base_tick(level);
-                }
-            }
-            Behaviour::Vibration {
-                dest, rot, pitch, ..
-            } => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age >= p.lifetime {
-                    p.removed = true;
-                    return;
-                }
-                let remaining = p.lifetime - p.age;
-                if remaining > 0 {
-                    let alpha = 1.0 / f64::from(remaining);
-                    for i in 0..3 {
-                        p.position[i] += (dest[i] - p.position[i]) * alpha;
-                    }
-                }
-                let d = [
-                    p.position[0] - dest[0],
-                    p.position[1] - dest[1],
-                    p.position[2] - dest[2],
-                ];
-                p.behaviour = Behaviour::Vibration {
-                    dest,
-                    rot: d[0].atan2(d[2]) as f32,
-                    rot_o: rot,
-                    pitch: d[1].atan2((d[0] * d[0] + d[2] * d[2]).sqrt()) as f32,
-                    pitch_o: pitch,
-                };
-                self.sprite_from_age(p);
-            }
-            Behaviour::Trail { target } => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age >= p.lifetime {
-                    p.removed = true;
-                    return;
-                }
-                // `Mth.lerp(1.0 / ticksRemaining, x, target)`, infinite on the last tick.
-                let alpha = 1.0 / f64::from(p.lifetime - p.age);
-                for i in 0..3 {
-                    p.position[i] += alpha * (target[i] - p.position[i]);
-                }
-            }
-            Behaviour::HugeExplosion => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age >= p.lifetime {
-                    p.removed = true;
-                    return;
-                }
-                self.sprite_from_age(p);
-            }
             Behaviour::GustSeed { scale, delay } => {
                 if p.age % (delay + 1) == 0 {
                     for _ in 0..3 {
@@ -4193,37 +4512,6 @@ impl ParticleEngine {
                     p.removed = true;
                 }
             }
-            Behaviour::Campfire => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age < p.lifetime && p.rgba[3] > 0.0 {
-                    let r = &mut p.random;
-                    let dx = r.next_float() / 5000.0 * if r.next_boolean() { 1.0 } else { -1.0 };
-                    p.velocity[0] += f64::from(dx);
-                    let dz = r.next_float() / 5000.0 * if r.next_boolean() { 1.0 } else { -1.0 };
-                    p.velocity[2] += f64::from(dz);
-                    p.velocity[1] -= f64::from(p.gravity);
-                    p.move_by(level, p.velocity);
-                    if p.age >= p.lifetime - 60 && p.rgba[3] > 0.01 {
-                        p.rgba[3] -= 0.015;
-                    }
-                } else {
-                    p.removed = true;
-                }
-            }
-            Behaviour::SimpleAnimated { fade } => {
-                p.base_tick(level);
-                self.sprite_from_age(p);
-                if p.age > p.lifetime / 2 {
-                    p.rgba[3] = 1.0 - (p.age as f32 - (p.lifetime / 2) as f32) / p.lifetime as f32;
-                    if let Some(f) = fade {
-                        for i in 0..3 {
-                            p.rgba[i] += (f[i] - p.rgba[i]) * 0.2;
-                        }
-                    }
-                }
-            }
             Behaviour::Spark {
                 fade,
                 trail,
@@ -4245,224 +4533,7 @@ impl ParticleEngine {
                     self.pending.push(child);
                 }
             }
-            Behaviour::Spell { original_alpha } => {
-                p.base_tick(level);
-                self.sprite_from_age(p);
-                // SpellParticle.tick: alpha 0 while close, else eased back to originalAlpha.
-                if self.close_to_scoping_player(p.position) {
-                    p.rgba[3] = 0.0;
-                } else {
-                    p.rgba[3] += (original_alpha - p.rgba[3]) * 0.05;
-                }
-            }
-            Behaviour::Cloud => {
-                p.base_tick(level);
-                if !p.removed {
-                    self.sprite_from_age(p);
-                    if let Some((player, vy)) = level.player {
-                        let d2 = (player[0] - p.position[0]).powi(2)
-                            + (player[1] - p.position[1]).powi(2)
-                            + (player[2] - p.position[2]).powi(2);
-                        if d2 < 4.0 && p.position[1] > player[1] {
-                            let y = p.position[1] + (player[1] - p.position[1]) * 0.2;
-                            p.velocity[1] += (vy - p.velocity[1]) * 0.2;
-                            p.set_pos([p.position[0], y, p.position[2]]);
-                        }
-                    }
-                }
-            }
-            Behaviour::Leaves {
-                mut rot_speed,
-                spin,
-                wind,
-                swirl,
-                flow,
-                flow_scale,
-                swirl_period,
-            } => {
-                p.previous = p.position;
-                let lifetime = p.lifetime;
-                p.lifetime -= 1;
-                if lifetime <= 0 {
-                    p.removed = true;
-                }
-                if !p.removed {
-                    let alive = (300 - p.lifetime) as f32;
-                    let relative = (alive / 300.0).min(1.0);
-                    let (mut xa, mut za) = (0.0f64, 0.0f64);
-                    if flow {
-                        xa += flow_scale[0] * f64::from(relative).powf(1.25);
-                        za += flow_scale[1] * f64::from(relative).powf(1.25);
-                    }
-                    if swirl {
-                        let rel = f64::from(relative);
-                        xa += rel * (rel * swirl_period).cos() * f64::from(wind);
-                        za += rel * (rel * swirl_period).sin() * f64::from(wind);
-                    }
-                    p.velocity[0] += xa * f64::from(0.0025f32);
-                    p.velocity[2] += za * f64::from(0.0025f32);
-                    p.velocity[1] -= f64::from(p.gravity);
-                    rot_speed += spin / 20.0;
-                    p.o_roll = p.roll;
-                    p.roll += rot_speed / 20.0;
-                    p.move_by(level, p.velocity);
-                    if p.on_ground
-                        || p.lifetime < 299 && (p.velocity[0] == 0.0 || p.velocity[2] == 0.0)
-                    {
-                        p.removed = true;
-                    }
-                    if !p.removed {
-                        let f = f64::from(p.friction);
-                        for c in &mut p.velocity {
-                            *c *= f;
-                        }
-                    }
-                }
-                p.behaviour = Behaviour::Leaves {
-                    rot_speed,
-                    spin,
-                    wind,
-                    swirl,
-                    flow,
-                    flow_scale,
-                    swirl_period,
-                };
-            }
-            Behaviour::FallingDust { rot_speed } => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age >= p.lifetime {
-                    p.removed = true;
-                    return;
-                }
-                self.sprite_from_age(p);
-                p.o_roll = p.roll;
-                p.roll += std::f32::consts::PI * rot_speed * 2.0;
-                if p.on_ground {
-                    p.o_roll = 0.0;
-                    p.roll = 0.0;
-                }
-                p.move_by(level, p.velocity);
-                p.velocity[1] -= f64::from(0.003f32);
-                p.velocity[1] = p.velocity[1].max(f64::from(-0.14f32));
-            }
-            Behaviour::SquidInk => {
-                // SimpleAnimatedParticle.tick, then SquidInkParticle's.
-                p.base_tick(level);
-                self.sprite_from_age(p);
-                let half = |p: &mut Particle| {
-                    if p.age > p.lifetime / 2 {
-                        p.rgba[3] =
-                            1.0 - (p.age as f32 - (p.lifetime / 2) as f32) / p.lifetime as f32;
-                    }
-                };
-                half(p);
-                if !p.removed {
-                    self.sprite_from_age(p);
-                    half(p);
-                    let b = ParticleLevel::block_at(p.position);
-                    if level.facts.is_air(level.world.block(b[0], b[1], b[2])) {
-                        p.velocity[1] -= f64::from(0.0074f32);
-                    }
-                }
-            }
-            Behaviour::Firefly => {
-                p.base_tick(level);
-                let b = ParticleLevel::block_at(p.position);
-                if !level.facts.is_air(level.world.block(b[0], b[1], b[2])) {
-                    p.removed = true;
-                } else {
-                    p.rgba[3] = fade_amount(p.lifetime_progress(p.age as f32), 0.3, 0.5);
-                    if p.random.next_float() > 0.95 || p.age == 1 {
-                        let r = &mut p.random;
-                        let mut speed = || f64::from(-0.05f32 + 0.1 * r.next_float());
-                        p.velocity = [speed(), speed(), speed()];
-                    }
-                }
-            }
-            Behaviour::Wake => {
-                p.previous = p.position;
-                let life = 60 - p.lifetime;
-                let lifetime = p.lifetime;
-                p.lifetime -= 1;
-                if lifetime <= 0 {
-                    p.removed = true;
-                    return;
-                }
-                p.velocity[1] -= f64::from(p.gravity);
-                p.move_by(level, p.velocity);
-                for c in &mut p.velocity {
-                    *c *= f64::from(0.98f32);
-                }
-                let size = life as f32 * 0.001;
-                p.set_size(size, size);
-                // SpriteSet.get(life % 4, 4).
-                if let Some(set) = p.set {
-                    let sprites = &self.set_sprites[set as usize];
-                    let index = (life % 4) as usize * (sprites.len() - 1) / 4;
-                    p.sprite = Sprite::Index(sprites[index]);
-                }
-            }
-            Behaviour::DustPlume => {
-                p.gravity *= 0.88;
-                p.friction *= 0.92;
-                p.base_tick(level);
-                self.sprite_from_age(p);
-            }
-            Behaviour::FlyStraight { start, colors } => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age >= p.lifetime {
-                    p.removed = true;
-                    return;
-                }
-                let normalized = p.age as f32 / p.lifetime as f32;
-                let along = 1.0 - normalized;
-                for i in 0..3 {
-                    p.position[i] = start[i] + p.velocity[i] * f64::from(along);
-                }
-                // ARGB.srgbLerp: Mth.lerpInt on each 8-bit channel.
-                let lerp = |shift: u32| {
-                    let (a, b) = (
-                        (colors[0] >> shift & 255) as i32,
-                        (colors[1] >> shift & 255) as i32,
-                    );
-                    (a + (normalized * (b - a) as f32).floor() as i32) as f32 / 255.0
-                };
-                p.set_color(lerp(16), lerp(8), lerp(0));
-                p.rgba[3] = lerp(24);
-            }
-            Behaviour::DragonBreath { mut hit_ground } => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age >= p.lifetime {
-                    p.removed = true;
-                    return;
-                }
-                self.sprite_from_age(p);
-                if p.on_ground {
-                    p.velocity[1] = 0.0;
-                    hit_ground = true;
-                }
-                if hit_ground {
-                    p.velocity[1] += 0.002;
-                }
-                p.move_by(level, p.velocity);
-                if p.position[1] == p.previous[1] {
-                    p.velocity[0] *= 1.1;
-                    p.velocity[2] *= 1.1;
-                }
-                let f = f64::from(p.friction);
-                p.velocity[0] *= f;
-                p.velocity[2] *= f;
-                if hit_ground {
-                    p.velocity[1] *= f;
-                }
-                p.behaviour = Behaviour::DragonBreath { hit_ground };
-            }
+            _ => self.alone().tick(p, level),
         }
     }
 
@@ -5253,6 +5324,80 @@ mod tests {
             engine.tick_particle(&mut kept, &level);
         }
         assert_eq!(sprite(&kept), 11, "no animation keeps the spawn sprite");
+    }
+
+    /// Ticking on threads gives each particle what ticking one by one does.
+    #[test]
+    fn threads_tick_particles_as_one_thread_does() {
+        use horizon_world::{
+            DATA_VERSION,
+            collision::CachedCollisionRegistry,
+            nbt::Tag,
+            registry::{BlockRegistry, BlockStateId},
+        };
+        let registry = BlockRegistry::from_nbt(&Tag::compound([
+            ("DataVersion", Tag::Int(DATA_VERSION)),
+            (
+                "states",
+                Tag::List(vec![Tag::String("minecraft:air".into())]),
+            ),
+            ("defaults", Tag::compound([("minecraft:air", Tag::Int(0))])),
+        ]))
+        .unwrap();
+        let cached = CachedCollisionRegistry::from_nbt(
+            &Tag::compound([
+                ("DataVersion", Tag::Int(DATA_VERSION)),
+                (
+                    "states",
+                    Tag::List(vec![Tag::String("minecraft:air".into())]),
+                ),
+                ("shapes", Tag::List(vec![])),
+                ("cached_shapes", Tag::IntArray(vec![-1])),
+            ]),
+            &registry,
+        )
+        .unwrap();
+        let collision = BlockCollisionRegistry::new(std::sync::Arc::new(cached)).unwrap();
+        let facts = BlockFacts {
+            states: vec![],
+            air: BlockStateId(0),
+            woods: HashMap::new(),
+        };
+        let world = World::new(BlockStateId(0), 0);
+        let level = ParticleLevel {
+            world: &world,
+            facts: &facts,
+            collision: &collision,
+            player: None,
+        };
+        let mut engine = ParticleEngine::new(Path::new(""), &HashMap::new(), &HashSet::new());
+        let many = |n: usize| {
+            (0..n)
+                .map(|i| {
+                    let mut p = Particle::blank(ParticleType::Smoke, [i as f64, 70.0, 0.0]);
+                    p.behaviour = Behaviour::Campfire;
+                    p.lifetime = 1000;
+                    p.velocity = [i as f64 * 1e-3, 0.01, 0.0];
+                    p.random = LegacyRandom::new(i as i64);
+                    p
+                })
+                .collect::<Vec<_>>()
+        };
+        let state = |p: &Particle| (p.position, p.velocity, p.age, p.rgba, p.removed);
+        let count = 6000;
+        assert!(particle_threads(count, horizon_threads::worker_count().max(4)) > 1);
+        engine.particles = many(count);
+        for _ in 0..3 {
+            engine.tick(&level);
+        }
+        let mut again = many(count);
+        for _ in 0..3 {
+            for p in &mut again {
+                engine.tick_particle(p, &level);
+            }
+        }
+        assert_eq!(engine.particles.len(), count);
+        assert!(engine.particles.iter().map(state).eq(again.iter().map(state)));
     }
 
     #[test]

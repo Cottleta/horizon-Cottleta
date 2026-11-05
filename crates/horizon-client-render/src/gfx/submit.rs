@@ -44,11 +44,11 @@ pub struct Detached {
     pub frame: wgpu::Texture,
 }
 
-/// Whether frames are drawn offscreen and shown by the submit thread: only with
-/// `HORIZON_DETACHED_PRESENT=1`. On a real screen the extra copy gave no FPS and worse lows.
+/// Whether frames are drawn offscreen and shown by the submit thread, unless
+/// `HORIZON_DETACHED_PRESENT` says (`0` off).
 pub fn detached() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("HORIZON_DETACHED_PRESENT").as_deref() == Ok("1"))
+    *ON.get_or_init(|| std::env::var("HORIZON_DETACHED_PRESENT").as_deref() != Ok("0"))
 }
 
 struct Thread {

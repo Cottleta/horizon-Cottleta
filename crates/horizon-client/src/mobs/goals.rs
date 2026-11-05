@@ -647,7 +647,11 @@ impl Mob {
             return false;
         };
         let eye = Vec3::new(self.position.x, self.eye_y(), self.position.z);
-        let v = w.line_of_sight(eye, Vec3::new(t.position.x, t.eye_y, t.position.z));
+        let v = w.line_of_sight_for(
+            Some(self.position.y),
+            eye,
+            Vec3::new(t.position.x, t.eye_y, t.position.z),
+        );
         self.ai.seen_cache.push((who, v));
         v
     }
@@ -753,22 +757,12 @@ impl Mob {
         if !p.alive || p.spectator {
             return false;
         }
-        // LivingEntity.getVisibilityPercent
-        let mut visibility = if scale { p.visibility_percent() } else { 1.0 };
-        if let Some(head) = p.head.as_ref().filter(|_| scale) {
-            let skull = match self.species() {
-                Species::Zombie | Species::Husk | Species::Drowned | Species::ZombieVillager => {
-                    "minecraft:zombie_head"
-                }
-                Species::Skeleton | Species::Stray | Species::Bogged => "minecraft:skeleton_head",
-                Species::Creeper => "minecraft:creeper_head",
-                Species::Piglin | Species::PiglinBrute => "minecraft:piglin_head",
-                _ => "",
-            };
-            if &**head == skull {
-                visibility *= 0.5;
-            }
-        }
+        // LivingEntity.getVisibilityPercent, including worn mob_visibility.
+        let visibility = if scale {
+            p.visibility_percent(Some(self.kind.id.as_str()), w.items)
+        } else {
+            1.0
+        };
         let dist = (range * visibility).max(2.0);
         if self.distance_sqr(p.position) > dist * dist {
             return false;
@@ -1038,7 +1032,11 @@ impl Goal for Stroll {
     fn flags(&self) -> u8 {
         MOVE
     }
+    /// RandomStrollGoal.canUse.
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        if super::riders::mob_controlled(m, cx.w) {
+            return false;
+        }
         if self.gate.is_some_and(|gate| !gate(m, cx.w)) {
             return false;
         }
@@ -1088,8 +1086,9 @@ impl Goal for Stroll {
         self.force = false;
         true
     }
-    fn can_continue(&mut self, m: &mut Mob, _: &mut Cx) -> bool {
-        !m.ai.nav.is_done()
+    /// RandomStrollGoal.canContinueToUse.
+    fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        !m.ai.nav.is_done() && !super::riders::mob_controlled(m, cx.w)
     }
     fn start(&mut self, m: &mut Mob, cx: &mut Cx) {
         m.nav_move_to(cx.w, self.wanted, self.speed);
@@ -1943,6 +1942,48 @@ impl AvoidEntity {
         self.seen_when = Some(f);
         self
     }
+    /// The target the goal flees from, before the random retreat position and
+    /// the path. `AvoidEntityGoal` finds it with `TargetingConditions.forCombat()`:
+    /// for the player that is `canAttack` (`LivingEntity.canAttack` refuses a
+    /// player in Peaceful), the range scaled by `getVisibilityPercent` with a
+    /// floor of 2 and line of sight required; the species arm needs the line of
+    /// sight too, because `checkLineOfSight` defaults to true. Without them an
+    /// animal fled a player behind a wall, a sneaking or invisible one from the
+    /// full range, and in Peaceful where vanilla animals ignore the player.
+    fn avoid_target(&mut self, m: &mut Mob, cx: &mut Cx) -> Option<Vec3> {
+        let max = f64::from(self.max_dist);
+        if matches!(self.what, Avoid::Player) {
+            let wanted = cx.w.player.as_ref().is_none_or(|p| {
+                self.player_when.is_none_or(|f| f(m, p))
+                    && (p.position.y - m.position.y).abs() <= max + 3.0
+            });
+            // `can_target_player` refuses a player in Peaceful (`spares_players`).
+            if !wanted || !m.can_target_player(cx.w, max, true) {
+                return None;
+            }
+            return cx.w.player.as_ref().map(|p| p.position);
+        }
+        let Avoid::Species(list) = &self.what else {
+            return None;
+        };
+        let id = m.id;
+        let y = m.position.y;
+        let seen_when = self.seen_when;
+        let mut hit = None;
+        for s in cx.w.nearby(m.position, max, move |s| {
+            s.id != id
+                && list.contains(&s.species)
+                && seen_when.is_none_or(|f| f(s))
+                && (s.position.y - y).abs() <= 3.0 + max
+        }) {
+            if m.sees(cx.w, Who::Mob(s.id)) {
+                hit = Some((s.id, s.position));
+                break;
+            }
+        }
+        self.found = hit.map(|h| h.0);
+        hit.map(|h| h.1)
+    }
 }
 impl Goal for AvoidEntity {
     goal_clone!();
@@ -1956,38 +1997,12 @@ impl Goal for AvoidEntity {
             return false;
         }
         let max = f64::from(self.max_dist);
-        let found = match &self.what {
-            Avoid::Player => {
-                cx.w.player
-                    .as_ref()
-                    .filter(|p| {
-                        p.alive
-                            && !p.creative
-                            && self.player_when.is_none_or(|f| f(m, p))
-                            && m.distance_sqr(p.position) <= max * max
-                            && (p.position.y - m.position.y).abs() <= max + 3.0
-                    })
-                    .map(|p| p.position)
-            }
-            Avoid::Species(list) => {
-                let id = m.id;
-                let y = m.position.y;
-                let seen_when = self.seen_when;
-                let hit =
-                    cx.w.nearby(m.position, max, move |s| {
-                        s.id != id
-                            && list.contains(&s.species)
-                            && seen_when.is_none_or(|f| f(s))
-                            && (s.position.y - y).abs() <= 3.0 + max
-                    })
-                    .map(|s| (s.id, s.position))
-                    .next();
-                self.found = hit.map(|h| h.0);
-                hit.map(|h| h.1)
-            }
+        let Some(from) = self.avoid_target(m, cx) else {
+            return false;
         };
-        let Some(from) = found else { return false };
-        if m.distance_sqr(from) > max * max {
+        // The player arm already applied the visibility-scaled range (floor 2);
+        // the species arm only got a box test from `nearby`.
+        if !matches!(self.what, Avoid::Player) && m.distance_sqr(from) > max * max {
             return false;
         }
         let Some(pos) = m.default_random_pos_away(cx.w, 16, 7, [from.x, from.y, from.z]) else {
@@ -2239,14 +2254,17 @@ impl Goal for Breed {
         self.love_time += 1;
         if self.love_time >= reduced(60) && m.distance_sqr(p.position) < 9.0 {
             // Llama.getBreedOffspring and finalizeSpawnChildFromBreeding's
-            // experience, from the parent's random.
+            // experience, from the parent's random: vanilla draws it only
+            // inside the `mob_drops` check.
             let llama = super::llama::is_llama(m.species()).then(|| {
                 let o = super::llama::breed_offspring(m, &p);
-                let xp = 1 + m.random.next_int_bound(7).unwrap_or(0);
-                cx.events.push(MobEvent::Experience {
-                    at: [m.position.x, m.position.y, m.position.z],
-                    amount: xp as u32,
-                });
+                if cx.w.mob_drops {
+                    let xp = 1 + m.random.next_int_bound(7).unwrap_or(0);
+                    cx.events.push(MobEvent::Experience {
+                        at: [m.position.x, m.position.y, m.position.z],
+                        amount: xp as u32,
+                    });
+                }
                 Box::new(o)
             });
             m.extra.in_love = 0;
@@ -2610,7 +2628,7 @@ impl Goal for EatBlock {
                         drop: false,
                     });
                 }
-                super::ai::ate(m);
+                super::ai::ate(m, cx.events);
             } else if cx.w.block_name(x, y - 1, z) == "minecraft:grass_block" {
                 // The particles and the dirt `setBlock` are the same gate.
                 if cx.w.mob_griefing {
@@ -2622,7 +2640,7 @@ impl Goal for EatBlock {
                         flags: horizon_world::level::flags::UPDATE_CLIENTS,
                     });
                 }
-                super::ai::ate(m);
+                super::ai::ate(m, cx.events);
             }
         }
     }
@@ -2898,17 +2916,18 @@ mod eat_block_tests {
 
     /// A sheep on a wide grass shelf, ticked long enough for its `EatBlockGoal`
     /// (1 in 1000 a tick) to fire several times: every event it pushed, with
-    /// the `mob_griefing` game rule at `griefing`. `tufts` puts short grass at
-    /// the sheep's own feet, so the goal takes the `destroyBlock` half; without
-    /// it the sheep stands on the grass and takes the grass-to-dirt half.
+    /// the `mob_griefing` game rule at `griefing` and `mob_drops` on. `tufts`
+    /// puts short grass at the sheep's own feet, so the goal takes the
+    /// `destroyBlock` half; without it the sheep stands on the grass and takes
+    /// the grass-to-dirt half.
     fn sheep_events(griefing: bool, tufts: bool) -> Option<Vec<MobEvent>> {
         let mut out = None;
         let build = |world: &mut crate::world::World,
                      registry: &horizon_world::registry::BlockRegistry| {
             let grass = registry.default_state("minecraft:grass_block").unwrap();
             let tuft = registry.default_state("minecraft:short_grass").unwrap();
-            for cx in -1..1 {
-                for cz in -1..1 {
+            for cx in -3..3 {
+                for cz in -3..3 {
                     world
                         .chunks
                         .insert((cx, cz), Arc::new(crate::chunk::Chunk::empty(cx, cz)));
@@ -2923,7 +2942,7 @@ mod eat_block_tests {
                 }
             }
         };
-        with_built_test_world_rules(&[], griefing, build, |w, types| {
+        with_built_test_world_rules(&[], griefing, true, build, |w, types| {
             let kind = Arc::new(types.types["minecraft:sheep"].clone());
             let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
             let mut random = LegacyRandom::new(0);
@@ -3026,6 +3045,100 @@ mod built_by_player_tests {
 }
 
 #[cfg(test)]
+mod avoid_entity_targeting_tests {
+    use super::*;
+    use crate::mobs::world::test_player;
+    use crate::mobs::world::with_built_test_world;
+    use std::sync::Arc;
+
+    /// `(the player is inside the plain distance range, the goal picks them)`.
+    /// The wall stands at z 5..6, between the rabbit at z 0.5 and the player at
+    /// z 10.5, so sight is the only thing that changes between the two.
+    fn target(difficulty: u8, wall: bool) -> Option<(bool, bool)> {
+        let build = move |world: &mut crate::world::World,
+                          registry: &horizon_world::registry::BlockRegistry| {
+            for cx in -1..1 {
+                for cz in -1..1 {
+                    world.chunks.insert(
+                        (cx, cz),
+                        std::sync::Arc::new(crate::chunk::Chunk::empty(cx, cz)),
+                    );
+                }
+            }
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            for x in -4..5 {
+                for z in -4..15 {
+                    world.set(x, 64, z, stone).unwrap();
+                }
+            }
+            if wall {
+                for x in -4..5 {
+                    for y in 65..68 {
+                        for z in 5..7 {
+                            world.set(x, y, z, stone).unwrap();
+                        }
+                    }
+                }
+            }
+        };
+        let mut out = None;
+        let ran = with_built_test_world(&[], build, |w, types| {
+            let mut world = w.clone();
+            world.difficulty = super::super::spawning::LocalDifficulty::new(difficulty, 0, 0, 0.0);
+            let player = test_player(Vec3::new(0.5, 65.0, 10.5));
+            world.player = Some(player.clone());
+            let mut m = Mob::new(
+                1,
+                Arc::new(types.types["minecraft:rabbit"].clone()),
+                Vec3::new(0.5, 65.0, 0.5),
+                0.0,
+            );
+            let mut goal = AvoidEntity::new(Avoid::Player, 20.0, 1.0, 1.0);
+            let (mut lr, mut events) = (horizon_core::random::LegacyRandom::new(0), Vec::new());
+            let mut cx = Cx {
+                w: &world,
+                lr: &mut lr,
+                events: &mut events,
+            };
+            let in_range = m.distance_sqr(player.position) <= 20.0 * 20.0;
+            out = Some((in_range, goal.avoid_target(&mut m, &mut cx).is_some()));
+        });
+        ran.then_some(out).flatten()
+    }
+
+    /// `Sensing.hasLineOfSight`: the player is ten blocks away, well inside the
+    /// 20 block range, but the wall is between them, so the goal must not pick
+    /// them (it did before: only the distance was checked).
+    #[test]
+    fn a_rabbit_does_not_flee_a_player_behind_a_wall() {
+        if let Some((in_range, picked)) = target(2, true) {
+            assert!(in_range, "the player is inside the plain distance range");
+            assert!(!picked, "the rabbit picked a player it cannot see");
+        }
+    }
+
+    /// `LivingEntity.canAttack`: in Peaceful no player is a target at all, so
+    /// the goal does not pick them even in plain sight.
+    #[test]
+    fn a_rabbit_does_not_flee_in_peaceful() {
+        if let Some((in_range, picked)) = target(0, false) {
+            assert!(in_range, "the player is inside the plain distance range");
+            assert!(!picked, "the rabbit picked a player in Peaceful");
+        }
+    }
+
+    /// The control: the same world on normal difficulty with nothing in the way
+    /// still picks the player.
+    #[test]
+    fn a_rabbit_flees_a_player_it_can_see() {
+        if let Some((in_range, picked)) = target(2, false) {
+            assert!(in_range, "the player is inside the plain distance range");
+            assert!(picked, "the rabbit ignored a player in the open");
+        }
+    }
+}
+
+#[cfg(test)]
 mod peaceful_targets_tests {
     use super::*;
     use crate::mobs::world::{test_player, with_test_world};
@@ -3110,5 +3223,99 @@ mod move_to_block_tests {
         }
         let goal = MoveToBlock::new(1.0, 24, 2);
         assert_eq!(goal.walk([5, 64, 5], |_| true), Some([5, 63, 5]));
+    }
+}
+
+#[cfg(test)]
+mod breed_xp_tests {
+    use super::*;
+
+    /// Two llamas in love, two blocks apart on a flat grass shelf, ticked by
+    /// the AI until the first breeds: its own events, with the `mob_drops`
+    /// game rule at `drops`. `None` without the vanilla data.
+    fn llama_events(drops: bool) -> Option<Vec<MobEvent>> {
+        // The partner's `Seen` needs its kind, so two loads.
+        let mut kind = None;
+        crate::mobs::world::with_built_test_world_rules(&[], true, drops, shelf, |_, types| {
+            kind = Some(Arc::new(types.types["minecraft:llama"].clone()));
+        });
+        let kind = kind?;
+        let mut partner = Mob::new(2, kind.clone(), Vec3::new(2.5, 64.0, 0.5), 0.0);
+        // AbstractHorse.canParent: only tame llamas breed.
+        partner.extra.tame = true;
+        partner.extra.in_love = 600;
+        let seen = [partner.seen(None)];
+        let mut out = None;
+        crate::mobs::world::with_built_test_world_rules(&seen, true, drops, shelf, |w, _| {
+            let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
+            m.extra.in_love = 600;
+            m.extra.tame = true;
+            let mut lr = LegacyRandom::new(0);
+            let mut events = Vec::new();
+            for _ in 0..600 {
+                crate::mobs::ai::tick(&mut m, w, &mut lr, &mut events);
+                if events
+                    .iter()
+                    .any(|e| matches!(e, MobEvent::Breed { parent: 1, .. }))
+                {
+                    break;
+                }
+            }
+            out = Some(events);
+        });
+        out
+    }
+
+    /// A flat grass shelf two llamas can stand on.
+    fn shelf(world: &mut crate::world::World, registry: &horizon_world::registry::BlockRegistry) {
+        let grass = registry.default_state("minecraft:grass_block").unwrap();
+        for cx in -3..3 {
+            for cz in -3..3 {
+                world
+                    .chunks
+                    .insert((cx, cz), Arc::new(crate::chunk::Chunk::empty(cx, cz)));
+            }
+        }
+        for x in -8..=8 {
+            for z in -8..=8 {
+                world.set(x, 63, z, grass).unwrap();
+            }
+        }
+    }
+
+    /// `finalizeSpawnChildFromBreeding` makes the experience draw only inside
+    /// the `mob_drops` check, from the breeding parent's own random: the
+    /// breed goal pushes one 1-7 orb with the rule on, none with it off, and
+    /// the pair breeds either way.
+    #[test]
+    fn the_breed_xp_follows_the_mob_drops_rule() {
+        let Some(on) = llama_events(true) else {
+            return;
+        };
+        let Some(off) = llama_events(false) else {
+            return;
+        };
+        let orb = |events: &[MobEvent]| {
+            events.iter().find_map(|e| match e {
+                MobEvent::Experience { amount, .. } => Some(*amount),
+                _ => None,
+            })
+        };
+        assert!(
+            orb(&on).is_some_and(|a| (1..=7).contains(&a)),
+            "mob_drops on: one orb of 1-7, got {:?}",
+            orb(&on)
+        );
+        assert!(orb(&off).is_none(), "mob_drops off: no experience draw");
+        assert!(
+            on.iter()
+                .any(|e| matches!(e, MobEvent::Breed { parent: 1, .. })),
+            "mob_drops on: the pair breeds"
+        );
+        assert!(
+            off.iter()
+                .any(|e| matches!(e, MobEvent::Breed { parent: 1, .. })),
+            "mob_drops off: the pair still breeds"
+        );
     }
 }

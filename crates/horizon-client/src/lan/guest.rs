@@ -32,15 +32,28 @@ pub struct SavedBody {
     pub fire_ticks: i32,
     pub air: i32,
     pub fall_distance: f64,
+    /// `Motion`: the delta movement, blocks a tick.
+    pub velocity: [f64; 3],
+    /// `foodExhaustionLevel` and `foodTickTimer` (FoodData); the food level
+    /// and saturation live on the guest.
+    pub food_exhaustion: f32,
+    pub food_tick_timer: i32,
+    /// `TicksFrozen`: the time spent in powder snow.
+    pub ticks_frozen: i32,
 }
 
 impl SavedBody {
     /// The body state of `motion`, to save.
     pub fn of(motion: &PlayerMotion) -> Self {
+        let v = motion.velocity;
         Self {
             fire_ticks: motion.fire_ticks,
             air: motion.air,
             fall_distance: motion.fall_distance,
+            velocity: [v.x, v.y, v.z],
+            food_exhaustion: motion.health.food.exhaustion,
+            food_tick_timer: motion.health.food.timer,
+            ticks_frozen: motion.ticks_frozen,
         }
     }
     /// Put it on a new body.
@@ -48,6 +61,11 @@ impl SavedBody {
         motion.fire_ticks = self.fire_ticks;
         motion.air = self.air;
         motion.fall_distance = self.fall_distance;
+        let [x, y, z] = self.velocity;
+        motion.velocity = Vec3::new(x, y, z);
+        motion.health.food.exhaustion = self.food_exhaustion;
+        motion.health.food.timer = self.food_tick_timer;
+        motion.ticks_frozen = self.ticks_frozen;
     }
 }
 
@@ -104,6 +122,9 @@ pub struct Guest {
     pub head_yaw: f32,
     pub on_ground: bool,
     pub game_mode: i32,
+    /// `previousPlayerGameType`: the mode left last, which the game mode
+    /// switcher goes back to; none until the mode first changes.
+    pub previous_game_mode: Option<i32>,
     /// The permission level (0 none, 2 game masters, 4 owners).
     pub permission: u8,
     pub sneaking: bool,
@@ -112,6 +133,8 @@ pub struct Guest {
     pub input: u8,
     /// The boat or minecart the player rides (`Entity.getVehicle`).
     pub vehicle: Option<u32>,
+    /// `Entity.boardingCooldown`: ticks before it may board a vehicle again.
+    pub boarding_cooldown: i32,
     /// When the player last got into its vehicle, from `Hub.seat_order`:
     /// `Entity.addPassenger` seats a rider behind the players already in the
     /// vehicle, so the smallest order on a boat is its controlling rider
@@ -315,6 +338,21 @@ pub struct Guest {
     pub death_time: u32,
     /// The join packets were sent (PlayerList.placeNewPlayer ran).
     pub placed: bool,
+    /// The hand-over a proxy started by exporting it with `freeze`
+    /// (`arrivals::Handover`): while it lasts, what it sends other than its
+    /// acknowledgements is not acted on, and every export answers with the
+    /// same record. It ends after `[transfer]`'s `max_freeze_seconds`.
+    pub handover: Option<super::arrivals::Handover>,
+    /// Its login started while a proxy said it would arrive from another
+    /// server, and used that expectation up (`player-expect`).
+    pub expected: bool,
+    /// Leaving for another server (`player-release moved`) without the "left the
+    /// game" line.
+    pub quiet_leave: bool,
+    /// Taken out of the world because a proxy moved it to another server: the game
+    /// saves neither its player file nor its records, since the other server has the
+    /// player now.
+    pub released: bool,
     /// Root command names the mods took out of this player's command tree
     /// (`native_player_commands_sent`); their tree is sent without them.
     pub hidden_commands: Vec<String>,
@@ -377,7 +415,7 @@ impl Guest {
             entity_id,
             sender: j.sender,
             latency: j.latency,
-            view_distance: (i32::from(j.info.view_distance)).clamp(2, view_distance),
+            view_distance: i32::from(j.info.view_distance).max(2).min(view_distance),
             info: j.info,
             brand: j.brand,
             position,
@@ -387,10 +425,12 @@ impl Guest {
             head_yaw: 0.0,
             on_ground: false,
             game_mode: SURVIVAL,
+            previous_game_mode: None,
             permission: 0,
             sneaking: false,
             input: 0,
             vehicle: None,
+            boarding_cooldown: 0,
             vehicle_order: 0,
             vehicle_good: None,
             sprinting: false,
@@ -487,6 +527,10 @@ impl Guest {
             dead: false,
             death_time: 0,
             placed: false,
+            handover: None,
+            expected: j.expected,
+            quiet_leave: false,
+            released: false,
             hidden_commands: Vec::new(),
             flying_speed: 0.05,
             dimension: "minecraft:overworld".into(),
@@ -622,6 +666,14 @@ impl Guest {
     /// loaded, or waited for long enough. Until then the player's actions are ignored.
     pub fn client_loaded(&self) -> bool {
         !self.dead && self.load_timeout == 0
+    }
+    /// `ServerPlayerGameMode.changeGameModeForPlayer`: the mode left becomes
+    /// the previous one; the mode already in use changes nothing.
+    pub fn change_game_mode(&mut self, mode: i32) {
+        if mode != self.game_mode {
+            self.previous_game_mode = Some(self.game_mode);
+            self.game_mode = mode;
+        }
     }
     pub fn spectator(&self) -> bool {
         self.game_mode == SPECTATOR
@@ -887,6 +939,13 @@ fn network_stack(
         ));
     }
     if let Some(d) = s.data() {
+        // TridentItem.use runs on both peers: each must see the stack's own durability limit.
+        if let Some(horizon_world::nbt::Tag::Int(max)) = d.other("minecraft:max_damage") {
+            stack.added.push((
+                horizon_protocol::item::component::MAX_DAMAGE,
+                horizon_protocol::item::Component::Int(*max),
+            ));
+        }
         // Unbreakable is a unit component; clients need its presence for the
         // durability bar, tooltip and item model, including in single player.
         if d.other("minecraft:unbreakable").is_some() {
@@ -1237,6 +1296,23 @@ fn network_stack(
             .removed
             .push(horizon_protocol::item::component::RARITY);
     }
+    // `DataComponents.MAX_STACK_SIZE`: an int in 1..=99 on this stack, not the
+    // item's default. A removed component falls back to that default.
+    if s.data()
+        .is_some_and(|d| d.other("!minecraft:max_stack_size").is_some())
+    {
+        stack
+            .removed
+            .push(horizon_protocol::item::component::MAX_STACK_SIZE);
+    } else if let Some(horizon_world::nbt::Tag::Int(n)) =
+        s.data().and_then(|d| d.other("minecraft:max_stack_size"))
+        && (1..=99).contains(n)
+    {
+        stack.added.push((
+            horizon_protocol::item::component::MAX_STACK_SIZE,
+            horizon_protocol::item::Component::Int(*n),
+        ));
+    }
     // The component as loaded, so a translatable name stays one.
     if let Some(name) = s.data().and_then(|d| d.other("minecraft:item_name")) {
         stack.added.push((
@@ -1477,6 +1553,7 @@ mod tests {
                 sender: PlayerSender::new(tx, Arc::new(std::sync::atomic::AtomicUsize::new(0))),
                 latency: Arc::new(AtomicI32::new(0)),
                 address: "127.0.0.1:1".parse().unwrap(),
+                expected: false,
             },
             1,
             position,

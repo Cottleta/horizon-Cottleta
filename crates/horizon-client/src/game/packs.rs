@@ -30,16 +30,11 @@ pub fn packs_dir() -> PathBuf {
         .unwrap_or_default()
         .join("resourcepacks")
 }
+mod folder;
+
 /// `Util.getPlatform().openPath`: the system file manager on the folder.
 pub fn open_folder(dir: &Path) {
-    let program = if cfg!(target_os = "windows") {
-        "explorer"
-    } else if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    if let Err(e) = std::process::Command::new(program).arg(dir).spawn() {
+    if let Err(e) = folder::command(dir).and_then(|mut command| command.spawn()) {
         log::warn!("Horizon: could not open {}: {e}", dir.display());
     }
 }
@@ -251,8 +246,10 @@ impl Game<'_> {
                 match &mut self.server_packs.load_fail {
                     Some(toast) => toast.reset(title, None),
                     None => {
-                        self.server_packs.load_fail =
-                            Some(horizon_client::toasts::SystemToast::new(title, None));
+                        if self.toast_allowed("system", "pack_load_failure") {
+                            self.server_packs.load_fail =
+                                Some(horizon_client::toasts::SystemToast::new(title, None));
+                        }
                     }
                 }
                 return;
@@ -357,6 +354,10 @@ impl Game<'_> {
                     self.settings.horizon.translucent_batching,
                     self.settings.horizon.wide_frame(),
                     super::shader_packs::picked_pack_draws_flat(&self.settings),
+                    (
+                        self.settings.file.int("textureFiltering"),
+                        self.settings.file.int("maxAnisotropyBit"),
+                    ),
                 )
             })
             .transpose()

@@ -3,6 +3,7 @@
 //! entities, the selector options `scores=`, `team=` and `tag=`, the
 //! commands' [`Env`] and the sidebar.
 use super::{Game, chat::PLAYER_NAME, commands::Target};
+use horizon_client::actions::Action;
 use horizon_client::{
     command::{
         Context,
@@ -351,7 +352,16 @@ impl Game<'_> {
                 // EntityPredicates: the datapack predicate with the entity as
                 // `this` and the entity's position as origin.
                 self.ensure_datapacks();
-                let view = self.entity_view_of(t);
+                // The player's records only as far as the predicates may ask.
+                let asked = (s.predicates.iter())
+                    .filter_map(|(id, _)| self.fns.store.predicates.get(id))
+                    .fold(
+                        Default::default(),
+                        |all: horizon_client::advancements::FactsAsked, p| {
+                            all.or(horizon_client::advancements::facts_asked_in(p))
+                        },
+                    );
+                let view = self.entity_view_asking(t, asked);
                 let origin = self.target_position(t).unwrap_or_default();
                 for (id, negated) in &s.predicates {
                     // EntitySelectorOptions rejects a missing registry entry
@@ -810,8 +820,7 @@ impl Game<'_> {
             self.skin_slots_flushed = self.ticks;
             self.flush_skin_slots();
         }
-        let key = self.screen == super::Screen::Playing
-            && self.keys.contains(&winit::keyboard::KeyCode::Tab);
+        let key = self.screen == super::Screen::Playing && self.keys.held(Action::Playerlist);
         // tab_list::visible needs the key: on a server's list of hundreds, no
         // list is built for the frames it does not show.
         if !key && self.remote.is_some() {
@@ -875,19 +884,23 @@ impl Game<'_> {
         let board = &self.score.board;
         let objective = board.display_objective(sb::SLOT_LIST);
         let up = |id: u128| upside_down.contains(&id);
+        // Horizon's mark before the names of Horizon players (the cosmetics service's cache).
+        let horizon = self.horizon_players(players.iter().map(|p| p.uuid));
+        let marked = |id: u128| horizon.contains(&id);
         let inputs = TabInputs {
             players: &players,
             board,
             objective,
             screen_width: batch.width as i32,
             online_mode,
-            gui_ticks: self.ticks as i64,
+            gui_ticks: self.visual_ticks() as i64,
             // Horizon has no "chat background only" option: vanilla's default (on).
             background: tab_list::row_background(
                 true,
                 f64::from(self.settings.text_background_opacity),
             ),
             upside_down: &up,
+            horizon: &marked,
         };
         let draws = self.tab_list.layout(&inputs, &self.gui.atlas.font);
         self.tab_frame
@@ -1052,6 +1065,7 @@ mod tab_list_tests {
                 sender: PlayerSender::new(tx, Arc::default()),
                 latency: Arc::new(AtomicI32::new(42)),
                 address: "127.0.0.1:25565".parse().unwrap(),
+                expected: false,
             },
             uuid as i32,
             [0.0, 64.0, 0.0],

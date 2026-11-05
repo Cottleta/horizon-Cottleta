@@ -263,7 +263,10 @@ impl Game<'_> {
     /// block within the block reach (`getHitEntitiesAlong`'s block result,
     /// kept by `filterHitResult`); `None` on a miss, where the plain pick
     /// decides.
-    fn attack_range_pick(&self, range: &serde_json::Value) -> Option<Option<(usize, f64)>> {
+    fn attack_range_pick(
+        &self,
+        range: &serde_json::Value,
+    ) -> Option<Option<(usize, f64, [f64; 3])>> {
         let eye = v3(self.eye_position()?);
         let look = v3(super::view_vector(self.yaw, self.pitch));
         let reach = attack_reach(range, self.creative);
@@ -283,7 +286,14 @@ impl Game<'_> {
         let movement = self.known_player_movement();
         let nearest = super::spear::hits_in_reach(&boxes, eye, look, movement, reach, clip)
             .into_iter()
-            .map(|(i, at)| (i, eye.distance_squared(at).sqrt()))
+            .map(|(i, at)| {
+                let feet = self.mobs[i].position;
+                (
+                    i,
+                    eye.distance_squared(at).sqrt(),
+                    super::interact_location(at, feet),
+                )
+            })
             .reduce(|a, b| if b.1 < a.1 { b } else { a });
         if nearest.is_some() {
             return Some(nearest);
@@ -383,6 +393,8 @@ impl Game<'_> {
         }
         let held = self.held();
         let mut speed = self.items().mining_speed(held, &facts.name);
+        let hardness = facts.hardness;
+        let harvest = !facts.requires_tool || self.items().correct_for_drops(held, &facts.name);
         speed = self.modify_destroy_speed(speed);
         speed *= block_break_speed;
         if let Some(eye) = self.eye_position()
@@ -402,8 +414,7 @@ impl Game<'_> {
         if self.player.as_ref().is_some_and(|p| !p.ground.on_ground) {
             speed /= 5.0;
         }
-        let harvest = !facts.requires_tool || self.items().correct_for_drops(held, &facts.name);
-        speed / facts.hardness / if harvest { 30.0 } else { 100.0 }
+        speed / hardness / if harvest { 30.0 } else { 100.0 }
     }
     /// A key for the main-hand stack (`destroyingItem`): its item and components.
     pub(super) fn main_hand_key(&self) -> String {
@@ -436,7 +447,7 @@ impl Game<'_> {
                 winit::keyboard::KeyCode::KeyD,
             ]
             .iter()
-            .any(|k| self.keys.contains(k))
+            .any(|k| self.movement_key_held(*k))
     }
     /// `MultiPlayerGameMode.startUseItem`'s bookkeeping around the game's
     /// use: nothing starts while a block is being broken or the hands are

@@ -14,7 +14,7 @@ use super::{
 };
 use horizon_protocol::{
     PROTOCOL_VERSION,
-    connection::{ConnWriter, Connection},
+    connection::{ConnWriter, Connection, Counters},
     crypto::{offline_uuid, server_hash, uuid_string},
     packets::{
         Empty,
@@ -243,6 +243,9 @@ pub struct PlayerSender {
     pub pending: Arc<AtomicUsize>,
     held: Arc<Mutex<Vec<Vec<u8>>>>,
     to: To,
+    /// The connection's bytes on the wire (after compression and encryption), counted by its
+    /// network thread: `horizon-report`'s network use per player. None for a test's channel.
+    wire: Option<Arc<Counters>>,
 }
 #[derive(Clone)]
 enum To {
@@ -258,7 +261,18 @@ impl PlayerSender {
             pending,
             held: Arc::default(),
             to: To::Channel(tx),
+            wire: None,
         }
+    }
+    /// The bytes received from and sent to the client on the wire so far, where the
+    /// connection counts them.
+    pub fn wire_bytes(&self) -> Option<(u64, u64)> {
+        self.wire.as_ref().map(|c| {
+            (
+                c.bytes_in.load(Ordering::Relaxed).max(0) as u64,
+                c.bytes_out.load(Ordering::Relaxed).max(0) as u64,
+            )
+        })
     }
     /// Whether the client has answered no keep-alive for too long.
     pub fn timed_out(&self) -> bool {
@@ -476,7 +490,7 @@ fn serve_connection(
         // to status requests closes the connection.
         handshake::STATUS if !shared.enable_status() => Ok(()),
         handshake::STATUS => serve_status(&mut c, &shared),
-        handshake::TRANSFER if !shared.config.accepts_transfers => {
+        handshake::TRANSFER if !shared.accepts_transfers() => {
             login_disconnect(
                 &mut c,
                 &translatable("multiplayer.disconnect.transfers_disabled", &[]),
@@ -771,17 +785,40 @@ fn serve_login(
         lost(shared, &user, &text);
         return Ok(());
     }
+    // A player a proxy said would arrive (`player-expect`) uses the expectation up
+    // here, as the login starts: one that ran out while the player was still in
+    // configuration (a resource pack prompt) would otherwise make it an ordinary
+    // login from this server's own file.
+    let expected = shared.config.arrivals.as_ref().and_then(|table| {
+        table
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take_until(uuid, std::time::Instant::now())
+    });
+    // A login that does not reach play (it failed in configuration) gives the
+    // expectation back, so the proxy's next attempt is still expected.
+    let put_back = || {
+        if let (Some(deadline), Some(table)) = (expected, shared.config.arrivals.as_ref()) {
+            table.lock().unwrap_or_else(|e| e.into_inner()).put_back(
+                uuid,
+                deadline,
+                std::time::Instant::now(),
+            );
+        }
+    };
     let result = login_and_configure(&mut c, shared, uuid, &name, properties);
     match result {
         Ok(Some(parts)) => {
-            play(c, shared, parts, address, counted);
+            play(c, shared, parts, address, counted, expected.is_some());
             Ok(())
         }
         Ok(None) => {
+            put_back();
             shared.release(uuid);
             Ok(())
         }
         Err(err) => {
+            put_back();
             shared.release(uuid);
             // ServerConfigurationPacketListenerImpl.onDisconnect.
             let profile = format!("{name} ({})", uuid_string(uuid));
@@ -1227,6 +1264,7 @@ fn play(
     parts: Parts,
     address: std::net::SocketAddr,
     counted: Option<super::Counted>,
+    expected: bool,
 ) {
     shared.entered_play();
     let conn = shared.next_id();
@@ -1248,6 +1286,7 @@ fn play(
         pending,
         held: Arc::default(),
         to: To::Pool(outbox.clone(), watch.clone()),
+        wire: Some(c.reader.counters.clone()),
     };
     let required_pack = shared
         .config
@@ -1277,6 +1316,7 @@ fn play(
         sender,
         latency,
         address,
+        expected,
     };
     let mut session = Box::new(session);
     if shared
@@ -1620,6 +1660,71 @@ mod tests {
         }
     }
 
+    /// A login by transfer: `Ok` once the profile is told, the reason's JSON when it is turned away.
+    fn transfer_login(mut c: Connection, name: &str) -> Result<(), String> {
+        c.send(
+            &handshake::Serverbound::Intention(handshake::Intention {
+                protocol: horizon_protocol::PROTOCOL_VERSION,
+                host: "127.0.0.1".into(),
+                port: 0,
+                intent: handshake::TRANSFER,
+            })
+            .encode(),
+        )
+        .unwrap();
+        // A server that does not accept transfers turns one away at the handshake and closes
+        // (ServerHandshakePacketListenerImpl.handleIntention), so the hello may find the connection
+        // gone: its disconnect is still there to read.
+        let _ = c.send(
+            &login::Serverbound::Hello(login::ServerHello {
+                name: name.into(),
+                uuid: offline_uuid(name),
+            })
+            .encode(),
+        );
+        loop {
+            let (id, payload) = c.recv().unwrap();
+            match login::Clientbound::decode(id, &payload).unwrap() {
+                login::Clientbound::Compression(p) => c.set_compression(p.threshold),
+                login::Clientbound::LoginFinished(_) => return Ok(()),
+                login::Clientbound::Disconnect(d) => return Err(d.reason_json),
+                other => panic!("unexpected login packet {other:?}"),
+            }
+        }
+    }
+
+    /// `serversettings/accept_transfers/set` changes what the next transfer finds, with no restart:
+    /// a server that does not accept transfers turns one away, and takes it once it does.
+    #[test]
+    fn accepting_transfers_can_be_turned_on_and_off_live() {
+        let config = crate::lan::NetConfig {
+            announce: false,
+            listen: false,
+            accepts_transfers: false,
+            ..crate::lan::NetConfig::loopback(0, "Transfers".into(), 8)
+        };
+        let lan =
+            crate::lan::Lan::start_with(Arc::new(crate::lan::data::SyncData::empty()), config)
+                .unwrap();
+        let refused = transfer_login(Connection::local(lan.connect_local().unwrap()), "Alex")
+            .expect_err("a transfer is turned away while transfers are off");
+        assert!(
+            refused.contains("multiplayer.disconnect.transfers_disabled"),
+            "{refused}"
+        );
+        lan.shared.set_accepts_transfers(true);
+        transfer_login(Connection::local(lan.connect_local().unwrap()), "Alex")
+            .expect("a transfer is taken once transfers are on");
+        lan.shared.set_accepts_transfers(false);
+        // The player of the last login is still here: a second profile tries.
+        let again = transfer_login(Connection::local(lan.connect_local().unwrap()), "Steve")
+            .expect_err("and turned away again once they are off");
+        assert!(
+            again.contains("multiplayer.disconnect.transfers_disabled"),
+            "{again}"
+        );
+    }
+
     #[test]
     fn payloads_and_suggestions_past_vanillas_limits_are_malformed() {
         let payload = |len: usize| {
@@ -1681,7 +1786,7 @@ mod tests {
                 let _ = never.recv();
                 Vec::new()
             }))),
-            ..crate::lan::NetConfig::lan(0, "Owner - World".into(), 8)
+            ..crate::lan::NetConfig::loopback(0, "Owner - World".into(), 8)
         };
         let lan =
             crate::lan::Lan::start_with(Arc::new(crate::lan::data::SyncData::empty()), config)

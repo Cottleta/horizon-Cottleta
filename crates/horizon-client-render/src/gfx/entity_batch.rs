@@ -14,7 +14,12 @@ use super::Vertex;
 /// material at the end: the render types vanilla gives an `OitPipelineSet`
 /// (translucent, emissive, eyes and breeze wind entity models). Off, the tag is
 /// ignored and they stay in the first one, in their order.
-const MATERIALS: usize = 10;
+/// Two native world-canvas text materials follow it, NORMAL then POLYGON_OFFSET.
+const MATERIALS: usize = 12;
+/// The material the eyes moved out of `additive` join (improved transparency's entities).
+const EYES: usize = 9;
+/// The first world-canvas text material: drawn after the moved eyes, each sorted far to near.
+const TEXT: usize = 10;
 /// A bit of `Vertex::layer`, above the overlay (low 16 bits) and the HDR tier
 /// (bits 16 to 23): the quad's render type has an `OitPipelineSet`
 /// (`RenderTypes.entityTranslucent`, `entityTranslucentEmissive`, `eyes`,
@@ -51,6 +56,10 @@ pub const TRANSLUCENT_GLINT_ITEM_OVERLAY: u32 = 33;
 /// The overlay of text in `Font.DisplayMode.POLYGON_OFFSET` (text displays):
 /// drawn like an ordinary entity, pulled toward the camera.
 pub const TEXT_POLYGON_OFFSET_OVERLAY: u32 = 35;
+/// A native world canvas, drawn after particles with normal text depth/culling.
+pub const WORLD_TEXT_OVERLAY: u32 = 39;
+/// The front of its eight-offset outlined text, using POLYGON_OFFSET.
+pub const WORLD_TEXT_POLYGON_OFFSET_OVERLAY: u32 = 40;
 
 /// The material of a quad by its overlay (`MATERIALS` order): the overlay is the layer's low 16
 /// bits, as entity.wgsl reads it; HDR output's tier rides in the high ones.
@@ -59,6 +68,8 @@ fn material(layer: u32, oit: bool) -> usize {
         return 9;
     }
     match layer & 0xffff {
+        WORLD_TEXT_OVERLAY => 10,
+        WORLD_TEXT_POLYGON_OFFSET_OVERLAY => 11,
         TEXT_POLYGON_OFFSET_OVERLAY => 1,
         11 => 2,
         12 => 3,
@@ -141,7 +152,7 @@ impl EntityBatch {
         } else {
             0
         };
-        counts[MATERIALS - 1] += self.moved_additive as usize;
+        counts[EYES] += self.moved_additive as usize;
         counts.map(|count| count as u32)
     }
 
@@ -161,7 +172,11 @@ impl EntityBatch {
     pub(super) fn places(&self, places: &mut Vec<(u32, u32, u32)>) {
         places.clear();
         let mut at = 0;
-        for runs in &self.runs {
+        for (material, runs) in self.runs.iter().enumerate() {
+            if material == TEXT {
+                // The eyes moved out of `additive` sit between (`write`).
+                at += self.moved_additive * 4;
+            }
             for &(first, count, held) in runs {
                 places.push(((first * 4) as u32, (count * 4) as u32, at));
                 at += (count.max(held) * 4) as u32;
@@ -203,7 +218,7 @@ impl EntityBatch {
         mut put: impl FnMut(usize, &[Vertex]),
     ) {
         let mut at = 0;
-        for runs in &self.runs {
+        for runs in &self.runs[..TEXT] {
             for &(first, count, held) in runs {
                 if held > 0 {
                     // Left to the compute pass.
@@ -225,6 +240,32 @@ impl EntityBatch {
                     at += 4;
                 }
             }
+        }
+        // RenderType.text sorts alpha-blended quads from far to near. Both world-canvas
+        // layers follow the other materials (and the eyes moved out of additive); the
+        // front text uses polygon offset.
+        for runs in &self.runs[TEXT..] {
+            let mut quads: Vec<[Vertex; 4]> = Vec::new();
+            for &(first, count, held) in runs {
+                if held > 0 {
+                    at += held * 4;
+                    continue;
+                }
+                quads.extend_from_slice(entities[first * 4..(first + count) * 4].as_chunks::<4>().0);
+            }
+            if quads.is_empty() {
+                continue;
+            }
+            let distance = |q: &[Vertex; 4]| {
+                (0..3)
+                    .map(|i| ((q[0].pos[i] + q[2].pos[i]) * 0.5).powi(2))
+                    .sum::<f32>()
+            };
+            quads.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
+            put(at, quads.as_flattened());
+            at += quads.len() * 4;
+        }
+        if self.moved_additive > 0 {
             for quad in additive.as_chunks::<4>().0 {
                 if quad[0].layer & OIT_ENTITY == 0 {
                     put(at, quad);
@@ -263,6 +304,46 @@ impl EntityBatch {
 mod tests {
     use super::*;
     use std::{hint::black_box, time::Instant};
+    #[test]
+    fn world_canvas_sorts_after_oit_eyes_before_frame_tails() {
+        let quad = |layer, x| {
+            [Vertex {
+                layer,
+                pos: [x, 0.0, 0.0],
+                ..geometry(1, false)[0]
+            }; 4]
+        };
+        let entities: Vec<_> = [
+            (0, 1.0),
+            (35, 2.0),
+            (OIT_ENTITY, 3.0),
+            (WORLD_TEXT_OVERLAY, 4.0),
+            (WORLD_TEXT_OVERLAY, 5.0),
+            (WORLD_TEXT_POLYGON_OFFSET_OVERLAY, 6.0),
+        ]
+        .into_iter()
+        .flat_map(|(layer, x)| quad(layer, x))
+        .collect();
+        let additive: Vec<_> = [(OIT_ENTITY | 2, 7.0), (2, 8.0)]
+            .into_iter()
+            .flat_map(|(layer, x)| quad(layer, x))
+            .collect();
+        let mut batch = EntityBatch::default();
+        assert_eq!(
+            batch.update(&entities, &additive, true),
+            [1, 1, 0, 0, 0, 0, 0, 0, 0, 2, 2, 1]
+        );
+        let positions: Vec<_> = batch
+            .combined(&entities, &additive, &quad(0, 9.0), &quad(0, 10.0))
+            .iter()
+            .step_by(4)
+            .map(|v| v.pos[0])
+            .collect();
+        assert_eq!(
+            positions,
+            [1.0, 2.0, 3.0, 7.0, 5.0, 4.0, 6.0, 8.0, 9.0, 10.0]
+        );
+    }
 
     // Retain the original implementation as the equivalence/benchmark oracle.
     fn baseline(
@@ -361,12 +442,12 @@ mod tests {
         let mut batch = EntityBatch::default();
         // Off: the tag changes nothing, the quads keep their place.
         let counts = batch.update(&entities, &[], false);
-        assert_eq!(counts, [4, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(counts, [4, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
         let xs: Vec<f32> = batch.combined(&entities, &[], &[], &[]).iter().step_by(4).map(|v| v.pos[0]).collect();
         assert_eq!(xs, [0.0, 1.0, 2.0, 4.0, 3.0]);
         // On: the tagged quads come last, in order.
         let counts = batch.update(&entities, &[], true);
-        assert_eq!(counts, [2, 0, 0, 0, 0, 0, 1, 0, 0, 2]);
+        assert_eq!(counts, [2, 0, 0, 0, 0, 0, 1, 0, 0, 2, 0, 0]);
         let xs: Vec<f32> = batch.combined(&entities, &[], &[], &[]).iter().step_by(4).map(|v| v.pos[0]).collect();
         assert_eq!(xs, [0.0, 2.0, 3.0, 1.0, 4.0]);
     }

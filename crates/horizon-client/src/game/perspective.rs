@@ -182,6 +182,7 @@ fn load_player_type(root: &Path) -> Option<Arc<MobType>> {
             knockback_resistance: 0.0,
             jump_strength: 0.42,
             attributes: Default::default(),
+            item_stack_limits: Default::default(),
             gravity: 0.08,
             safe_fall_distance: 3.0,
             fall_damage_multiplier: 1.0,
@@ -217,6 +218,27 @@ fn load_player_type(root: &Path) -> Option<Arc<MobType>> {
         })
     })
 }
+/// What sets the body's yaw of a player riding something (`Game::ridden_body`).
+#[derive(Clone, Copy)]
+enum RiddenBody {
+    /// The boat's yaw.
+    Boat(f32),
+    /// The living vehicle's body yaw.
+    Living(f32),
+}
+
+/// `LivingEntityRenderer.solveBodyRot` for the rider of a living vehicle: the
+/// body faces the vehicle's body, the head turning at most 85 degrees from it,
+/// and past 50 degrees the body turns a fifth of the head's offset along.
+fn rider_body_yaw(head: f32, vehicle_body: f32) -> f32 {
+    let diff = wrap(head - vehicle_body).clamp(-85.0, 85.0);
+    let mut body = head - diff;
+    if diff.abs() > 50.0 {
+        body += diff * 0.2;
+    }
+    body
+}
+
 fn wrap(d: f32) -> f32 {
     let d = d % 360.0;
     if d >= 180.0 {
@@ -258,6 +280,8 @@ impl Game<'_> {
             }
         };
         let mut view = self.view;
+        // An emote pulls the camera back from the player's face (`game/emotes.rs`).
+        let pull = self.emote_camera_pull(partial);
         let kind = match self.camera_type {
             CameraType::FirstPerson => horizon_client::camera::CameraType::FirstPerson,
             CameraType::ThirdPersonBack => horizon_client::camera::CameraType::ThirdPersonBack,
@@ -286,7 +310,7 @@ impl Game<'_> {
             partial,
             kind,
             |distance| {
-                let mut distance = distance;
+                let mut distance = distance * pull;
                 self.native_camera_distance(partial, kind.is_mirrored(), &entity, &mut distance);
                 distance
             },
@@ -453,6 +477,7 @@ impl Game<'_> {
         // another player's does (`villager::sleep_pose`).
         let bed = self.sleeping.map_or(0, |head| self.bed_facing(head));
         let spectator = self.spectator();
+        let ridden = self.ridden_body();
         let Some(m) = self.player_model.as_mut() else {
             return;
         };
@@ -472,32 +497,57 @@ impl Game<'_> {
         m.yaw = yaw;
         m.head_yaw = yaw;
         m.head_pitch = pitch;
-        let mut target = m.body_yaw;
-        if dx * dx + dz * dz > 0.002_500_000_2 {
-            // LivingEntity.tick: walking backwards the body faces away from
-            // the walk direction, not along it.
-            let walk = (dz.atan2(dx) as f32).to_degrees() - 90.0;
-            let facing = (wrap(yaw) - walk).abs();
-            target = if 95.0 < facing && facing < 265.0 {
-                walk - 180.0
-            } else {
-                walk
-            };
+        match ridden {
+            // AbstractBoat.positionRider (clampRotation): the passenger's body
+            // is set to the boat's yaw each tick.
+            Some(RiddenBody::Boat(boat)) => m.body_yaw += wrap(boat - m.body_yaw),
+            // A living vehicle's rider is drawn from its body
+            // (`LivingEntityRenderer.solveBodyRot`).
+            Some(RiddenBody::Living(body)) => {
+                m.body_yaw += wrap(rider_body_yaw(yaw, body) - m.body_yaw);
+            }
+            // A minecart's, a cushion's: the body turns as on foot.
+            None => {
+                let mut target = m.body_yaw;
+                if dx * dx + dz * dz > 0.002_500_000_2 {
+                    // LivingEntity.tick: walking backwards the body faces away from
+                    // the walk direction, not along it.
+                    let walk = (dz.atan2(dx) as f32).to_degrees() - 90.0;
+                    let facing = (wrap(yaw) - walk).abs();
+                    target = if 95.0 < facing && facing < 265.0 {
+                        walk - 180.0
+                    } else {
+                        walk
+                    };
+                }
+                if swinging {
+                    target = yaw;
+                }
+                // tickHeadTurn: ease toward the target, within 50 degrees of the head.
+                m.body_yaw += wrap(target - m.body_yaw) * 0.3;
+                let diff = wrap(yaw - m.body_yaw);
+                if diff.abs() > 50.0 {
+                    m.body_yaw += diff - diff.signum() * 50.0;
+                }
+            }
         }
-        if swinging {
-            target = yaw;
+        if riding {
+            // LivingEntity.calculateEntityAnimation: a passenger stops the
+            // walk animation (WalkAnimationState.stop), so the seat moving with
+            // the vehicle does not swing the legs.
+            m.previous_limb_speed = 0.0;
+            m.limb_speed = 0.0;
+            m.limb_position = 0.0;
+        } else {
+            // WalkAnimationState.update(min(distance * 4, 1), 0.4).
+            m.previous_limb_speed = m.limb_speed;
+            m.limb_speed += ((walked * 4.0).min(1.0) - m.limb_speed) * 0.4;
+            m.limb_position += m.limb_speed;
         }
-        // tickHeadTurn: ease toward the target, within 50 degrees of the head.
-        m.body_yaw += wrap(target - m.body_yaw) * 0.3;
-        let diff = wrap(yaw - m.body_yaw);
-        if diff.abs() > 50.0 {
-            m.body_yaw += diff - diff.signum() * 50.0;
+        // Its idle swing holds with the world under `HORIZON_STILL`.
+        if self.clock.runs_normally() || !self.clock.still() {
+            m.age = m.age.wrapping_add(1);
         }
-        // WalkAnimationState.update(min(distance * 4, 1), 0.4).
-        m.previous_limb_speed = m.limb_speed;
-        m.limb_speed += ((walked * 4.0).min(1.0) - m.limb_speed) * 0.4;
-        m.limb_position += m.limb_speed;
-        m.age = m.age.wrapping_add(1);
         m.anim.attack_anim_o = attack.0;
         m.anim.attack_anim = attack.1;
         m.extra.set_main_hand_stack(main);
@@ -574,6 +624,17 @@ impl Game<'_> {
             let delta = (self.yaw - b.yaw + 180.0).rem_euclid(360.0) - 180.0;
             self.yaw += delta.clamp(-105.0, 105.0) - delta;
         }
+    }
+    /// What the player rides that sets their body's yaw: a boat's yaw, or a
+    /// living vehicle's body yaw. Minecarts and cushions leave it to the
+    /// player's own turn.
+    fn ridden_body(&self) -> Option<RiddenBody> {
+        let id = self.riding?;
+        if let Some(b) = self.boats.iter().find(|b| b.id == id) {
+            return Some(RiddenBody::Boat(b.yaw));
+        }
+        let m = self.mobs.iter().find(|m| m.id == id)?;
+        Some(RiddenBody::Living(m.body_yaw))
     }
     /// `Entity.setOldRot` after a server sets the player's rotation
     /// (`handleRotatePlayer`): the model's head snaps to it instead of easing
@@ -689,7 +750,16 @@ impl Game<'_> {
             );
             if horizon_cosmetics::enabled() {
                 let base = horizon_client::mobs::render::base_transform(m, alpha as f32, camera);
-                self.cosmetics_geometry(m, true, base, alpha as f32, packed, false, out);
+                self.cosmetics_geometry(
+                    m,
+                    true,
+                    base,
+                    Some(camera),
+                    alpha as f32,
+                    packed,
+                    false,
+                    out,
+                );
             }
             self.player_elytra_geometry(m, chest, camera, alpha as f32, packed, out);
             self.spin_attack_geometry(m, camera, alpha as f32, packed, out);
@@ -702,8 +772,13 @@ impl Game<'_> {
             self.mod_mob_layer_geometry(m, Some(who), alpha as f32, camera, packed, out);
         }
         // LivingEntity.isCurrentlyGlowing: the Glowing effect.
-        if self.potions.effects.get("glowing").is_some() {
-            let color = super::glowing::team_color(self.own_team());
+        let vanilla = self
+            .potions
+            .effects
+            .get("glowing")
+            .map(|_| super::glowing::team_color(self.own_team()));
+        let id = u32::try_from(self.own_entity_id()).unwrap_or(0);
+        if let Some(color) = self.entity_outline(id, "minecraft:player", vanilla) {
             // LivingEntityRenderer.getRenderType: an invisible glowing body
             // still draws its outline.
             if !body {
@@ -801,7 +876,7 @@ impl Game<'_> {
         );
         if horizon_cosmetics::enabled() {
             let base = horizon_client::mobs::render::base_transform(&m, 1.0, camera);
-            self.cosmetics_geometry(&m, true, base, 1.0, 240 | 240 << 8, false, &mut verts);
+            self.cosmetics_geometry(&m, true, base, None, 1.0, 240 | 240 << 8, false, &mut verts);
         }
         // `WingsLayer` draws through `RenderTypes.armorCutoutNoCull`: the
         // wings' faces show from both sides (the elytra texture is empty on
@@ -1658,5 +1733,19 @@ mod preview_tests {
             entity_light_block(crouch_model, true, crouch_eye),
             [10, 67, -5]
         );
+    }
+
+    /// `LivingEntityRenderer.solveBodyRot` worked by hand: the head turns at
+    /// most 85 degrees from the vehicle's body, and past 50 the body follows a
+    /// fifth of the turn.
+    #[test]
+    fn a_living_vehicles_rider_faces_its_body_within_85_degrees() {
+        let body = |head, vehicle| (super::rider_body_yaw(head, vehicle) * 1000.0).round() / 1000.0;
+        assert_eq!(body(60.0, 40.0), 40.0);
+        assert_eq!(body(100.0, 40.0), 52.0);
+        assert_eq!(body(140.0, 40.0), 72.0);
+        assert_eq!(body(-60.0, 40.0), 8.0);
+        // Across the wrap: head at 170, vehicle at -170 (20 degrees apart).
+        assert_eq!(body(170.0, -170.0), 190.0);
     }
 }

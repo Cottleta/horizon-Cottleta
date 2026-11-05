@@ -3,7 +3,10 @@
 //! Trait mods are process-wide, like mixin module statics.
 //! Hooks use `&self + Send + Sync` for shared and reentrant calls; see `docs/native-mods.md`.
 //! Cargo generates the trait and dispatch from the catalog and source signatures into OUT_DIR.
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 pub use crate::biome::{BiomeColors, SpawnEntry};
 pub use crate::block_sprites::{BlockSprites, FaceSprite, SpriteRef};
@@ -15,32 +18,45 @@ pub use crate::extras::Corner;
 pub use crate::extras_hud::Corners;
 pub use crate::first_person::Hand;
 pub use crate::fog::{FogData, FogType};
+pub use crate::game::NativeFluidTank;
 pub use crate::game::native_block_entity_draw::{BlockEntityDraw, CubeFace};
+pub use crate::game::native_client_services::{
+    NativeClientEntity, NativeClientHead, NativeClientProfile, NativeClientState,
+};
 pub use crate::game::{
-    ItemEnergyBuffer, NativeBlockEdit, NativeBlockRun, NativeClock, NativeColumnBlocks,
-    NativeConfig, NativeConfigFile, NativeConfigKind, NativeDataMapType, NativeExperienceOrb,
-    NativeFalling, NativeHeightmap, NativeHeldItem, NativeHit, NativeMapDecoration, NativeMapInfo,
-    NativeMobRender, NativeModEvent, NativePlayerRender, NativeShake,
+    ItemEnergyBuffer, NativeBlockEdit, NativeBlockReadError, NativeBlockRun, NativeClock,
+    NativeColumnBlocks, NativeComponentError, NativeConfig, NativeConfigFile, NativeConfigKind,
+    NativeCriterion, NativeDataMapType, NativeExperienceOrb, NativeFalling, NativeHeightmap,
+    NativeHeldItem, NativeHit, NativeItemEntity, NativeMapDecoration, NativeMapInfo,
+    NativeMobRender, NativeModEvent, NativePlayer, NativePlayerRender, NativeReloadListener,
+    NativeShake, NativeStructureBlock, NativeStructureTemplate, NativeWorldDraw,
 };
 pub use crate::gfx::native_render::{
     BlockSpriteArrays, RenderHooks, RenderNeeds, RenderNeedsEvent, WorldDrawn, WorldDrawnEvent,
     wgpu,
 };
 pub use crate::hud::HudBatch;
-pub use crate::hud_layout::{GuiDraw, HealthInputs};
+pub use crate::hud_layout::{GuiDraw, HealthHud, HealthInputs};
 pub use crate::items::ItemStack;
 pub use crate::merchant::MerchantOffer;
 pub use crate::mesher::TintSource;
+pub use crate::mobs::goals::{Cx, Goal, GoalSelector};
+pub use crate::mobs::{Mob, MobWorld};
 pub use crate::music::{Music, MusicLayer};
 pub use crate::particles::{ParticleOptions, ParticleType};
 pub use crate::recipe_book::RecipeBookCategory;
 pub use crate::text::Text;
+pub use crate::world_primitives::{PrimitiveShape, WorldPrimitive, WorldPrimitives};
 pub use horizon_assets::item_model::{DisplayContext, StackView};
 pub use horizon_core::{
     geometry::Direction,
     position::BlockPos,
     random::{LegacyRandom, RandomSource},
 };
+/// The server's play packets `client_packet` hands over, decoded.
+pub use horizon_protocol::packets::play::Clientbound as ClientboundPlayPacket;
+/// The play packets a client sends, as `native_send_packet` takes them.
+pub use horizon_protocol::packets::play::Serverbound as ServerboundPlayPacket;
 pub use horizon_world::consumable::UseAnimation;
 pub use horizon_world::player_inventory::EquipmentSlot;
 pub use horizon_world::{
@@ -52,6 +68,7 @@ pub use horizon_world::{
     loot::{LootStack, NativeLootContext},
     nbt::{Compound, Tag},
     registry::BlockStateId,
+    worldgen::structure::{Mirror, Rotation},
 };
 pub use serde_json;
 use serde_json::{Map, Value};
@@ -80,6 +97,38 @@ pub struct NativeCamera {
 /// A dispenser hook's answer: the slot's remainder (None empties it) and the
 /// level event to play, `CLICK` (1000), `FAIL` (1001) or 0 for none.
 pub type NativeDispensed = (Option<ItemStack>, i32);
+
+/// What a mod's fake player uses its item on (`Host::use_as_player`), as a
+/// player's click would.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NativeUseTarget {
+    /// `ServerPlayerGameMode.useItemOn`: the block at `pos`, clicked on its
+    /// `face` at `point` (world coordinates on that face).
+    Block {
+        pos: [i32; 3],
+        face: Direction,
+        point: [f64; 3],
+    },
+    /// `ServerPlayerGameMode.useItem`: the item alone, in the air.
+    Item,
+    /// `Player.interactOn`: the entity with this id, clicked at `location`
+    /// (from the entity's position), as an interact packet names one.
+    Entity { id: i32, location: [f64; 3] },
+}
+
+/// What a mod's fake player did (`Host::use_as_player`).
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct NativeFakeUse {
+    /// Whether the use did something (`InteractionResult.consumesAction`).
+    pub consumed: bool,
+    /// What its hand holds afterwards: what is left of the stack, or what the
+    /// item became (a filled bucket).
+    pub held: Option<ItemStack>,
+    /// What else ended up in its inventory (a bowl of stew from a stack of
+    /// bowls, a bottle), for the mod to keep or drop.
+    pub other: Vec<ItemStack>,
+}
 
 /// Context for a player tuning a note block.
 #[derive(Clone, Copy, Debug)]
@@ -125,7 +174,12 @@ pub struct NativeLootDrops<'a> {
     /// what dropped them. API 100. A mob that a player killed while
     /// leashed drops its lead on its next tick as a call of its own (`entity`
     /// the mob, `player` its killer, `table` empty, `used` false). API
-    /// 102.
+    /// 102. A dying player's inventory is a call of its own too, after
+    /// vanishing curse items are gone and before they are thrown (`entity`
+    /// the player's id and `minecraft:player`, `player` them, `table` empty,
+    /// `origin` where the items leave, `used` false); `drops` empty means
+    /// the mod took the whole inventory. Not heard with keepInventory. API
+    /// 405.
     pub used: bool,
 }
 
@@ -204,6 +258,28 @@ pub struct NativeMinimap {
     pub blocks_per_pixel: f32,
     pub rotate: bool,
     pub round: bool,
+}
+
+/// One block of a scene a mod draws in a screen (`Host::draw_scene`): its
+/// place in the scene, its state, and the block entity drawn with it, if any
+/// (a mod's, through `native_block_entity_submit` as in the world).
+#[derive(Clone, Copy, Debug)]
+pub struct NativeSceneBlock<'a> {
+    pub pos: [i32; 3],
+    pub state: BlockStateId,
+    pub entity: Option<&'a ModBlockEntity>,
+}
+
+/// How a scene in a screen is seen (`Host::draw_scene`): the point at the
+/// middle of the screen's box, in blocks; the turn about the scene's vertical
+/// axis and the tilt of its top towards the viewer, in degrees; and how many
+/// GUI pixels a block is across.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeSceneView {
+    pub center: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub scale: f32,
 }
 
 /// A mod block's screen over its menu (`native_screen`): its size, where
@@ -316,8 +392,11 @@ pub struct NativeServerPlayer {
     pub pitch: f32,
     /// The network entity id the player has this session, the one hooks that only know entity ids
     /// (`living_incoming_damage`, `living_knockback`) give for the player; 0 when not known.
-    /// API @API:server_player_entity_id@.
+    /// API 398.
     pub entity_id: i32,
+    /// The IP address the player connects from (behind a Velocity proxy: the address the proxy forwards);
+    /// empty when not known. API 407.
+    pub address: String,
 }
 
 /// A command a native mod adds, as one usage: words, then arguments
@@ -530,20 +609,70 @@ static MOD_IDS: OnceLock<&'static [&'static str]> = OnceLock::new();
 pub fn name_mods(ids: &'static [&'static str]) {
     if MOD_IDS.set(ids).is_err() {
         log::warn!("Trait mods already named; ignoring the second list");
+        return;
     }
+    let _ = OFF.set(ids.iter().map(|_| AtomicBool::new(false)).collect());
+}
+
+/// One flag per entry of [`mods`]: the player turned that mod off on the
+/// Mods page of the options. Its hooks are skipped from the next dispatch on (its `RenderHooks`,
+/// installed apart at start, keep drawing until a restart); it stays loaded,
+/// and what it keeps stays, so turning it on again resumes it at once
+/// (docs/design/mod-hotload.md). Registration hooks run at start, before the
+/// game reads the player's choice, so every mod's content stays registered.
+static OFF: OnceLock<Box<[AtomicBool]>> = OnceLock::new();
+
+/// Turns the trait mod named `id` ([`name_mods`]) on or off for the
+/// following dispatches. False when no mod has that id: a mixin-only mod,
+/// whose code checks `native_on` itself.
+pub fn set_mod_on(id: &str, on: bool) -> bool {
+    let (Some(ids), Some(flags)) = (MOD_IDS.get(), OFF.get()) else {
+        return false;
+    };
+    let mut found = false;
+    for (flag, _) in flags.iter().zip(ids.iter()).filter(|(_, m)| **m == id) {
+        flag.store(!on, Ordering::Relaxed);
+        found = true;
+    }
+    found
+}
+
+/// The ids [`name_mods`] gave the entries of [`mods`].
+pub fn mod_ids() -> &'static [&'static str] {
+    MOD_IDS.get().copied().unwrap_or(&[])
+}
+
+/// Whether entry `index` of [`mods`] is turned off.
+fn is_off(index: usize) -> bool {
+    OFF.get()
+        .and_then(|flags| flags.get(index))
+        .is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
 /// `mods` in order, each marked as running `hook` until the next one is (or the loop ends), so a
 /// panic in it names the mod. The generated dispatch loops over it.
+/// A part of [`mods`] (one mod, dispatched on its own) keeps its entries' places in it.
 fn entered<'a>(mods: &'a [Box<dyn Hooks>], hook: &'static str) -> Entered<'a> {
     Entered {
+        first: place_in(self::mods(), mods),
         mods: mods.iter().enumerate(),
         hook,
         guard: None,
     }
 }
 
+/// Where `part` starts in `all`, None when it is not a part of it (a test's
+/// own list).
+fn place_in<T>(all: &[T], part: &[T]) -> Option<usize> {
+    let range = all.as_ptr_range();
+    range
+        .contains(&part.as_ptr())
+        .then(|| (part.as_ptr().addr() - range.start.addr()) / size_of::<T>().max(1))
+}
+
 struct Entered<'a> {
+    /// Where `mods` starts in [`mods`]; None for a list of its own.
+    first: Option<usize>,
     mods: std::iter::Enumerate<std::slice::Iter<'a, Box<dyn Hooks>>>,
     hook: &'static str,
     guard: Option<crate::crash::NativeModGuard>,
@@ -555,7 +684,14 @@ impl<'a> Iterator for Entered<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         // The last mod's mark goes first, so the next one's puts back what was there before.
         drop(self.guard.take());
-        let (index, hooks) = self.mods.next()?;
+        let (index, hooks) = loop {
+            let (index, hooks) = self.mods.next()?;
+            match self.first {
+                Some(first) if is_off(first + index) => continue,
+                Some(first) => break (first + index, hooks),
+                None => break (index, hooks),
+            }
+        };
         self.guard = Some(crate::crash::enter_native_mod(
             crate::crash::NativeModCall {
                 id: MOD_IDS.get().and_then(|ids| ids.get(index)).copied(),
@@ -672,6 +808,37 @@ mod tests {
     struct Quiet;
     impl Hooks for Quiet {}
 
+    /// A mod turned off is skipped in the game's list from the next dispatch, and resumes when
+    /// turned on; a test's own list is never switched.
+    #[test]
+    fn a_mod_turned_off_is_skipped_until_turned_on() {
+        name_mods(&["quiet", "broken"]);
+        let _ = MODS.set(Arc::from(vec![
+            Box::new(Quiet) as Box<dyn Hooks>,
+            Box::new(Quiet),
+        ]));
+        let ids = mod_ids().to_vec();
+        let called = || entered(mods(), "test").count();
+        assert_eq!(called(), 2);
+        assert!(set_mod_on(ids[1], false));
+        assert_eq!(called(), 1);
+        // Dispatched alone, it is still off.
+        assert_eq!(entered(&mods()[1..], "test").count(), 0);
+        let own: Vec<Box<dyn Hooks>> = vec![Box::new(Quiet), Box::new(Quiet)];
+        assert_eq!(entered(&own, "test").count(), 2);
+        assert!(set_mod_on(ids[1], true));
+        assert_eq!(called(), 2);
+        assert!(!set_mod_on("not_a_mod", false));
+    }
+
+    #[test]
+    fn one_mod_dispatched_alone_keeps_its_place() {
+        let all = [10, 11, 12, 13];
+        assert_eq!(place_in(&all, &all[2..=2]), Some(2));
+        assert_eq!(place_in(&all, &all), Some(0));
+        assert_eq!(place_in(&all, &[12]), None);
+    }
+
     struct Broken;
     impl Hooks for Broken {
         fn component_types(&self, _event: &mut ComponentTypesEvent<'_>) {
@@ -701,6 +868,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 0.0,
                 entity_id: 0,
+                address: String::new(),
             })
         }
         fn action_bar(&mut self, _uuid: u128, line: Text) -> bool {

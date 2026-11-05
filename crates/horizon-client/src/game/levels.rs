@@ -129,6 +129,12 @@ pub(super) struct Levels {
 }
 
 impl Levels {
+    /// Clear every parked level and dimensions recorded as heard open.
+    pub(super) fn clear(&mut self) {
+        self.parked.clear();
+        self.heard_open.clear();
+    }
+
     /// A parked level, without opening or loading it.
     pub(super) fn parked_world(&self, dim: Dim) -> Option<&World> {
         self.parked.get(&dim).map(|level| &level.world)
@@ -149,9 +155,44 @@ impl Levels {
         self.parked.get_mut(&dim)
     }
 
+    /// The entities of a parked level, counted as `Game::entity_count` counts the one in place.
+    pub(super) fn parked_entity_count(&self, dim: Dim) -> Option<usize> {
+        let l = self.parked.get(&dim)?;
+        Some(
+            l.mobs.iter().filter(|m| !m.removed).count()
+                + l.dropped.len()
+                + l.orbs.len()
+                + l.projectiles.len()
+                + l.carts.len()
+                + l.boats.len()
+                + l.falling.len()
+                + l.paintings.len()
+                + l.item_frames.len()
+                + l.armor_stands.len()
+                + l.cushions.len()
+                + l.tridents.len()
+                + l.rockets.len()
+                + l.tnts.len(),
+        )
+    }
+
     /// The mobs of a parked level.
     pub(super) fn parked_mobs(&self, dim: Dim) -> Option<&[Mob]> {
         self.parked.get(&dim).map(|level| level.mobs.as_slice())
+    }
+
+    /// A parked level's loose entities, for `horizon-report`: items, experience orbs,
+    /// projectiles, minecarts and boats.
+    pub(super) fn parked_entity_counts(&self, dim: Dim) -> Option<[usize; 5]> {
+        self.parked.get(&dim).map(|l| {
+            [
+                l.dropped.as_slice().len(),
+                l.orbs.as_slice().len(),
+                l.projectiles.as_slice().len(),
+                l.carts.as_slice().len(),
+                l.boats.as_slice().len(),
+            ]
+        })
     }
 
     /// The levels that are not in place, by dimension.
@@ -440,6 +481,13 @@ impl Game<'_> {
         let n = dims.len();
         let mut result = Ok(());
         for (k, dim) in dims.into_iter().enumerate() {
+            // Each level's share of the tick (the first one also reads the network and runs the
+            // tick's shared parts): `horizon-report`'s `level_*` spans.
+            let _level_span = horizon_client::spans::guard(match dim {
+                Dim::Overworld => "level_overworld",
+                Dim::Nether => "level_the_nether",
+                Dim::End => "level_the_end",
+            });
             if let Err(e) = self.enter_level(None, dim) {
                 result = Err(e);
                 break;
@@ -465,9 +513,8 @@ impl Game<'_> {
                         self.tick()
                     } else {
                         let running = running.unwrap_or_else(|| self.clock.world_runs());
-                        if running {
-                            self.tick_weather_effects();
-                        }
+                        // ClientLevel.tick: the sky flash fades in a frozen level too.
+                        self.tick_weather_effects();
                         self.tick_world(running)
                     }
                 },
@@ -514,20 +561,24 @@ impl Game<'_> {
     /// `tick_server` as a server thread runs it. With `HORIZON_SPIKES=MS`, a
     /// tick longer than MS is logged with its thread CPU time and spans.
     pub(super) fn tick_server_timed(&mut self, paused: bool) -> Result<()> {
-        self.tick_server_spans(paused, |_, _, _| {})
+        self.tick_server_spans(paused, |_, _, _, _| {})
     }
 
     /// `tick_server_timed`, handing the tick's wall time, thread CPU time
-    /// and spans (milliseconds) to `record` while spans are on: a dedicated
-    /// server's performance report turns them on to record its ticks.
+    /// and spans (milliseconds, summed by name) to `record` while spans are on, with how many
+    /// spans the tick itself recorded: a dedicated server's performance report turns them on to
+    /// record its ticks.
     pub(super) fn tick_server_spans(
         &mut self,
         paused: bool,
-        record: impl FnOnce(f32, Option<f32>, Vec<horizon_client::spans::Span>),
+        record: impl FnOnce(f32, Option<f32>, Vec<horizon_client::spans::Span>, usize),
     ) -> Result<()> {
         if self.options.spikes.is_none() && !horizon_client::spans::enabled() {
             return self.tick_server(paused);
         }
+        // Spans recorded since the last tick ran between ticks (the chunk pump of the wait): they
+        // stay in the tick's list, but only the tick's own count as recorded in it.
+        let between = horizon_client::spans::take_raw();
         let (started, cpu) = (Instant::now(), horizon_client::spans::thread_cpu());
         let result = self.tick_server(paused);
         let wall = started.elapsed().as_secs_f32() * 1000.0;
@@ -535,7 +586,13 @@ impl Game<'_> {
             .zip(cpu)
             .map(|(end, start)| (end - start).as_secs_f32() * 1000.0);
         // Taken every tick: nothing else takes this thread's spans.
-        let spans = horizon_client::spans::take();
+        let raw = horizon_client::spans::take_raw();
+        let in_tick = raw.len();
+        let spans = if between.is_empty() {
+            horizon_client::spans::merge(&raw)
+        } else {
+            horizon_client::spans::merge(&[between, raw].concat())
+        };
         let notes = horizon_client::spans::take_notes();
         if let Some(threshold) = self.options.spikes
             && wall > threshold
@@ -548,7 +605,7 @@ impl Game<'_> {
                 slowest_steps(&notes)
             );
         }
-        record(wall, cpu, spans);
+        record(wall, cpu, spans, in_tick);
         result
     }
 
@@ -607,13 +664,15 @@ impl Game<'_> {
         let mut dims: Vec<Dim> = [Dim::Overworld, Dim::Nether, Dim::End]
             .into_iter()
             .filter(|d| {
+                // `/forceload`ed chunks, or a native mod's tickets.
+                let held = |s: &Streaming| !s.forced.is_empty() || !s.mod_forced.is_empty();
                 let forced = if *d == self.dim {
-                    !self.streaming.forced.is_empty()
+                    held(&self.streaming)
                 } else {
                     self.levels
                         .parked
                         .get(d)
-                        .is_some_and(|p| !p.streaming.forced.is_empty())
+                        .is_some_and(|p| held(&p.streaming))
                 };
                 guests.iter().any(|g| g.dimension == d.id())
                     // A viewer count not yet told to 0 (`tick_mod_container_viewers`).
@@ -751,4 +810,19 @@ fn slowest_steps(notes: &[(f32, String)]) -> String {
         .map(|(ms, what)| format!("{what} {ms:.1}"))
         .collect();
     format!("; slowest: {}", list.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn levels_clear_empties_parked_and_heard_open() {
+        let mut levels = Levels::default();
+        levels.heard_open.push(Dim::Nether);
+        assert!(!levels.heard_open.is_empty());
+        levels.clear();
+        assert!(levels.heard_open.is_empty());
+        assert!(levels.parked.is_empty());
+    }
 }

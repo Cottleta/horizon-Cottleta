@@ -191,6 +191,7 @@ mod reuse;
 mod stars;
 pub mod submit;
 mod sunrise_fan;
+mod spare_image;
 mod timing;
 pub mod translucency;
 pub(crate) mod upload;
@@ -878,6 +879,7 @@ pub struct Renderer {
     gpu_timer: Option<timing::GpuTimer>,
     /// GPU frame times (ms) read back since the caller last drained them.
     pub gpu_times: Vec<f32>,
+    spare_image: spare_image::SpareImage,
     /// The last lightmap written, RGBA rows of sky level by block level
     /// (F3+4 shows it).
     pub lightmap_pixels: [u8; 16 * 16 * 4],
@@ -4327,6 +4329,7 @@ impl Renderer {
             },
             gpu_timer,
             gpu_times: Vec::new(),
+            spare_image: Default::default(),
             lightmap_pixels: [0; 16 * 16 * 4],
             last_wait: std::time::Duration::ZERO,
             last_encode: std::time::Duration::ZERO,
@@ -4775,6 +4778,25 @@ impl Renderer {
         };
         if self.config.present_mode != mode && self.surface.is_some() {
             self.config.present_mode = mode;
+            self.configure_surface();
+        }
+    }
+    /// Takes one frame's time: a third swapchain image while frames are short ([`spare_image`]).
+    /// On Linux only until it has been measured elsewhere.
+    pub fn follow_frame_rate(&mut self, elapsed: std::time::Duration) {
+        if !cfg!(target_os = "linux") || self.surface.is_none() {
+            return;
+        }
+        if self.config.present_mode != wgpu::PresentMode::Immediate {
+            if self.config.desired_maximum_frame_latency != 2 {
+                self.spare_image.reset();
+                self.config.desired_maximum_frame_latency = 2;
+                self.configure_surface();
+            }
+            return;
+        }
+        if let Some(on) = self.spare_image.frame(elapsed) {
+            self.config.desired_maximum_frame_latency = if on { 3 } else { 2 };
             self.configure_surface();
         }
     }

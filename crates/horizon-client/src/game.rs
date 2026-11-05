@@ -18802,6 +18802,9 @@ impl Game<'_> {
                         log::warn!("Horizon: couldn't save the world icon: {error}");
                     }
                     if rendered {
+                        if let Some(r) = self.renderer.as_mut() {
+                            r.follow_frame_rate(elapsed);
+                        }
                         self.frame_stats.record(elapsed.as_secs_f32() * 1000.0);
                         self.debug_charts.frame_times.log(elapsed.as_nanos() as i64);
                         if self.frames == 0 {

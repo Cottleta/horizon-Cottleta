@@ -414,6 +414,46 @@ mod tests {
     }
 
     #[test]
+    fn frame_detail_keeps_rows_and_spans_only_while_on() {
+        let span = |name, ms| crate::spans::Span {
+            name,
+            ms,
+            cpu_ms: ms,
+            depth: 0,
+        };
+        let mut row = [0.0; super::DETAIL_COLUMNS.len()];
+        let mut stats = super::FrameStats::default();
+        stats.record(1.0);
+        stats.record_detail(row, &[span("hud", 1.0)]);
+        assert!(stats.summary().get("detail").is_none());
+
+        stats.set_detail(true);
+        stats.reset();
+        for ms in [1.0, 5.0] {
+            stats.record(ms);
+            row[0] = ms;
+            stats.record_detail(row, &[span("hud", ms)]);
+        }
+        let detail = stats.summary()["detail"].clone();
+        assert_eq!(detail["spans"][0]["name"], "hud");
+        assert_eq!(detail["spans"][0]["ms_per_frame"], 3.0);
+        assert_eq!(detail["slowest"][0]["ms"], 5.0);
+        assert_eq!(detail["slowest"][0]["frame"], 1);
+        // The long time is the first frame's work.
+        assert_eq!(detail["slowest"][0]["spans"][0]["ms"], 1.0);
+
+        let path = std::env::temp_dir().join(format!("frame-detail-{}.csv", std::process::id()));
+        assert_eq!(stats.dump(&path).unwrap(), 2);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(text.starts_with("frame,cpu,gpu,"));
+        assert_eq!(text.lines().count(), 3);
+
+        stats.reset();
+        assert_eq!(stats.summary()["frames"], 0);
+    }
+
+    #[test]
     fn frame_summary_reports_block_entity_cache_work() {
         let mut stats = FrameStats::default();
         stats.record(10.0);
@@ -452,6 +492,34 @@ pub struct FrameStats {
     static_bytes_uploaded: u64,
     static_entities_drawn: u64,
     dynamic_entities_drawn: u64,
+    /// Every frame's parts and spans while `frame-detail` is on; nothing is kept without it.
+    detail: Option<Box<FrameDetail>>,
+}
+
+/// What `frame-detail` keeps per frame, in the columns of [`DETAIL_COLUMNS`].
+pub type DetailRow = [f32; DETAIL_COLUMNS.len()];
+
+/// One row per frame: its time, the CPU part, the GPU's time (NaN when the GPU's answer has not
+/// arrived), the phases and the steps. With frames handed to the submit thread, `acquire`,
+/// `finish`, `submit` and `present` were spent on that thread on an earlier frame.
+pub const DETAIL_COLUMNS: [&str; 14] = [
+    "frame", "cpu", "gpu", "update", "tick", "prepare", "render", "build", "record", "acquire",
+    "finish", "submit", "present", "wait",
+];
+/// The slowest frames whose spans are kept.
+const DETAIL_SLOWEST: usize = 30;
+
+#[derive(Default)]
+struct FrameDetail {
+    rows: Vec<DetailRow>,
+    /// Total milliseconds and times seen, by span name and nesting depth.
+    spans: std::collections::BTreeMap<(&'static str, u8), (f64, u64)>,
+    /// The slowest frames so far: frame time, frame number, spans merged by name. A frame's time
+    /// runs from its start to the next one's, so a long time is the previous frame's work: the
+    /// spans here are that frame's.
+    slowest: Vec<(f32, usize, Vec<crate::spans::Span>)>,
+    /// The last frame's spans, for when this frame's time turns out long.
+    previous: Vec<crate::spans::Span>,
 }
 
 /// The parts of a frame's CPU time: world streaming and uploads, game ticks,
@@ -520,6 +588,105 @@ impl FrameStats {
             self.gpu.extend_from_slice(millis);
         }
     }
+    /// Starts or stops keeping every frame's parts and spans.
+    pub fn set_detail(&mut self, on: bool) {
+        self.detail = on.then(Box::default);
+    }
+    pub fn detail_on(&self) -> bool {
+        self.detail.is_some()
+    }
+    /// Keeps one frame's parts and spans (`spans` as recorded, not merged), while they are kept.
+    pub fn record_detail(&mut self, row: DetailRow, spans: &[crate::spans::Span]) {
+        let Some(detail) = self.detail.as_mut() else {
+            return;
+        };
+        if detail.rows.len() >= Self::LIMIT {
+            return;
+        }
+        let number = detail.rows.len();
+        detail.rows.push(row);
+        for span in spans {
+            let total = detail.spans.entry((span.name, span.depth)).or_default();
+            total.0 += f64::from(span.ms);
+            total.1 += 1;
+        }
+        let ms = row[0];
+        if detail.slowest.len() < DETAIL_SLOWEST {
+            let worked = crate::spans::merge(&detail.previous);
+            detail.slowest.push((ms, number, worked));
+        } else if let Some(at) = detail
+            .slowest
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.0.total_cmp(&b.1.0))
+            .map(|(at, _)| at)
+            && ms > detail.slowest[at].0
+        {
+            let worked = crate::spans::merge(&detail.previous);
+            detail.slowest[at] = (ms, number, worked);
+        }
+        detail.previous.clear();
+        detail.previous.extend_from_slice(spans);
+    }
+    /// What `frame-detail` kept, for the benchmark's reply: spans per frame, and the slowest frames.
+    fn detail_summary(&self) -> Option<serde_json::Value> {
+        let detail = self.detail.as_deref()?;
+        let frames = detail.rows.len().max(1) as f64;
+        let spans: Vec<_> = detail
+            .spans
+            .iter()
+            .map(|((name, depth), (ms, seen))| {
+                serde_json::json!({
+                    "name": name,
+                    "depth": depth,
+                    "ms_per_frame": ms / frames,
+                    "seen_per_frame": *seen as f64 / frames,
+                })
+            })
+            .collect();
+        let mut slowest: Vec<_> = detail.slowest.iter().collect();
+        slowest.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let slowest: Vec<_> = slowest
+            .into_iter()
+            .map(|(ms, number, spans)| {
+                let spans: Vec<_> = spans
+                    .iter()
+                    .map(|s| serde_json::json!({ "name": s.name, "ms": s.ms, "depth": s.depth }))
+                    .collect();
+                serde_json::json!({
+                    "ms": ms,
+                    "frame": number,
+                    "row": number.checked_sub(1).and_then(|n| detail.rows.get(n)),
+                    "spans": spans,
+                })
+            })
+            .collect();
+        Some(serde_json::json!({ "spans": spans, "slowest": slowest }))
+    }
+    /// Writes every frame since the last reset to a CSV file: all the columns while `frame-detail`
+    /// is on, otherwise the frame times alone.
+    pub fn dump(&self, path: &Path) -> io::Result<usize> {
+        let mut out = io::BufWriter::new(std::fs::File::create(path)?);
+        if let Some(detail) = self.detail.as_deref() {
+            writeln!(out, "{}", DETAIL_COLUMNS.join(","))?;
+            for row in &detail.rows {
+                let mut comma = "";
+                for value in row {
+                    write!(out, "{comma}{value:.4}")?;
+                    comma = ",";
+                }
+                writeln!(out)?;
+            }
+            out.flush()?;
+            return Ok(detail.rows.len());
+        }
+        writeln!(out, "frame")?;
+        for ms in &self.millis {
+            writeln!(out, "{ms:.4}")?;
+        }
+        out.flush()?;
+        Ok(self.millis.len())
+    }
     /// Block-entity cache counters for the frame just rendered.
     pub fn record_block_entities(&mut self, stats: StaticCacheFrameStats) {
         self.static_snapshot_rebuilds += stats.snapshot_rebuilds;
@@ -550,6 +717,9 @@ impl FrameStats {
         self.static_bytes_uploaded = 0;
         self.static_entities_drawn = 0;
         self.dynamic_entities_drawn = 0;
+        if let Some(detail) = self.detail.as_mut() {
+            **detail = FrameDetail::default();
+        }
     }
     pub fn summary(&self) -> serde_json::Value {
         let mut sorted = self.millis.clone();
@@ -579,7 +749,8 @@ impl FrameStats {
                 .copied();
             p99.map_or(serde_json::Value::Null, |p| self.phase_average(p))
         };
-        serde_json::json!({
+        let detail = self.detail_summary();
+        let mut summary = serde_json::json!({
             "frames": n,
             "seconds": total / 1000.0,
             "avg_fps": n as f64 * 1000.0 / total,
@@ -600,6 +771,10 @@ impl FrameStats {
             "dynamic_entities_drawn": self.dynamic_entities_drawn,
             "static_entities_drawn_avg_per_frame": self.static_entities_drawn as f64 / n as f64,
             "dynamic_entities_drawn_avg_per_frame": self.dynamic_entities_drawn as f64 / n as f64,
-        })
+        });
+        if let Some(detail) = detail {
+            summary["detail"] = detail;
+        }
+        summary
     }
 }

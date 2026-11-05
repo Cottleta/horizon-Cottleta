@@ -2492,6 +2492,8 @@ struct Game<'a> {
     debug: bool,
     /// `horizon-ctl gpu-passes`: time Horizon's own passes on the GPU with F3 shut.
     gpu_passes: bool,
+    /// Whether this thread timed its spans before `frame-detail` turned that on.
+    frame_detail_spans_were_on: bool,
     screen: Screen,
     observed_screen: Option<native_hooks::ObservedScreen>,
     window: Option<Arc<Window>>,
@@ -18682,25 +18684,22 @@ impl Game<'_> {
                         let cpu = now.elapsed().saturating_sub(r.last_wait);
                         if rendered {
                             let ms = |d: Duration| d.as_secs_f32() * 1000.0;
-                            self.frame_graph.record(
-                                ms(elapsed),
-                                ms(cpu),
-                                r.gpu_times.last().copied(),
-                                {
-                                    let [acquire, finish, submit, present] = r.last_steps.map(ms);
-                                    let encode = ms(r.last_encode);
-                                    horizon_client::perf_overlay::Steps {
-                                        build: ms(cpu) - encode,
-                                        record: (encode - ms(r.last_inline)).max(0.0),
-                                        finish,
-                                        submit,
-                                        acquire,
-                                        present,
-                                        wait: ms(r.last_held),
-                                    }
-                                },
-                            );
-                            if let Some(&gpu) = r.gpu_times.last() {
+                            let steps = {
+                                let [acquire, finish, submit, present] = r.last_steps.map(ms);
+                                let encode = ms(r.last_encode);
+                                horizon_client::perf_overlay::Steps {
+                                    build: ms(cpu) - encode,
+                                    record: (encode - ms(r.last_inline)).max(0.0),
+                                    finish,
+                                    submit,
+                                    acquire,
+                                    present,
+                                    wait: ms(r.last_held),
+                                }
+                            };
+                            let gpu_time = r.gpu_times.last().copied();
+                            self.frame_graph.record(ms(elapsed), ms(cpu), gpu_time, steps);
+                            if let Some(gpu) = gpu_time {
                                 self.gpu_utilization =
                                     f64::from(gpu) * 100.0 / f64::from(ms(cpu).max(0.001));
                             }
@@ -18718,12 +18717,35 @@ impl Game<'_> {
                                 );
                             }
                             let render = r.last_encode;
-                            self.frame_stats.record_phases([
+                            let phases = [
                                 ms(updated - now),
                                 ms(ticked - updated),
                                 ms(ticked.elapsed().saturating_sub(r.last_wait + render)),
                                 ms(render),
-                            ]);
+                            ];
+                            self.frame_stats.record_phases(phases);
+                            if self.frame_stats.detail_on() {
+                                let [update, tick, prepare, encode] = phases;
+                                self.frame_stats.record_detail(
+                                    [
+                                        ms(elapsed),
+                                        ms(cpu),
+                                        gpu_time.unwrap_or(f32::NAN),
+                                        update,
+                                        tick,
+                                        prepare,
+                                        encode,
+                                        steps.build,
+                                        steps.record,
+                                        steps.acquire,
+                                        steps.finish,
+                                        steps.submit,
+                                        steps.present,
+                                        steps.wait,
+                                    ],
+                                    &frame_spans,
+                                );
+                            }
                             self.frame_stats
                                 .record_block_entities(r.static_block_entity_frame_stats());
                         }
@@ -19150,6 +19172,7 @@ impl<'a> Game<'a> {
             pause: false,
             debug: false,
             gpu_passes: false,
+            frame_detail_spans_were_on: false,
             screen: Screen::Playing,
             observed_screen: None,
             window: None,

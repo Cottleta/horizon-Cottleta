@@ -419,6 +419,29 @@ impl Game<'_> {
                 }
                 Ok(Some(json!({ "ok": true, "gpu_passes": self.gpu_passes })))
             }
+            "frame-detail" => match words.get(1).copied() {
+                Some("on") => {
+                    if !self.frame_stats.detail_on() {
+                        self.frame_detail_spans_were_on = horizon_client::spans::recording_here();
+                        self.frame_stats.set_detail(true);
+                        horizon_client::spans::record_here(true);
+                    }
+                    Ok(Some(json!({ "ok": true, "frame_detail": true })))
+                }
+                Some("off") => {
+                    if self.frame_stats.detail_on() {
+                        self.frame_stats.set_detail(false);
+                        horizon_client::spans::record_here(self.frame_detail_spans_were_on);
+                    }
+                    Ok(Some(json!({ "ok": true, "frame_detail": false })))
+                }
+                Some("dump") => {
+                    let frames = self.frame_stats.dump(std::path::Path::new(arg(2)?))?;
+                    Ok(Some(json!({ "ok": true, "frames": frames })))
+                }
+                None => Ok(Some(json!({ "ok": true, "frame_detail": self.frame_stats.detail_on() }))),
+                Some(other) => Err(format!("unknown frame detail mode {other}").into()),
+            },
             "render-capture" => match words.get(1).copied() {
                 None => {
                     let r = self.renderer.as_ref().ok_or("no renderer")?;

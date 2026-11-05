@@ -5,6 +5,7 @@
 #[cfg(target_os = "windows")]
 pub mod boot_paint;
 pub mod capped;
+pub mod frame_pool;
 pub mod heap_census;
 pub mod jobs;
 pub mod memory_limit;

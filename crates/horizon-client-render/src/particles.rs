@@ -1180,6 +1180,240 @@ impl ParticleLevel<'_> {
     }
 }
 
+/// What building a particle's quads reads of the engine, shared by the threads.
+struct ParticleSprites<'a> {
+    rects: &'a [Option<Rect>],
+    atlas: &'a HashMap<String, (Rect, bool)>,
+}
+impl ParticleSprites<'_> {
+    #[allow(clippy::too_many_arguments)]
+    fn render_inner<const CULL: bool>(
+        &self,
+        particles: &[Particle],
+        camera: DVec3,
+        yaw: f32,
+        pitch: f32,
+        partial: f32,
+        pixel_focal_length: f32,
+        frustum: Option<&crate::gfx::Frustum>,
+        occluded: &mut dyn FnMut([f64; 3], [f64; 3]) -> bool,
+        light_at: &dyn Fn([i32; 3]) -> u8,
+        out: &mut Vec<Vertex>,
+    ) {
+        // Camera.setRotation: rotationYXZ(PI - yRot, -xRot, 0).
+        let base = Quat::from_rotation_y(std::f32::consts::PI - yaw.to_radians())
+            * Quat::from_rotation_x(-pitch.to_radians());
+        let mut light_cache = ParticleLightCache::default();
+        out.reserve(particles.len() * 4);
+        // Most particles don't roll: one rotation of the quad's corners for them all.
+        const CORNERS: [(f32, f32); 4] = [(1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0)];
+        let base_corners = CORNERS.map(|(x, y)| base * FVec3::new(x, y, 0.0));
+        // Terrain particles mostly come in bursts of one block's sprite.
+        let mut last_named: Option<(&str, Option<(Rect, bool)>)> = None;
+        let mut section_cache =
+            (CULL && frustum.is_some()).then(ParticleSectionFrustumCache::default);
+        for p in particles {
+            if p.no_render {
+                continue;
+            }
+            // SparkParticle.extract: twinkling sparks blink after a third of their life.
+            if let Behaviour::Spark { twinkle: true, .. } = p.behaviour
+                && p.age >= p.lifetime / 3
+                && ((p.age + p.lifetime) / 3) % 2 != 0
+            {
+                continue;
+            }
+            if CULL && matches!(p.behaviour, Behaviour::Shriek { delay } if delay > 0) {
+                continue;
+            }
+            let culled_geometry = if CULL {
+                let a = f64::from(partial);
+                let world = array::from_fn(|i| p.previous[i] + (p.position[i] - p.previous[i]) * a);
+                let center = (DVec3::from_array(world) - camera).as_vec3();
+                let size = p.quad_size(partial);
+                // Every generated quad vertex is sqrt(2) * size from its center,
+                // including the rotated two-quad particle types.
+                let radius = f64::from(size.abs()) * std::f64::consts::SQRT_2 + 0.05;
+                if let (Some(frustum), Some(section_cache)) = (frustum, section_cache.as_mut()) {
+                    match section_cache.result(world, camera, radius, frustum) {
+                        SectionFrustumResult::Outside => continue,
+                        SectionFrustumResult::Intersects
+                            if !frustum.intersects_sphere(center, radius as f32) =>
+                        {
+                            continue;
+                        }
+                        SectionFrustumResult::Inside | SectionFrustumResult::Intersects => {}
+                    }
+                }
+                let distance_squared = f64::from(center.length_squared());
+                if below_half_pixel(radius, distance_squared, pixel_focal_length) {
+                    continue;
+                }
+                if occluded(world.map(|v| v - radius), world.map(|v| v + radius)) {
+                    continue;
+                }
+                Some((center, size))
+            } else {
+                None
+            };
+            // `SubmitNodeCollection.submitQuadParticleGroup`: the translucent
+            // layer draws after translucent terrain, so a crumb of stained
+            // glass cannot hide the glass behind it (`getLayer`).
+            let (rect, layer) = match &p.sprite {
+                Sprite::Index(i) => (
+                    self.rects.get(*i as usize).copied().flatten(),
+                    p.ty.translucent_layer()
+                        || matches!(p.behaviour, Behaviour::Mod { alpha, .. } if alpha != [1.0; 2]),
+                ),
+                Sprite::Named(name) => {
+                    let found = match last_named {
+                        Some((last, found)) if last == name => found,
+                        _ => self.atlas.get(name).copied(),
+                    };
+                    last_named = Some((name, found));
+                    match found {
+                        Some((rect, translucent)) => (Some(rect), translucent),
+                        None => (None, false),
+                    }
+                }
+            };
+            let Some(r) = rect else { continue };
+            let (center, size) = culled_geometry.unwrap_or_else(|| {
+                let a = f64::from(partial);
+                let pos = DVec3::new(
+                    p.previous[0] + (p.position[0] - p.previous[0]) * a,
+                    p.previous[1] + (p.position[1] - p.previous[1]) * a,
+                    p.previous[2] + (p.position[2] - p.previous[2]) * a,
+                ) - camera;
+                (pos.as_vec3(), p.quad_size(partial))
+            });
+            let rotation = if p.roll != 0.0 {
+                base * Quat::from_rotation_z(p.o_roll + (p.roll - p.o_roll) * partial)
+            } else {
+                base
+            };
+            // Out of view it draws nothing: no quads to build. Its quad reaches
+            // `size` from its centre at any roll, along each axis at most that.
+            if !CULL {
+                let reach = glam::Vec3::splat(size * 2.0);
+                if frustum.is_some_and(|v| !v.intersects(center - reach, center + reach)) {
+                    continue;
+                }
+            }
+            let mut alpha = p.rgba[3];
+            // OverlayParticle.extract: the flash fades as it pulses.
+            if p.ty == ParticleType::Flash {
+                alpha = 0.6 - (p.age as f32 + partial - 1.0) * 0.25 * 0.5;
+            }
+            if let Behaviour::FlyTowards { alpha: la, .. } = p.behaviour {
+                alpha = lifetime_alpha(la, p.age, p.lifetime, partial);
+            }
+            let mut rotations = [Some(rotation), None];
+            let mut rgb = [p.rgba[0], p.rgba[1], p.rgba[2]];
+            match p.behaviour {
+                // ShriekParticle.extract: two tilted quads, fading out.
+                Behaviour::Shriek { delay } => {
+                    if !CULL && delay > 0 {
+                        continue;
+                    }
+                    alpha = 1.0 - ((p.age as f32 + partial) / p.lifetime as f32).clamp(0.0, 1.0);
+                    rotations = [
+                        Some(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_3)),
+                        Some(Quat::from_euler(
+                            glam::EulerRot::YXZ,
+                            -std::f32::consts::PI,
+                            std::f32::consts::FRAC_PI_3,
+                            0.0,
+                        )),
+                    ];
+                }
+                // VibrationSignalParticle.extract: two quads along the flight.
+                Behaviour::Vibration {
+                    rot,
+                    rot_o,
+                    pitch,
+                    pitch_o,
+                    ..
+                } => {
+                    let sway =
+                        ((p.age as f32 + partial - std::f32::consts::TAU) * 0.05).sin() * 2.0;
+                    let lerped_rot = rot_o + (rot - rot_o) * partial;
+                    let lerped_pitch =
+                        pitch_o + (pitch - pitch_o) * partial + std::f32::consts::FRAC_PI_2;
+                    rotations = [
+                        Some(
+                            Quat::from_rotation_y(lerped_rot)
+                                * Quat::from_rotation_x(-lerped_pitch)
+                                * Quat::from_rotation_y(sway),
+                        ),
+                        Some(
+                            Quat::from_rotation_y(-std::f32::consts::PI + lerped_rot)
+                                * Quat::from_rotation_x(lerped_pitch)
+                                * Quat::from_rotation_y(sway),
+                        ),
+                    ];
+                }
+                // DustColorTransitionParticle.lerpColors.
+                Behaviour::Transition { from, to } => {
+                    let t = (p.age as f32 + partial) / (p.lifetime as f32 + 1.0);
+                    rgb = array::from_fn(|i| from[i] + (to[i] - from[i]) * t);
+                }
+                _ => {}
+            }
+            let block = ParticleLevel::block_at(p.position);
+            // Light hardly changes between frames: read again in a new block or every 8 ticks.
+            let packed = match p.kept_light.get() {
+                Some((at, tick, light)) if at == block && (p.age - tick) < 8 => light,
+                _ => {
+                    let light = light_cache.get(block, light_at);
+                    p.kept_light.set(Some((block, p.age, light)));
+                    light
+                }
+            };
+            let (sky_light, block_light) = p.light_coords(
+                partial,
+                u32::from(packed >> 4) * 16,
+                u32::from(packed & 15) * 16,
+            );
+            let light = sky_light | block_light << 8;
+            let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u32;
+            let color = c(alpha) << 24 | c(rgb[2]) << 16 | c(rgb[1]) << 8 | c(rgb[0]);
+            let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
+            let (u0, v0, u1, v1) = (
+                r.u0 + du * p.uv[0],
+                r.v0 + dv * p.uv[1],
+                r.u0 + du * p.uv[2],
+                r.v0 + dv * p.uv[3],
+            );
+            let layer = if layer {
+                crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY
+            } else {
+                0
+            } | u32::from(hdr_tier(p.ty)) << 16;
+            for rotation in rotations.into_iter().flatten() {
+                let corners = if rotation == base {
+                    base_corners
+                } else {
+                    CORNERS.map(|(x, y)| rotation * FVec3::new(x, y, 0.0))
+                };
+                for (corner, uv) in corners.into_iter().zip([[u1, v1], [u1, v0], [u0, v0], [u0, v1]]) {
+                    let v = center + corner * size;
+                    out.push(Vertex {
+                        normal: [0; 4],
+                        pos: v.to_array(),
+                        uv,
+                        layer,
+                        color,
+                        light,
+
+                        glint_uv: [0.0, 0.0],
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// What a particle that needs nothing else of the engine reads while it ticks, so that
 /// many of them can tick on a few threads with the same results: each has its own random.
 struct TickAlone<'a> {
@@ -1787,6 +2021,8 @@ impl TickAlone<'_> {
 /// `ParticleEngine` plus the sprite sets of `ParticleResources`.
 pub struct ParticleEngine {
     particles: Vec<Particle>,
+    /// The threads' quad lists, kept between frames.
+    render_lists: Vec<Vec<Vertex>>,
     pending: Vec<Particle>,
     /// `ParticleEngine.random`, handed to every `ParticleProvider`.
     random: LegacyRandom,
@@ -2011,6 +2247,7 @@ impl ParticleEngine {
     pub fn new(root: &Path, atlas: &HashMap<String, Rect>, translucent: &HashSet<String>) -> Self {
         let mut engine = Self {
             particles: Vec::new(),
+            render_lists: Vec::new(),
             pending: Vec::new(),
             random: LegacyRandom::new(0x7061_7274),
             level_random: LegacyRandom::new(0x6c65_7665),
@@ -4579,26 +4816,68 @@ impl ParticleEngine {
 
     /// Camera-facing quads (`QuadParticleRenderState.renderRotatedQuad`).
     pub fn render(
-        &self,
+        &mut self,
         camera: DVec3,
         yaw: f32,
         pitch: f32,
         partial: f32,
-        light_at: &dyn Fn([i32; 3]) -> u8,
+        light_at: &(dyn Fn([i32; 3]) -> u8 + Sync),
         view: Option<&crate::gfx::Frustum>,
         out: &mut Vec<Vertex>,
     ) {
-        self.render_inner::<false>(
-            camera,
-            yaw,
-            pitch,
-            partial,
-            0.0,
-            view,
-            &mut |_, _| false,
-            light_at,
-            out,
-        );
+        let parts = particle_threads(self.particles.len(), horizon_threads::worker_count());
+        let sprites = ParticleSprites {
+            rects: &self.rects,
+            atlas: &self.atlas,
+        };
+        if parts < 2 {
+            sprites.render_inner::<false>(
+                &self.particles,
+                camera,
+                yaw,
+                pitch,
+                partial,
+                0.0,
+                view,
+                &mut |_, _| false,
+                light_at,
+                out,
+            );
+            return;
+        }
+        // In the particles' order, each part into a list of its own kept between frames.
+        let size = self.particles.len().div_ceil(parts);
+        let mut lists = std::mem::take(&mut self.render_lists);
+        lists.resize_with(parts, Vec::new);
+        let chunks: Vec<_> = self
+            .particles
+            .chunks_mut(size)
+            .zip(lists.drain(..))
+            .map(std::sync::Mutex::new)
+            .collect();
+        horizon_threads::frame_pool::run(chunks.len(), &|i| {
+            let mut chunk = chunks[i].lock().unwrap_or_else(|e| e.into_inner());
+            let (particles, list) = &mut *chunk;
+            list.clear();
+            sprites.render_inner::<false>(
+                particles,
+                camera,
+                yaw,
+                pitch,
+                partial,
+                0.0,
+                view,
+                &mut |_, _| false,
+                light_at,
+                list,
+            );
+        });
+        for chunk in chunks {
+            let (_, list) = chunk.into_inner().unwrap_or_else(|e| e.into_inner());
+            out.extend_from_slice(&list);
+            lists.push(list);
+        }
+        self.render_lists = lists;
     }
 
     /// Render particles after rejecting view-frustum misses and any particles
@@ -4613,14 +4892,30 @@ impl ParticleEngine {
         culling_enabled: bool,
         frustum: Option<&crate::gfx::Frustum>,
         mut occluded: impl FnMut([f64; 3], [f64; 3]) -> bool,
-        light_at: &dyn Fn([i32; 3]) -> u8,
+        light_at: &(dyn Fn([i32; 3]) -> u8 + Sync),
         out: &mut Vec<Vertex>,
     ) {
+        let sprites = ParticleSprites {
+            rects: &self.rects,
+            atlas: &self.atlas,
+        };
         if !culling_enabled {
-            self.render(camera, yaw, pitch, partial, light_at, frustum, out);
+            sprites.render_inner::<false>(
+                &self.particles,
+                camera,
+                yaw,
+                pitch,
+                partial,
+                0.0,
+                frustum,
+                &mut |_, _| false,
+                light_at,
+                out,
+            );
             return;
         }
-        self.render_inner::<true>(
+        sprites.render_inner::<true>(
+            &self.particles,
             camera,
             yaw,
             pitch,
@@ -4633,230 +4928,6 @@ impl ParticleEngine {
         );
     }
 
-    fn render_inner<const CULL: bool>(
-        &self,
-        camera: DVec3,
-        yaw: f32,
-        pitch: f32,
-        partial: f32,
-        pixel_focal_length: f32,
-        frustum: Option<&crate::gfx::Frustum>,
-        occluded: &mut dyn FnMut([f64; 3], [f64; 3]) -> bool,
-        light_at: &dyn Fn([i32; 3]) -> u8,
-        out: &mut Vec<Vertex>,
-    ) {
-        // Camera.setRotation: rotationYXZ(PI - yRot, -xRot, 0).
-        let base = Quat::from_rotation_y(std::f32::consts::PI - yaw.to_radians())
-            * Quat::from_rotation_x(-pitch.to_radians());
-        let mut light_cache = ParticleLightCache::default();
-        out.reserve(self.particles.len() * 4);
-        // Most particles don't roll: one rotation of the quad's corners for them all.
-        const CORNERS: [(f32, f32); 4] = [(1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0)];
-        let base_corners = CORNERS.map(|(x, y)| base * FVec3::new(x, y, 0.0));
-        // Terrain particles mostly come in bursts of one block's sprite.
-        let mut last_named: Option<(&str, Option<(Rect, bool)>)> = None;
-        let mut section_cache =
-            (CULL && frustum.is_some()).then(ParticleSectionFrustumCache::default);
-        for p in &self.particles {
-            if p.no_render {
-                continue;
-            }
-            // SparkParticle.extract: twinkling sparks blink after a third of their life.
-            if let Behaviour::Spark { twinkle: true, .. } = p.behaviour
-                && p.age >= p.lifetime / 3
-                && ((p.age + p.lifetime) / 3) % 2 != 0
-            {
-                continue;
-            }
-            if CULL && matches!(p.behaviour, Behaviour::Shriek { delay } if delay > 0) {
-                continue;
-            }
-            let culled_geometry = if CULL {
-                let a = f64::from(partial);
-                let world = array::from_fn(|i| p.previous[i] + (p.position[i] - p.previous[i]) * a);
-                let center = (DVec3::from_array(world) - camera).as_vec3();
-                let size = p.quad_size(partial);
-                // Every generated quad vertex is sqrt(2) * size from its center,
-                // including the rotated two-quad particle types.
-                let radius = f64::from(size.abs()) * std::f64::consts::SQRT_2 + 0.05;
-                if let (Some(frustum), Some(section_cache)) = (frustum, section_cache.as_mut()) {
-                    match section_cache.result(world, camera, radius, frustum) {
-                        SectionFrustumResult::Outside => continue,
-                        SectionFrustumResult::Intersects
-                            if !frustum.intersects_sphere(center, radius as f32) =>
-                        {
-                            continue;
-                        }
-                        SectionFrustumResult::Inside | SectionFrustumResult::Intersects => {}
-                    }
-                }
-                let distance_squared = f64::from(center.length_squared());
-                if below_half_pixel(radius, distance_squared, pixel_focal_length) {
-                    continue;
-                }
-                if occluded(world.map(|v| v - radius), world.map(|v| v + radius)) {
-                    continue;
-                }
-                Some((center, size))
-            } else {
-                None
-            };
-            // `SubmitNodeCollection.submitQuadParticleGroup`: the translucent
-            // layer draws after translucent terrain, so a crumb of stained
-            // glass cannot hide the glass behind it (`getLayer`).
-            let (rect, layer) = match &p.sprite {
-                Sprite::Index(i) => (
-                    self.rects.get(*i as usize).copied().flatten(),
-                    p.ty.translucent_layer()
-                        || matches!(p.behaviour, Behaviour::Mod { alpha, .. } if alpha != [1.0; 2]),
-                ),
-                Sprite::Named(name) => {
-                    let found = match last_named {
-                        Some((last, found)) if last == name => found,
-                        _ => self.atlas.get(name).copied(),
-                    };
-                    last_named = Some((name, found));
-                    match found {
-                        Some((rect, translucent)) => (Some(rect), translucent),
-                        None => (None, false),
-                    }
-                }
-            };
-            let Some(r) = rect else { continue };
-            let (center, size) = culled_geometry.unwrap_or_else(|| {
-                let a = f64::from(partial);
-                let pos = DVec3::new(
-                    p.previous[0] + (p.position[0] - p.previous[0]) * a,
-                    p.previous[1] + (p.position[1] - p.previous[1]) * a,
-                    p.previous[2] + (p.position[2] - p.previous[2]) * a,
-                ) - camera;
-                (pos.as_vec3(), p.quad_size(partial))
-            });
-            let rotation = if p.roll != 0.0 {
-                base * Quat::from_rotation_z(p.o_roll + (p.roll - p.o_roll) * partial)
-            } else {
-                base
-            };
-            // Out of view it draws nothing: no quads to build. Its quad reaches
-            // `size` from its centre at any roll, along each axis at most that.
-            if !CULL {
-                let reach = glam::Vec3::splat(size * 2.0);
-                if frustum.is_some_and(|v| !v.intersects(center - reach, center + reach)) {
-                    continue;
-                }
-            }
-            let mut alpha = p.rgba[3];
-            // OverlayParticle.extract: the flash fades as it pulses.
-            if p.ty == ParticleType::Flash {
-                alpha = 0.6 - (p.age as f32 + partial - 1.0) * 0.25 * 0.5;
-            }
-            if let Behaviour::FlyTowards { alpha: la, .. } = p.behaviour {
-                alpha = lifetime_alpha(la, p.age, p.lifetime, partial);
-            }
-            let mut rotations = [Some(rotation), None];
-            let mut rgb = [p.rgba[0], p.rgba[1], p.rgba[2]];
-            match p.behaviour {
-                // ShriekParticle.extract: two tilted quads, fading out.
-                Behaviour::Shriek { delay } => {
-                    if !CULL && delay > 0 {
-                        continue;
-                    }
-                    alpha = 1.0 - ((p.age as f32 + partial) / p.lifetime as f32).clamp(0.0, 1.0);
-                    rotations = [
-                        Some(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_3)),
-                        Some(Quat::from_euler(
-                            glam::EulerRot::YXZ,
-                            -std::f32::consts::PI,
-                            std::f32::consts::FRAC_PI_3,
-                            0.0,
-                        )),
-                    ];
-                }
-                // VibrationSignalParticle.extract: two quads along the flight.
-                Behaviour::Vibration {
-                    rot,
-                    rot_o,
-                    pitch,
-                    pitch_o,
-                    ..
-                } => {
-                    let sway =
-                        ((p.age as f32 + partial - std::f32::consts::TAU) * 0.05).sin() * 2.0;
-                    let lerped_rot = rot_o + (rot - rot_o) * partial;
-                    let lerped_pitch =
-                        pitch_o + (pitch - pitch_o) * partial + std::f32::consts::FRAC_PI_2;
-                    rotations = [
-                        Some(
-                            Quat::from_rotation_y(lerped_rot)
-                                * Quat::from_rotation_x(-lerped_pitch)
-                                * Quat::from_rotation_y(sway),
-                        ),
-                        Some(
-                            Quat::from_rotation_y(-std::f32::consts::PI + lerped_rot)
-                                * Quat::from_rotation_x(lerped_pitch)
-                                * Quat::from_rotation_y(sway),
-                        ),
-                    ];
-                }
-                // DustColorTransitionParticle.lerpColors.
-                Behaviour::Transition { from, to } => {
-                    let t = (p.age as f32 + partial) / (p.lifetime as f32 + 1.0);
-                    rgb = array::from_fn(|i| from[i] + (to[i] - from[i]) * t);
-                }
-                _ => {}
-            }
-            let block = ParticleLevel::block_at(p.position);
-            // Light hardly changes between frames: read again in a new block or every 8 ticks.
-            let packed = match p.kept_light.get() {
-                Some((at, tick, light)) if at == block && (p.age - tick) < 8 => light,
-                _ => {
-                    let light = light_cache.get(block, light_at);
-                    p.kept_light.set(Some((block, p.age, light)));
-                    light
-                }
-            };
-            let (sky_light, block_light) = p.light_coords(
-                partial,
-                u32::from(packed >> 4) * 16,
-                u32::from(packed & 15) * 16,
-            );
-            let light = sky_light | block_light << 8;
-            let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u32;
-            let color = c(alpha) << 24 | c(rgb[2]) << 16 | c(rgb[1]) << 8 | c(rgb[0]);
-            let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
-            let (u0, v0, u1, v1) = (
-                r.u0 + du * p.uv[0],
-                r.v0 + dv * p.uv[1],
-                r.u0 + du * p.uv[2],
-                r.v0 + dv * p.uv[3],
-            );
-            let layer = if layer {
-                crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY
-            } else {
-                0
-            } | u32::from(hdr_tier(p.ty)) << 16;
-            for rotation in rotations.into_iter().flatten() {
-                let corners = if rotation == base {
-                    base_corners
-                } else {
-                    CORNERS.map(|(x, y)| rotation * FVec3::new(x, y, 0.0))
-                };
-                for (corner, uv) in corners.into_iter().zip([[u1, v1], [u1, v0], [u0, v0], [u0, v1]]) {
-                    let v = center + corner * size;
-                    out.push(Vertex {
-                        normal: [0; 4],
-                        pos: v.to_array(),
-                        uv,
-                        layer,
-                        color,
-                        light,
-
-                        glint_uv: [0.0, 0.0],
-                    });
-                }
-            }
-        }
-    }
 }
 /// How brightly particle `ty` shines in HDR output, as `mesher::hdr_tier`: flames,
 /// glowing drops and fireworks, not their smoke.
@@ -5324,6 +5395,55 @@ mod tests {
             engine.tick_particle(&mut kept, &level);
         }
         assert_eq!(sprite(&kept), 11, "no animation keeps the spawn sprite");
+    }
+
+    /// Building on threads gives the quads one thread does, in the same order.
+    #[test]
+    fn threads_build_the_quads_one_thread_does() {
+        let mut engine = ParticleEngine::new(Path::new(""), &HashMap::new(), &HashSet::new());
+        engine.atlas.insert(
+            "smoke".to_owned(),
+            (
+                Rect { u0: 0.0, v0: 0.0, u1: 0.0, v1: 0.0, w: 0, h: 0 },
+                false,
+            ),
+        );
+        let count = 6011;
+        assert!(particle_threads(count, horizon_threads::worker_count().max(4)) > 1);
+        engine.particles = (0..count)
+            .map(|i| {
+                let mut p = Particle::blank(
+                    ParticleType::Smoke,
+                    [i as f64 * 0.01, (i % 37) as f64, (i % 11) as f64],
+                );
+                p.sprite = Sprite::Named("smoke".to_owned());
+                p
+            })
+            .collect();
+        let camera = DVec3::new(1.0, 2.0, 3.0);
+        let mut one = Vec::new();
+        ParticleSprites {
+            rects: &engine.rects,
+            atlas: &engine.atlas,
+        }
+        .render_inner::<false>(
+            &engine.particles,
+            camera,
+            30.0,
+            10.0,
+            0.5,
+            0.0,
+            None,
+            &mut |_, _| false,
+            &|_| 15,
+            &mut one,
+        );
+        assert_eq!(one.len(), count * 4);
+        for _ in 0..3 {
+            let mut many = Vec::new();
+            engine.render(camera, 30.0, 10.0, 0.5, &|_| 15, None, &mut many);
+            assert_eq!(bytemuck::cast_slice::<_, u8>(&one), bytemuck::cast_slice::<_, u8>(&many));
+        }
     }
 
     /// Ticking on threads gives each particle what ticking one by one does.

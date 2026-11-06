@@ -2651,6 +2651,8 @@ struct Game<'a> {
     hud_kept: Option<([u32; 2], HudBatch)>,
     /// The inventory and containers' opening and closing (Cottleta's Settings).
     screen_anim: screen_anim::ScreenAnim,
+    /// Menu pages easing in (Cottleta's Settings).
+    menu_anim: screen_anim::MenuAnim,
     /// The hotbar selection's place, in slots, as it glides (Cottleta's Settings).
     hotbar_slide: horizon_client::gui_anim::Tween,
     hud_built: Instant,
@@ -8877,7 +8879,9 @@ impl Game<'_> {
                 self.flush_skin_slots();
                 self.update_remote_skins();
             }
+            let menu_at = self.menu_anim_begin(&batch);
             self.draw_options(&mut batch);
+            self.menu_anim_end(&mut batch, menu_at);
             self.fire_screen_render_post(&mut batch);
             self.draw_split_hud(&mut batch, true);
             return batch;
@@ -8905,6 +8909,7 @@ impl Game<'_> {
             // TitleScreen.extractRenderState, then ToastManager over it: vanilla
             // draws the toast manager on every screen, so a pack download or a
             // resource-reload failure still shows on the title (#4428).
+            let menu_at = self.menu_anim_begin(&batch);
             if let Some(title) = &self.title {
                 title.draw_with_items(
                     &self.gui.atlas,
@@ -8915,6 +8920,7 @@ impl Game<'_> {
                     self.settings.file.bool("hideServerAddress"),
                 );
             }
+            self.menu_anim_end(&mut batch, menu_at);
             // ScreenEvent.Render.Post over the title's own screens: a mod draws
             // over them here (a pack browser over Create New World, say), and the
             // toasts still come after, as over any screen.
@@ -20018,6 +20024,7 @@ impl<'a> Game<'a> {
             frame_end: now,
             hud_kept: None,
             screen_anim: Default::default(),
+            menu_anim: Default::default(),
             hotbar_slide: horizon_client::gui_anim::Tween::at(0.0),
             hud_built: now,
             hud_touched: now,

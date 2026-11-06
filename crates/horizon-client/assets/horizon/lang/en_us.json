@@ -295,6 +295,8 @@
   "Cottleta's Settings...": "Cottleta's Settings...",
   "This build's own settings: picked for this PC, saved ones and extras.": "This build's own settings: picked for this PC, saved ones and extras.",
   "Extras": "Extras",
+  "Animations: menu pages": "Animations: menu pages",
+  "How a menu page eases in as you open it. Off: it appears at once.": "How a menu page eases in as you open it. Off: it appears at once.",
   "Animations: buttons": "Animations: buttons",
   "The highlight fades in and out under the pointer. Off: it switches at once.": "The highlight fades in and out under the pointer. Off: it switches at once.",
   "Animations: hotbar selection": "Animations: hotbar selection",

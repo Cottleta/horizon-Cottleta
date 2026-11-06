@@ -771,6 +771,8 @@ pub struct Graphics {
     pub anim_hotbar: crate::gui_anim::Setting,
     /// Cottleta's Settings: buttons easing their highlight in and out.
     pub anim_buttons: crate::gui_anim::Setting,
+    /// Cottleta's Settings: menu pages easing in as they open.
+    pub anim_menus: crate::gui_anim::Setting,
     /// Auto Settings' frame rate target, 0 until one is picked.
     pub auto_target_fps: u32,
     /// Auto Settings' FPS Target rows are dropped down: not saved.
@@ -856,6 +858,7 @@ impl Default for Graphics {
             anim_containers: Default::default(),
             anim_hotbar: Default::default(),
             anim_buttons: Default::default(),
+            anim_menus: Default::default(),
             blue_map: crate::bluemap::Settings::default(),
             cave_culling: true,
             gpu_culling: false,
@@ -1011,6 +1014,7 @@ impl Graphics {
                 "animContainers" => g.anim_containers = crate::gui_anim::Setting::parse(value),
                 "animHotbar" => g.anim_hotbar = crate::gui_anim::Setting::parse(value),
                 "animButtons" => g.anim_buttons = crate::gui_anim::Setting::parse(value),
+                "animMenus" => g.anim_menus = crate::gui_anim::Setting::parse(value),
                 "autoTargetFps" => g.auto_target_fps = number(g.auto_target_fps),
                 "sky" => g.sky = flag(g.sky),
                 "fog" => g.fog = flag(g.fog),
@@ -1138,6 +1142,7 @@ impl Graphics {
         text += &format!("animContainers:{}\n", self.anim_containers.to_text());
         text += &format!("animHotbar:{}\n", self.anim_hotbar.to_text());
         text += &format!("animButtons:{}\n", self.anim_buttons.to_text());
+        text += &format!("animMenus:{}\n", self.anim_menus.to_text());
         text += &self.blue_map.serialize();
         text
     }
@@ -1291,6 +1296,7 @@ mod tests {
             anim_containers: Default::default(),
             anim_hotbar: Default::default(),
             anim_buttons: Default::default(),
+            anim_menus: Default::default(),
             blue_map: crate::bluemap::Settings {
                 radius: 40,
                 auto_detect: true,

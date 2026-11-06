@@ -16,6 +16,27 @@ pub(super) struct ScreenAnim {
     last_blends: Vec<(std::ops::Range<u32>, Blend)>,
 }
 
+/// The menu page's easing in (`anim_menus`): which page it is, and its progress.
+pub(super) struct MenuAnim {
+    key: u64,
+    tween: Tween,
+}
+
+impl Default for MenuAnim {
+    fn default() -> Self {
+        Self {
+            key: 0,
+            tween: Tween::at(1.0),
+        }
+    }
+}
+
+impl MenuAnim {
+    pub(super) fn moving(&self, now: Instant) -> bool {
+        self.tween.moving(now)
+    }
+}
+
 impl Default for ScreenAnim {
     fn default() -> Self {
         Self {
@@ -70,6 +91,43 @@ fn pose(vertices: &mut [HudVertex], setting: Setting, p: f32, size: [f32; 2]) {
 }
 
 impl Game<'_> {
+    /// Which menu page is open: the screen, the options page and the title screen's mode.
+    fn menu_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::mem::discriminant(&self.screen).hash(&mut h);
+        if self.screen == Screen::Options {
+            std::mem::discriminant(&self.ui.options.page()).hash(&mut h);
+            std::mem::discriminant(&self.ui.options.graphics.shown_page()).hash(&mut h);
+        }
+        if let Some(title) = &self.title {
+            std::mem::discriminant(&title.mode).hash(&mut h);
+        }
+        h.finish()
+    }
+    /// Before a menu page draws: notes a new page. Where its vertices begin.
+    pub(super) fn menu_anim_begin(&mut self, batch: &HudBatch) -> usize {
+        let setting = self.settings.horizon.anim_menus;
+        if setting.on() {
+            let key = self.menu_key();
+            if key != self.menu_anim.key {
+                self.menu_anim.key = key;
+                self.menu_anim.tween = Tween::at(0.0);
+                self.menu_anim.tween.go(1.0, setting, Instant::now());
+            }
+        }
+        batch.vertices.len()
+    }
+    /// After the page drew from `start`: poses it while it eases in.
+    pub(super) fn menu_anim_end(&mut self, batch: &mut HudBatch, start: usize) {
+        let setting = self.settings.horizon.anim_menus;
+        let now = Instant::now();
+        if !setting.on() || !self.menu_anim.tween.moving(now) {
+            return;
+        }
+        let size = [batch.width, batch.height];
+        pose(&mut batch.vertices[start..], setting, self.menu_anim.tween.value(now), size);
+    }
     /// The hotbar's selection box in `draws` moved to where it is gliding (`anim_hotbar`).
     pub(super) fn slide_hotbar_selection(&mut self, draws: &mut [horizon_client::hud_layout::GuiDraw]) {
         let setting = self.settings.horizon.anim_hotbar;

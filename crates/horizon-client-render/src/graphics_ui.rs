@@ -108,6 +108,9 @@ pub enum H {
     AnimHotbarSpeed,
     AnimButtonStyle,
     AnimButtonSpeed,
+    AnimMenuStyle,
+    AnimMenuMotion,
+    AnimMenuSpeed,
     Sky,
     Fog,
     Weather,
@@ -753,6 +756,26 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         ),
                     ],
                 ),
+                (
+                    "Animations: menu pages",
+                    vec![
+                        h(
+                            H::AnimMenuStyle,
+                            None,
+                            "How a menu page eases in as you open it. Off: it appears at once.",
+                        ),
+                        h(
+                            H::AnimMenuMotion,
+                            None,
+                            "Where they come from: a fade, a side, or growing from the middle.",
+                        ),
+                        h(
+                            H::AnimMenuSpeed,
+                            None,
+                            "How fast it plays: 1x is a fifth of a second.",
+                        ),
+                    ],
+                ),
             ],
         ),
     ];
@@ -926,6 +949,7 @@ impl H {
             H::AnimContainerSpeed => Some((g.anim_containers.speed - 0.25) / 3.75),
             H::AnimHotbarSpeed => Some((g.anim_hotbar.speed - 0.25) / 3.75),
             H::AnimButtonSpeed => Some((g.anim_buttons.speed - 0.25) / 3.75),
+            H::AnimMenuSpeed => Some((g.anim_menus.speed - 0.25) / 3.75),
             H::HdrUiBrightness => Some((g.hdr_ui_brightness as f32 - 25.0) / 75.0),
             _ => None,
         }
@@ -1025,6 +1049,9 @@ impl H {
             H::AnimHotbarSpeed => labelled("Speed", format!("{:.2}x", g.anim_hotbar.speed)),
             H::AnimButtonStyle => labelled("Easing", g.anim_buttons.style.name()),
             H::AnimButtonSpeed => labelled("Speed", format!("{:.2}x", g.anim_buttons.speed)),
+            H::AnimMenuStyle => labelled("Easing", g.anim_menus.style.name()),
+            H::AnimMenuMotion => labelled("Direction", g.anim_menus.motion.name()),
+            H::AnimMenuSpeed => labelled("Speed", format!("{:.2}x", g.anim_menus.speed)),
             H::Sky => labelled("Sky", on_off(g.sky)),
             H::Fog => labelled("Fog", on_off(g.fog)),
             H::Weather => labelled("Weather", on_off(g.weather)),
@@ -1126,6 +1153,9 @@ impl H {
             H::AnimButtonSpeed => {
                 g.anim_buttons.speed = ((0.25 + v.clamp(0.0, 1.0) * 3.75) * 20.0).round() / 20.0;
             }
+            H::AnimMenuSpeed => {
+                g.anim_menus.speed = ((0.25 + v.clamp(0.0, 1.0) * 3.75) * 20.0).round() / 20.0;
+            }
             H::ChunkUpdates => g.chunk_updates = (v * 64.0).round() as u32,
             H::EntityCullingPrecheck => g.entity_culling_precheck = (v * 512.0).round() as u32,
             H::UploadBudget => {
@@ -1218,6 +1248,14 @@ impl H {
             H::AnimButtonStyle => {
                 let a = &mut g.anim_buttons;
                 a.style = step(&crate::gui_anim::Style::ALL, a.style, back);
+            }
+            H::AnimMenuStyle => {
+                let a = &mut g.anim_menus;
+                a.style = step(&crate::gui_anim::Style::ALL, a.style, back);
+            }
+            H::AnimMenuMotion => {
+                let a = &mut g.anim_menus;
+                a.motion = step(&crate::gui_anim::Motion::ALL, a.motion, back);
             }
             H::Sky => g.sky = !g.sky,
             H::Fog => g.fog = !g.fog,
@@ -1673,6 +1711,10 @@ impl Default for GraphicsUi {
 }
 
 impl GraphicsUi {
+    /// The page the plate shows (Cottleta's Settings' menu animation follows it).
+    pub fn shown_page(&self) -> Page {
+        self.page
+    }
     /// How far the list is scrolled (the options screen's tests).
     #[cfg(test)]
     pub(crate) fn scroll_amount(&self) -> f32 {

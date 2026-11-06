@@ -778,6 +778,9 @@ pub struct Graphics {
     pub picture_loading: bool,
     pub picture_world: bool,
     pub picture_inventory: bool,
+    /// Cottleta's Settings: what containers and the pause menu put over the world behind them.
+    pub backdrop_containers: crate::gui_anim::Backdrop,
+    pub backdrop_pause: crate::gui_anim::Backdrop,
     /// Auto Settings' frame rate target, 0 until one is picked.
     pub auto_target_fps: u32,
     /// Auto Settings' FPS Target rows are dropped down: not saved.
@@ -867,6 +870,8 @@ impl Default for Graphics {
             picture_loading: false,
             picture_world: false,
             picture_inventory: false,
+            backdrop_containers: Default::default(),
+            backdrop_pause: Default::default(),
             blue_map: crate::bluemap::Settings::default(),
             cave_culling: true,
             gpu_culling: false,
@@ -1026,6 +1031,8 @@ impl Graphics {
                 "pictureLoading" => g.picture_loading = flag(g.picture_loading),
                 "pictureWorld" => g.picture_world = flag(g.picture_world),
                 "pictureInventory" => g.picture_inventory = flag(g.picture_inventory),
+                "backdropContainers" => g.backdrop_containers = crate::gui_anim::Backdrop::parse(value),
+                "backdropPause" => g.backdrop_pause = crate::gui_anim::Backdrop::parse(value),
                 "autoTargetFps" => g.auto_target_fps = number(g.auto_target_fps),
                 "sky" => g.sky = flag(g.sky),
                 "fog" => g.fog = flag(g.fog),
@@ -1159,6 +1166,11 @@ impl Graphics {
             bool_text(self.picture_loading),
             bool_text(self.picture_world),
             bool_text(self.picture_inventory)
+        );
+        text += &format!(
+            "backdropContainers:{}\nbackdropPause:{}\n",
+            self.backdrop_containers.to_text(),
+            self.backdrop_pause.to_text()
         );
         text += &self.blue_map.serialize();
         text
@@ -1317,6 +1329,8 @@ mod tests {
             picture_loading: false,
             picture_world: false,
             picture_inventory: false,
+            backdrop_containers: Default::default(),
+            backdrop_pause: Default::default(),
             blue_map: crate::bluemap::Settings {
                 radius: 40,
                 auto_detect: true,

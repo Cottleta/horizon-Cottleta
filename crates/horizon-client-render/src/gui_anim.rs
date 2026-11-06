@@ -237,6 +237,78 @@ impl Tween {
     }
 }
 
+/// What a screen puts between itself and the world behind it (Cottleta's Settings).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BackdropMode {
+    /// As the game does it.
+    #[default]
+    Vanilla,
+    /// Nothing: the world shows as it is.
+    Off,
+    /// Darkened, by `strength`.
+    Fade,
+    /// Blurred, by `strength`.
+    Blur,
+}
+
+impl BackdropMode {
+    pub const ALL: [BackdropMode; 4] = [
+        BackdropMode::Vanilla,
+        BackdropMode::Off,
+        BackdropMode::Fade,
+        BackdropMode::Blur,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            BackdropMode::Vanilla => "Vanilla",
+            BackdropMode::Off => "Off",
+            BackdropMode::Fade => "Fade",
+            BackdropMode::Blur => "Blur",
+        }
+    }
+}
+
+/// A screen's backdrop: its mode and how strong (0 to 1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Backdrop {
+    pub mode: BackdropMode,
+    pub strength: f32,
+}
+
+impl Default for Backdrop {
+    fn default() -> Self {
+        Self {
+            mode: BackdropMode::Vanilla,
+            strength: 0.6,
+        }
+    }
+}
+
+impl Backdrop {
+    pub fn to_text(self) -> String {
+        format!("{}:{}", self.mode.name().to_lowercase(), self.strength)
+    }
+    pub fn parse(text: &str) -> Self {
+        let (mode, strength) = text.split_once(':').unwrap_or((text, "0.6"));
+        Self {
+            mode: BackdropMode::ALL
+                .into_iter()
+                .find(|m| m.name().eq_ignore_ascii_case(mode))
+                .unwrap_or_default(),
+            strength: strength
+                .parse::<f32>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .unwrap_or(0.6)
+                .clamp(0.0, 1.0),
+        }
+    }
+    /// The blur radius for `Blur` (1 to 32 GUI pixels by strength).
+    pub fn blur_radius(self) -> f32 {
+        1.0 + self.strength * 31.0
+    }
+}
+
 thread_local! {
     /// The buttons' hover setting, set by the game each frame (`set_buttons`).
     static BUTTONS: std::cell::Cell<Setting> = std::cell::Cell::new(Setting {
@@ -328,6 +400,17 @@ mod tests {
         assert!((0.0..0.5).contains(&first), "{first}");
         assert!(buttons_moving());
         set_buttons(Setting::default());
+    }
+
+    #[test]
+    fn a_backdrop_saves_and_reads_back_and_defaults_to_vanilla() {
+        let b = Backdrop {
+            mode: BackdropMode::Blur,
+            strength: 0.25,
+        };
+        assert_eq!(Backdrop::parse(&b.to_text()), b);
+        assert_eq!(Backdrop::parse("junk").mode, BackdropMode::Vanilla);
+        assert_eq!(Backdrop::parse("fade:7").strength, 1.0);
     }
 
     #[test]

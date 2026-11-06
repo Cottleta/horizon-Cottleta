@@ -115,6 +115,10 @@ pub enum H {
     PictureWorld,
     PictureInventory,
     PicturesFolder,
+    BackdropContainers,
+    BackdropContainersStrength,
+    BackdropPause,
+    BackdropPauseStrength,
     Sky,
     Fog,
     Weather,
@@ -805,6 +809,31 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         ),
                     ],
                 ),
+                (
+                    "Backdrops",
+                    vec![
+                        h(
+                            H::BackdropContainers,
+                            None,
+                            "Behind the inventory and containers: as vanilla, nothing, darkened or blurred.",
+                        ),
+                        h(
+                            H::BackdropContainersStrength,
+                            None,
+                            "How dark or blurred it is behind them.",
+                        ),
+                        h(
+                            H::BackdropPause,
+                            None,
+                            "Behind the pause menu: as vanilla, nothing, darkened or blurred.",
+                        ),
+                        h(
+                            H::BackdropPauseStrength,
+                            None,
+                            "How dark or blurred it is behind the pause menu.",
+                        ),
+                    ],
+                ),
             ],
         ),
     ];
@@ -979,6 +1008,8 @@ impl H {
             H::AnimHotbarSpeed => Some((g.anim_hotbar.speed - 0.25) / 3.75),
             H::AnimButtonSpeed => Some((g.anim_buttons.speed - 0.25) / 3.75),
             H::AnimMenuSpeed => Some((g.anim_menus.speed - 0.25) / 3.75),
+            H::BackdropContainersStrength => Some(g.backdrop_containers.strength),
+            H::BackdropPauseStrength => Some(g.backdrop_pause.strength),
             H::HdrUiBrightness => Some((g.hdr_ui_brightness as f32 - 25.0) / 75.0),
             _ => None,
         }
@@ -1085,6 +1116,16 @@ impl H {
             H::PictureWorld => labelled("World Loading", on_off(g.picture_world)),
             H::PictureInventory => labelled("Inventory Background", on_off(g.picture_inventory)),
             H::PicturesFolder => Text::literal(lang::get("Open Pictures Folder")),
+            H::BackdropContainers => labelled("Containers", g.backdrop_containers.mode.name()),
+            H::BackdropContainersStrength => labelled(
+                "Strength",
+                format!("{}%", (g.backdrop_containers.strength * 100.0).round()),
+            ),
+            H::BackdropPause => labelled("Pause Menu", g.backdrop_pause.mode.name()),
+            H::BackdropPauseStrength => labelled(
+                "Strength",
+                format!("{}%", (g.backdrop_pause.strength * 100.0).round()),
+            ),
             H::Sky => labelled("Sky", on_off(g.sky)),
             H::Fog => labelled("Fog", on_off(g.fog)),
             H::Weather => labelled("Weather", on_off(g.weather)),
@@ -1189,6 +1230,12 @@ impl H {
             H::AnimMenuSpeed => {
                 g.anim_menus.speed = ((0.25 + v.clamp(0.0, 1.0) * 3.75) * 20.0).round() / 20.0;
             }
+            H::BackdropContainersStrength => {
+                g.backdrop_containers.strength = (v.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+            }
+            H::BackdropPauseStrength => {
+                g.backdrop_pause.strength = (v.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+            }
             H::ChunkUpdates => g.chunk_updates = (v * 64.0).round() as u32,
             H::EntityCullingPrecheck => g.entity_culling_precheck = (v * 512.0).round() as u32,
             H::UploadBudget => {
@@ -1269,6 +1316,14 @@ impl H {
             H::PictureLoading => g.picture_loading = !g.picture_loading,
             H::PictureWorld => g.picture_world = !g.picture_world,
             H::PictureInventory => g.picture_inventory = !g.picture_inventory,
+            H::BackdropContainers => {
+                let b = &mut g.backdrop_containers;
+                b.mode = step(&crate::gui_anim::BackdropMode::ALL, b.mode, back);
+            }
+            H::BackdropPause => {
+                let b = &mut g.backdrop_pause;
+                b.mode = step(&crate::gui_anim::BackdropMode::ALL, b.mode, back);
+            }
             H::AnimContainerStyle => {
                 let a = &mut g.anim_containers;
                 a.style = step(&crate::gui_anim::Style::ALL, a.style, back);

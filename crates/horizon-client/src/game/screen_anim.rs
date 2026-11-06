@@ -196,6 +196,50 @@ fn pose(vertices: &mut [HudVertex], setting: Setting, p: f32, size: [f32; 2]) {
 }
 
 impl Game<'_> {
+    /// The backdrop Cottleta's Settings give the open screen: the containers' or the pause
+    /// menu's; None for any other screen.
+    pub(super) fn screen_backdrop(&self) -> Option<horizon_client::gui_anim::Backdrop> {
+        let g = &self.settings.horizon;
+        match self.screen {
+            Screen::Inventory | Screen::Creative => Some(g.backdrop_containers),
+            Screen::Paused => Some(g.backdrop_pause),
+            _ => None,
+        }
+    }
+    /// Before `screen` draws: the pause menu's own darkening when it is set to fade (vanilla's
+    /// has none of its own).
+    pub(super) fn backdrop_before(&self, batch: &mut HudBatch, screen: Screen) {
+        use horizon_client::gui_anim::BackdropMode;
+        let b = self.settings.horizon.backdrop_pause;
+        if screen == Screen::Paused && b.mode == BackdropMode::Fade {
+            let alpha = (b.strength * 255.0).round() as u8;
+            let (w, h) = (batch.width, batch.height);
+            batch.fill(&self.gui.atlas, 0.0, 0.0, w, h, horizon_client::hud::rgba(0, 0, 0, alpha));
+        }
+    }
+    /// After `screen` drew from `start`: the containers' darkened backdrop as their setting
+    /// says (gone when off or blurred, by its strength when faded).
+    pub(super) fn backdrop_after(&self, batch: &mut HudBatch, start: usize, screen: Screen) {
+        use horizon_client::gui_anim::BackdropMode;
+        if !matches!(screen, Screen::Inventory | Screen::Creative) {
+            return;
+        }
+        let b = self.settings.horizon.backdrop_containers;
+        let alpha = match b.mode {
+            BackdropMode::Vanilla => return,
+            BackdropMode::Off | BackdropMode::Blur => 0,
+            BackdropMode::Fade => (b.strength * 255.0).round() as u32,
+        };
+        let size = [batch.width, batch.height];
+        let start = start.min(batch.vertices.len());
+        for quad in batch.vertices[start..].chunks_mut(6) {
+            if quad.len() == 6 && covers(quad, size) {
+                for v in quad {
+                    v.color = (v.color & 0x00FF_FFFF) | alpha.min(255) << 24;
+                }
+            }
+        }
+    }
     /// Loads the pictures the settings ask for when that changes (or `again`), on a thread,
     /// and hands the renderer those that arrived.
     pub(super) fn poll_pictures(&mut self, again: bool) {

@@ -9212,6 +9212,7 @@ impl Game<'_> {
             self.screen
         };
         let anim_at = self.screen_anim_begin(&mut batch, screen);
+        self.backdrop_before(&mut batch, screen);
         match screen {
             Screen::Paused if self.pause_menu => self.draw_pause_menu(&mut batch),
             // PauseScreen(false): only its title, at the top.
@@ -9256,6 +9257,7 @@ impl Game<'_> {
             Screen::Chat => self.draw_chat_screen(&mut batch),
             Screen::Playing | Screen::Options | Screen::Win => {}
         }
+        self.backdrop_after(&mut batch, anim_at.0, screen);
         self.screen_anim_end(&mut batch, anim_at);
         // ScreenEvent.Render.Post: the open screen has drawn itself and its
         // tooltips, so a native mod draws over it here. Never `Playing`: the
@@ -17119,6 +17121,15 @@ impl Game<'_> {
                     || (self.screen == Screen::Win && self.win_screen_pauses())));
         let radius = self.settings.menu_blur as f32;
         let mut radius = (blurred && radius >= 1.0).then_some(radius);
+        // Cottleta's Settings may set the containers' and the pause menu's backdrop.
+        if let Some(backdrop) = self.screen_backdrop() {
+            use horizon_client::gui_anim::BackdropMode;
+            match backdrop.mode {
+                BackdropMode::Vanilla => {}
+                BackdropMode::Off | BackdropMode::Fade => radius = None,
+                BackdropMode::Blur => radius = Some(backdrop.blur_radius()),
+            }
+        }
         self.native_menu_background(&mut radius);
         radius.filter(|r| r.is_finite() && (1.0..=64.0).contains(r))
     }

@@ -1776,6 +1776,9 @@ pub struct ArmorStand {
     pub no_base_plate: bool,
     pub invisible: bool,
     pub marker: bool,
+    /// Its `minecraft:scale` attribute (`LivingEntity.getScale`), which sizes its box as any
+    /// living entity's: servers build balls, NPC parts and holograms from scaled stands.
+    pub scale: f32,
     /// `Entity.isNoGravity` (`NoGravity` in the save). `ArmorStand.hasPhysics`
     /// is false with it, as with `Marker`: `travel` does nothing, so the stand
     /// never moves, and the blocks it stands in do not touch it.
@@ -2051,6 +2054,7 @@ impl ArmorStand {
             no_base_plate: false,
             invisible: false,
             marker: false,
+            scale: 1.0,
             no_gravity: false,
             custom_name: None,
             name_visible: false,
@@ -2149,9 +2153,10 @@ impl ArmorStand {
         }
         self.health > 0.5
     }
-    /// EntityType.ARMOR_STAND dimensions (0.5 x 1.975, half for small).
+    /// EntityType.ARMOR_STAND dimensions (0.5 x 1.975, half for small), times its scale
+    /// (`LivingEntity.getDimensions`: `getDefaultDimensions(pose).scale(getScale())`).
     pub fn bounds(&self) -> Aabb {
-        let s = if self.small { 0.5 } else { 1.0 };
+        let s = if self.small { 0.5 } else { 1.0 } * f64::from(self.scale);
         let (w, h) = (0.25 * s, 1.975 * s);
         let p = self.position;
         Aabb::new(

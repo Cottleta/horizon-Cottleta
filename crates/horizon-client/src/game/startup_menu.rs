@@ -527,6 +527,11 @@ impl Loading {
                     self.save_menu_settings();
                     self.apply_menu_settings();
                 }
+                Event::OpenPictures => {
+                    let dir = super::screen_anim::pictures_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    super::packs::open_folder(&dir);
+                }
                 // Starts once the game has loaded.
                 Event::AutoTest => {
                     self.menu.options_open = false;

@@ -111,6 +111,10 @@ pub enum H {
     AnimMenuStyle,
     AnimMenuMotion,
     AnimMenuSpeed,
+    PictureLoading,
+    PictureWorld,
+    PictureInventory,
+    PicturesFolder,
     Sky,
     Fog,
     Weather,
@@ -776,6 +780,31 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         ),
                     ],
                 ),
+                (
+                    "Your pictures",
+                    vec![
+                        h(
+                            H::PictureLoading,
+                            None,
+                            "pictures/loading.png behind the game's loading screen.",
+                        ),
+                        h(
+                            H::PictureWorld,
+                            None,
+                            "pictures/world_loading.png while a world loads.",
+                        ),
+                        h(
+                            H::PictureInventory,
+                            None,
+                            "pictures/inventory.png behind the inventory and containers.",
+                        ),
+                        h(
+                            H::PicturesFolder,
+                            None,
+                            "Opens the pictures folder. PNG, JPEG or WebP, up to 4096 wide.",
+                        ),
+                    ],
+                ),
             ],
         ),
     ];
@@ -1052,6 +1081,10 @@ impl H {
             H::AnimMenuStyle => labelled("Easing", g.anim_menus.style.name()),
             H::AnimMenuMotion => labelled("Direction", g.anim_menus.motion.name()),
             H::AnimMenuSpeed => labelled("Speed", format!("{:.2}x", g.anim_menus.speed)),
+            H::PictureLoading => labelled("Loading Screen", on_off(g.picture_loading)),
+            H::PictureWorld => labelled("World Loading", on_off(g.picture_world)),
+            H::PictureInventory => labelled("Inventory Background", on_off(g.picture_inventory)),
+            H::PicturesFolder => Text::literal(lang::get("Open Pictures Folder")),
             H::Sky => labelled("Sky", on_off(g.sky)),
             H::Fog => labelled("Fog", on_off(g.fog)),
             H::Weather => labelled("Weather", on_off(g.weather)),
@@ -1233,6 +1266,9 @@ impl H {
                 g.cache_copper_golem_statues = !g.cache_copper_golem_statues
             }
             H::DynamicHud => g.dynamic_hud = !g.dynamic_hud,
+            H::PictureLoading => g.picture_loading = !g.picture_loading,
+            H::PictureWorld => g.picture_world = !g.picture_world,
+            H::PictureInventory => g.picture_inventory = !g.picture_inventory,
             H::AnimContainerStyle => {
                 let a = &mut g.anim_containers;
                 a.style = step(&crate::gui_anim::Style::ALL, a.style, back);
@@ -1400,6 +1436,9 @@ impl Item {
         Some(match self {
             Item::Horizon(H::BlueMapAutoDetect) => g.blue_map.auto_detect,
             Item::Horizon(H::CaveCulling) => g.cave_culling,
+            Item::Horizon(H::PictureLoading) => g.picture_loading,
+            Item::Horizon(H::PictureWorld) => g.picture_world,
+            Item::Horizon(H::PictureInventory) => g.picture_inventory,
             Item::Horizon(H::GpuCulling) => {
                 g.gpu_culling && crate::graphics::gpu_culling_offer().reason().is_none()
             }
@@ -1555,6 +1594,8 @@ pub enum Action {
     BindKey(&'static str),
     /// Start HDR calibration.
     Calibrate,
+    /// Open the player's pictures folder (Cottleta's Settings).
+    OpenPictures,
     /// Measure this PC, from the title screen.
     AutoTest,
     /// Open the shader pack list.
@@ -2200,6 +2241,7 @@ impl GraphicsUi {
                 vec![Action::ButtonClick, Action::Changed]
             }
             Item::Horizon(H::AutoTest) => vec![Action::ButtonClick, Action::AutoTest],
+            Item::Horizon(H::PicturesFolder) => vec![Action::ButtonClick, Action::OpenPictures],
             Item::Horizon(H::AutoSave) => {
                 crate::auto_settings::save(s);
                 vec![Action::ButtonClick]

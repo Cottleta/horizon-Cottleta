@@ -1486,6 +1486,8 @@ fn matches_focus(id: &FocusId, i: usize, wd: &Widget) -> bool {
 pub enum Event {
     /// Measure this PC (`auto_test`).
     AutoTest,
+    /// Open the player's pictures folder, and load them again (Cottleta's Settings).
+    OpenPictures,
     /// An accepted button press or the release of a slider.
     ButtonClick,
     /// Horizon's own: download the Modrinth hit at this index of the pack
@@ -2407,6 +2409,7 @@ impl OptionsUi {
                     self.push(Page::HdrCalibration);
                 }
                 Action::AutoTest => events.push(Event::AutoTest),
+                Action::OpenPictures => events.push(Event::OpenPictures),
                 // The Shaders page's Shader Packs...: the list of either kind, as the page
                 // opens it from anywhere.
                 Action::ShaderPacks => {

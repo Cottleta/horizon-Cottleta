@@ -773,6 +773,11 @@ pub struct Graphics {
     pub anim_buttons: crate::gui_anim::Setting,
     /// Cottleta's Settings: menu pages easing in as they open.
     pub anim_menus: crate::gui_anim::Setting,
+    /// Cottleta's Settings: the player's own pictures (`pictures/` in the game folder) as the
+    /// game's loading screen, the world's loading screen and the inventory's background.
+    pub picture_loading: bool,
+    pub picture_world: bool,
+    pub picture_inventory: bool,
     /// Auto Settings' frame rate target, 0 until one is picked.
     pub auto_target_fps: u32,
     /// Auto Settings' FPS Target rows are dropped down: not saved.
@@ -859,6 +864,9 @@ impl Default for Graphics {
             anim_hotbar: Default::default(),
             anim_buttons: Default::default(),
             anim_menus: Default::default(),
+            picture_loading: false,
+            picture_world: false,
+            picture_inventory: false,
             blue_map: crate::bluemap::Settings::default(),
             cave_culling: true,
             gpu_culling: false,
@@ -1015,6 +1023,9 @@ impl Graphics {
                 "animHotbar" => g.anim_hotbar = crate::gui_anim::Setting::parse(value),
                 "animButtons" => g.anim_buttons = crate::gui_anim::Setting::parse(value),
                 "animMenus" => g.anim_menus = crate::gui_anim::Setting::parse(value),
+                "pictureLoading" => g.picture_loading = flag(g.picture_loading),
+                "pictureWorld" => g.picture_world = flag(g.picture_world),
+                "pictureInventory" => g.picture_inventory = flag(g.picture_inventory),
                 "autoTargetFps" => g.auto_target_fps = number(g.auto_target_fps),
                 "sky" => g.sky = flag(g.sky),
                 "fog" => g.fog = flag(g.fog),
@@ -1143,6 +1154,12 @@ impl Graphics {
         text += &format!("animHotbar:{}\n", self.anim_hotbar.to_text());
         text += &format!("animButtons:{}\n", self.anim_buttons.to_text());
         text += &format!("animMenus:{}\n", self.anim_menus.to_text());
+        text += &format!(
+            "pictureLoading:{}\npictureWorld:{}\npictureInventory:{}\n",
+            bool_text(self.picture_loading),
+            bool_text(self.picture_world),
+            bool_text(self.picture_inventory)
+        );
         text += &self.blue_map.serialize();
         text
     }
@@ -1297,6 +1314,9 @@ mod tests {
             anim_hotbar: Default::default(),
             anim_buttons: Default::default(),
             anim_menus: Default::default(),
+            picture_loading: false,
+            picture_world: false,
+            picture_inventory: false,
             blue_map: crate::bluemap::Settings {
                 radius: 40,
                 auto_detect: true,

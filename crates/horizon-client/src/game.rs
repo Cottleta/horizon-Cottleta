@@ -2653,6 +2653,8 @@ struct Game<'a> {
     screen_anim: screen_anim::ScreenAnim,
     /// Menu pages easing in (Cottleta's Settings).
     menu_anim: screen_anim::MenuAnim,
+    /// The player's pictures loading (Cottleta's Settings).
+    pictures: screen_anim::Pictures,
     /// The hotbar selection's place, in slots, as it glides (Cottleta's Settings).
     hotbar_slide: horizon_client::gui_anim::Tween,
     hud_built: Instant,
@@ -16263,6 +16265,8 @@ impl Game<'_> {
         });
     }
     fn render(&mut self) -> Result<bool> {
+        // The player's pictures (Cottleta's Settings) arrive from their thread.
+        self.poll_pictures(false);
         // The window's GPU holds the atlas: its copy in memory is kept
         // compressed (a no-op once it is).
         if self.renderer.is_some() {
@@ -16301,7 +16305,23 @@ impl Game<'_> {
                         upgrade,
                         self.cursor,
                     );
-                    return renderer.render(&loading_frame(&hud));
+                    let picture = screen_anim::loading_picture(
+
+                        self.settings.horizon.picture_world,
+
+                        "world",
+
+                        renderer,
+
+                        &mut hud,
+
+                    );
+
+                    let mut frame = loading_frame(&hud);
+
+                    frame.picture = picture;
+
+                    return renderer.render(&frame);
                 }
                 return Ok(false);
             }
@@ -16340,7 +16360,23 @@ impl Game<'_> {
                     Some(&status),
                     progress,
                 );
-                return renderer.render(&loading_frame(&hud));
+                let picture = screen_anim::loading_picture(
+
+                    self.settings.horizon.picture_world,
+
+                    "world",
+
+                    renderer,
+
+                    &mut hud,
+
+                );
+
+                let mut frame = loading_frame(&hud);
+
+                frame.picture = picture;
+
+                return renderer.render(&frame);
             }
             return Ok(false);
         }
@@ -16356,7 +16392,23 @@ impl Game<'_> {
                     loader.progress.line(),
                     loader.progress.fraction(),
                 );
-                return renderer.render(&loading_frame(&hud));
+                let picture = screen_anim::loading_picture(
+
+                    self.settings.horizon.picture_loading,
+
+                    "loading",
+
+                    renderer,
+
+                    &mut hud,
+
+                );
+
+                let mut frame = loading_frame(&hud);
+
+                frame.picture = picture;
+
+                return renderer.render(&frame);
             }
             return Ok(false);
         }
@@ -16372,7 +16424,23 @@ impl Game<'_> {
                     reload.progress.fraction(),
                     self.settings.file.bool("darkMojangStudiosBackground"),
                 );
-                return renderer.render(&loading_frame(&hud));
+                let picture = screen_anim::loading_picture(
+
+                    self.settings.horizon.picture_loading,
+
+                    "loading",
+
+                    renderer,
+
+                    &mut hud,
+
+                );
+
+                let mut frame = loading_frame(&hud);
+
+                frame.picture = picture;
+
+                return renderer.render(&frame);
             }
             return Ok(false);
         }
@@ -16663,6 +16731,7 @@ impl Game<'_> {
         self.flush_ime(&mut hud);
         self.native_gui_render_post(&mut hud, self.ui.hide_gui, self.focused);
         self.resolve_inline_profiles(&hud.inline_profiles);
+        let picture = self.frame_picture(&mut hud);
         self.locator_camera =
             (!title).then_some((camera.to_array(), view_yaw, view_pitch, fov_degrees));
         let requested_post_effects = self.requested_post_effects();
@@ -16918,6 +16987,7 @@ impl Game<'_> {
                 .boss_overlay
                 .darken_amount(self.clock.fraction() as f32),
             menu_blur: self.menu_blur(),
+            picture,
             post_effects: horizon_client::post_chain::Request {
                 effects: &requested_post_effects,
                 root: &self.options.resources,
@@ -20025,6 +20095,7 @@ impl<'a> Game<'a> {
             hud_kept: None,
             screen_anim: Default::default(),
             menu_anim: Default::default(),
+            pictures: Default::default(),
             hotbar_slide: horizon_client::gui_anim::Tween::at(0.0),
             hud_built: now,
             hud_touched: now,
@@ -21993,6 +22064,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         chunk_fade: 0.0,
         post_effects: horizon_client::post_chain::Request::none(),
         menu_blur: None,
+        picture: None,
     }
 }
 

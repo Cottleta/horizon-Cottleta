@@ -3,7 +3,38 @@
 use super::{Game, Screen};
 use horizon_client::gui_anim::{Setting, Tween};
 use horizon_client::hud::{Blend, HudBatch, HudVertex};
+use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::Instant;
+
+/// The player's pictures: the renderer's name for each, and its file's name in `pictures/`.
+const PICTURES: [(&str, &str); 3] = [
+    ("loading", "loading"),
+    ("world", "world_loading"),
+    ("inventory", "inventory"),
+];
+
+/// Where the player puts their pictures: `pictures/` in the game folder.
+pub(super) fn pictures_dir() -> PathBuf {
+    horizon_client::logging::game_home().join("pictures")
+}
+
+/// The picture file named `stem` in `dir`, in any format the game reads.
+fn picture_file(dir: &std::path::Path, stem: &str) -> Option<PathBuf> {
+    ["png", "jpg", "jpeg", "webp"]
+        .into_iter()
+        .map(|ext| dir.join(format!("{stem}.{ext}")))
+        .find(|p| p.is_file())
+}
+
+/// Loading the player's pictures off the frame's thread.
+#[derive(Default)]
+pub(super) struct Pictures {
+    /// Which the settings wanted when they were last loaded.
+    wanted: Option<[bool; 3]>,
+    /// Decoded pictures (name, size, pixels), or the name of one to drop.
+    arriving: Option<mpsc::Receiver<(&'static str, Option<([u32; 2], Vec<u8>)>)>>,
+}
 
 /// The animated screen's state between frames.
 pub(super) struct ScreenAnim {
@@ -53,6 +84,42 @@ impl ScreenAnim {
     pub(super) fn moving(&self, now: Instant) -> bool {
         self.tween.moving(now)
     }
+    /// How far open it is (0 to 1).
+    pub(super) fn progress(&self, now: Instant) -> f32 {
+        self.tween.value(now).clamp(0.0, 1.0)
+    }
+}
+
+/// A loading frame's picture (`loading` or `world`), with the screen's own background taken
+/// out of `hud`; None while the setting is off or the picture isn't loaded.
+pub(super) fn loading_picture(
+    on: bool,
+    name: &str,
+    renderer: &horizon_client::gfx::Renderer,
+    hud: &mut HudBatch,
+) -> Option<horizon_client::screen_picture::Draw> {
+    if !on || !renderer.has_picture(name) {
+        return None;
+    }
+    clear_backdrops(hud, 0);
+    Some(horizon_client::screen_picture::Draw {
+        name: name.to_owned(),
+        alpha: 1.0,
+    })
+}
+
+/// The quads from `from` that cover the whole screen (a screen's darkened or filled
+/// background) made clear: the player's picture shows there instead.
+fn clear_backdrops(hud: &mut HudBatch, from: usize) {
+    let size = [hud.width, hud.height];
+    let from = from.min(hud.vertices.len());
+    for quad in hud.vertices[from..].chunks_mut(6) {
+        if quad.len() == 6 && covers(quad, size) {
+            for v in quad {
+                v.color &= 0x00FF_FFFF;
+            }
+        }
+    }
 }
 
 /// Whether the vertices of `quad` cover the whole `size`: the screen's darkened background,
@@ -91,6 +158,77 @@ fn pose(vertices: &mut [HudVertex], setting: Setting, p: f32, size: [f32; 2]) {
 }
 
 impl Game<'_> {
+    /// Loads the pictures the settings ask for when that changes (or `again`), on a thread,
+    /// and hands the renderer those that arrived.
+    pub(super) fn poll_pictures(&mut self, again: bool) {
+        let g = &self.settings.horizon;
+        let wanted = [g.picture_loading, g.picture_world, g.picture_inventory];
+        if again || self.pictures.wanted != Some(wanted) {
+            self.pictures.wanted = Some(wanted);
+            let (tx, rx) = mpsc::channel();
+            self.pictures.arriving = Some(rx);
+            let jobs: Vec<_> = PICTURES.iter().zip(wanted).map(|(&(n, f), on)| (n, f, on)).collect();
+            std::thread::Builder::new()
+                .name("Pictures".into())
+                .spawn(move || {
+                    let dir = pictures_dir();
+                    for (name, file, on) in jobs {
+                        let image = on
+                            .then(|| picture_file(&dir, file))
+                            .flatten()
+                            .and_then(|path| std::fs::read(&path).ok())
+                            .and_then(|bytes| horizon_client::hud::decode_image_bytes(&bytes).ok())
+                            .map(|(w, h, rgba)| ([w, h], rgba));
+                        if tx.send((name, image)).is_err() {
+                            return;
+                        }
+                    }
+                })
+                .ok();
+        }
+        let Some(rx) = &self.pictures.arriving else {
+            return;
+        };
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        while let Ok((name, image)) = rx.try_recv() {
+            match image {
+                Some((size, rgba)) => renderer.upload_picture(name, size, &rgba),
+                None => renderer.remove_picture(name),
+            }
+        }
+    }
+    /// The picture under this frame's open screen, with the screen's own darkened background
+    /// taken out of `hud`: the inventory's while it (or its closing) shows, the world's while
+    /// one loads.
+    pub(super) fn frame_picture(&self, hud: &mut HudBatch) -> Option<horizon_client::screen_picture::Draw> {
+        let renderer = self.renderer.as_ref()?;
+        let g = &self.settings.horizon;
+        let now = Instant::now();
+        let inventory = matches!(self.screen, Screen::Inventory | Screen::Creative);
+        let closing = !inventory && g.anim_containers.on() && self.screen_anim.moving(now);
+        let (name, from, alpha) = if g.picture_world && self.remote.as_ref().is_some_and(|r| r.level_load.is_active()) {
+            ("world", 0, 1.0)
+        } else if g.picture_inventory && (inventory || closing) {
+            let alpha = if g.anim_containers.on() {
+                self.screen_anim.progress(now)
+            } else {
+                1.0
+            };
+            ("inventory", hud.blur_at as usize, alpha)
+        } else {
+            return None;
+        };
+        if !renderer.has_picture(name) {
+            return None;
+        }
+        clear_backdrops(hud, from);
+        Some(horizon_client::screen_picture::Draw {
+            name: name.to_owned(),
+            alpha,
+        })
+    }
     /// Which menu page is open: the screen, the options page and the title screen's mode.
     fn menu_key(&self) -> u64 {
         use std::hash::{Hash, Hasher};

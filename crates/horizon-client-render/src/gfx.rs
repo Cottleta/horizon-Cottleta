@@ -1009,6 +1009,9 @@ pub struct Frame<'a> {
     /// `Screen.extractBlurredBackground`: blur the frame by this radius
     /// (`menuBackgroundBlurriness`) before the screen is drawn over it.
     pub menu_blur: Option<f32>,
+    /// Cottleta's Settings: a picture of the player's over the window, under the open
+    /// screen (`HudBatch::blur_at`).
+    pub picture: Option<crate::screen_picture::Draw>,
     /// `Options.chunkSectionFadeInTime`, in seconds: how long a section takes to fade in once
     /// uploaded (0 draws it whole at once).
     pub chunk_fade: f32,
@@ -1441,6 +1444,8 @@ pub struct Renderer {
     pub hud: HudRenderer,
     /// Vanilla's menu background blur, made on first use.
     menu_blur: Option<crate::menu_blur::MenuBlur>,
+    /// The player's own pictures (Cottleta's Settings), made on first upload.
+    pictures: Option<crate::screen_picture::ScreenPictures>,
     /// `post_effect` chains, made on first use.
     post_effects: Option<crate::post_chain::PostEffects>,
     /// Where a screenshot's frame is drawn when the swapchain cannot be read back.
@@ -4828,6 +4833,7 @@ impl Renderer {
             pack_lava_layers: Vec::new(),
             hud,
             menu_blur: None,
+            pictures: None,
             post_effects: None,
             readback: readback::Readback::default(),
             info,
@@ -5048,6 +5054,23 @@ impl Renderer {
     /// VSync on presents with Fifo, capped to the display's refresh rate in a
     /// window and in fullscreen alike; Horizon's present-mode setting applies
     /// only with VSync off (`window::chosen_present_mode`).
+    /// Keeps `rgba` (`size`) as the player's picture `name` (Cottleta's Settings).
+    pub fn upload_picture(&mut self, name: &str, size: [u32; 2], rgba: &[u8]) {
+        let (device, format) = (&self.device, self.frame_format);
+        self.pictures
+            .get_or_insert_with(|| crate::screen_picture::ScreenPictures::new(device, format))
+            .upload(&self.device, &self.queue, name, size, rgba);
+    }
+    /// Forgets the player's picture `name`.
+    pub fn remove_picture(&mut self, name: &str) {
+        if let Some(p) = &mut self.pictures {
+            p.remove(name);
+        }
+    }
+    /// Whether the player's picture `name` is uploaded.
+    pub fn has_picture(&self, name: &str) -> bool {
+        self.pictures.as_ref().is_some_and(|p| p.has(name))
+    }
     pub fn set_present_mode(&mut self, vsync: bool, mode: crate::graphics::PresentMode) {
         use crate::graphics::PresentMode as P;
         use crate::window::{PresentMode, chosen_present_mode};
@@ -11332,13 +11355,41 @@ impl Renderer {
         } else if let Some(blur) = &mut self.menu_blur {
             blur.release();
         }
+        // The player's picture under the screen: after the HUD drawn so far, or over the whole
+        // frame's start when there is no blur (the screen's vertices then still follow it).
+        let picture_at = frame.hud.blur_at.min(frame.hud.vertices.len() as u32);
+        if let (Some(draw), Some(pictures)) = (&frame.picture, self.pictures.as_mut()) {
+            if menu_blur.is_none() && picture_at > 0 {
+                self.hud.draw_range(
+                    encoder,
+                    view_target,
+                    &self.depth,
+                    frame.hud,
+                    [self.config.width, self.config.height],
+                    0..picture_at,
+                    timing.as_mut(),
+                );
+            }
+            pictures.draw(
+                &self.queue,
+                encoder,
+                view_target,
+                [self.config.width, self.config.height],
+                draw,
+            );
+        }
+        let rest_at = if frame.picture.is_some() && self.pictures.is_some() && menu_blur.is_none() {
+            picture_at
+        } else {
+            blur_at
+        };
         self.hud.draw_range(
             encoder,
             view_target,
             &self.depth,
             frame.hud,
             [self.config.width, self.config.height],
-            blur_at..frame.hud.vertices.len() as u32,
+            rest_at..frame.hud.vertices.len() as u32,
             timing.as_mut(),
         );
         if overlay.real {

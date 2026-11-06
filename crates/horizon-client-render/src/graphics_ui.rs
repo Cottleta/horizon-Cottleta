@@ -2481,6 +2481,14 @@ mod tests {
         assert_eq!(settings(&mut ui, &s), on(Page::Hdr));
     }
 
+    /// Where the HDR page sits in the page list (Auto Settings comes after it).
+    const HDR_TAB: usize = 5;
+
+    #[test]
+    fn hdr_tab_is_the_hdr_page() {
+        assert_eq!(Page::ALL[HDR_TAB], Page::Hdr);
+    }
+
     #[test]
     fn a_720p_window_keeps_the_page_list_the_buttons_and_five_rows() {
         // 1280x720 at GUI scale 3.
@@ -2489,7 +2497,7 @@ mod tests {
         let mut ui = GraphicsUi::default();
         let cols = Columns::of(size.0, size.1);
         assert!((cols.bottom - cols.top) / style::ROW >= 5.0);
-        let [x, y, w, h] = cols.page(Page::ALL.len() - 1);
+        let [x, y, w, h] = cols.page(HDR_TAB);
         assert!(y >= 0.0 && x + w <= size.0);
         // Undo, over Done, stays clear of the page list.
         assert!(cols.button(1)[1] >= y + h);
@@ -2547,7 +2555,7 @@ mod tests {
                 .is_some_and(|r| r.item == Item::Vanilla(Opt::Vsync))
         }));
         ui.search.set_value("hdr");
-        let [x, y, w, h] = cols.page(Page::ALL.len() - 1);
+        let [x, y, w, h] = cols.page(HDR_TAB);
         press(&mut ui, &mut s, (x + w / 2.0, y + h / 2.0));
         assert_eq!(ui.current(&ui.lines(&s).0), Some(Page::Hdr));
         let [x, y, ..] = cols.clear();

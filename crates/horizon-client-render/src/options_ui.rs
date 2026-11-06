@@ -8285,7 +8285,8 @@ mod tests {
     #[test]
     fn the_graphics_screens_wheel_never_steps_the_value_under_it() {
         let mut s = Settings::default();
-        assert!(s.extras.wheel_cycles_settings);
+        // Even with the extra that lets the wheel change settings on (off by default).
+        s.extras.wheel_cycles_settings = true;
         let mut ui = OptionsUi::default();
         ui.show(Page::GraphicsAdvanced);
         for y in (20..350).step_by(5) {

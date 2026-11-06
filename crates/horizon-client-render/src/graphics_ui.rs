@@ -44,7 +44,7 @@ impl Page {
     ];
     pub fn name(self) -> &'static str {
         match self {
-            Page::Auto => "Auto Settings",
+            Page::Auto => "Cottleta's Settings",
             Page::General => "General",
             Page::Quality => "Quality",
             Page::Performance => "Performance",
@@ -56,7 +56,7 @@ impl Page {
     /// What the page holds, in the strip while no setting is pointed at.
     pub fn about(self) -> &'static str {
         match self {
-            Page::Auto => "Settings picked for this PC, and your saved ones.",
+            Page::Auto => "This build's own settings: picked for this PC, saved ones and extras.",
             Page::General => "How far you see, the window and the HUD.",
             Page::Quality => "The sky and weather, lighting, textures and the image.",
             Page::Performance => "Chunk loading, culling and power use.",
@@ -217,11 +217,6 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                             "Coarse distant terrain in local worlds. Integrated GPUs stop at 128 chunks.",
                         ),
                         h(H::FarDetail, Medium, far),
-                        h(
-                            H::FarShape,
-                            None,
-                            "Slopes join far terrain's cells: no stair steps, softer hills.",
-                        ),
                         h(
                             H::BlueMapAutoDetect,
                             None,
@@ -578,11 +573,6 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                             None,
                             "Frame rate and frame times over the game, with a graph.",
                         ),
-                        h(
-                            H::DynamicHud,
-                            High,
-                            "HUD at 20 FPS until you press a key or click.",
-                        ),
                     ],
                 ),
             ],
@@ -688,6 +678,21 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         ),
                         h(H::AutoSave, None, "Keeps the settings as they are now."),
                         h(H::AutoLoad, None, "Goes back to the settings you saved."),
+                    ],
+                ),
+                (
+                    "Extras",
+                    vec![
+                        h(
+                            H::DynamicHud,
+                            High,
+                            "HUD at 20 FPS until you press a key or click.",
+                        ),
+                        h(
+                            H::FarShape,
+                            None,
+                            "Slopes join far terrain's cells: no stair steps, softer hills.",
+                        ),
                     ],
                 ),
             ],
@@ -931,7 +936,7 @@ impl H {
                 }
                 k => labelled("Upload Budget", lang::tr("%s KiB/frame", &[&k])),
             },
-            H::AutoSettings => Text::literal(lang::get("Auto Settings...")),
+            H::AutoSettings => Text::literal(lang::get("Cottleta's Settings...")),
             H::AutoPerformance => Text::literal(lang::get("Best Performance")),
             H::AutoTarget => Text::literal(lang::get("FPS Target...")),
             H::AutoFps => labelled("Target", format!("{} FPS", crate::auto_settings::target(s))),

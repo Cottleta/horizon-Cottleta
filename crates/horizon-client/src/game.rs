@@ -128,6 +128,7 @@ mod entity;
 mod entity_culling;
 mod entity_log;
 mod entity_sounds;
+mod screen_anim;
 mod event_loop;
 mod events;
 mod execution_role;
@@ -2648,6 +2649,8 @@ struct Game<'a> {
     frame_end: Instant,
     /// The HUD the next frames may draw again (`hud_rate`), with the size it is for.
     hud_kept: Option<([u32; 2], HudBatch)>,
+    /// The inventory and containers' opening and closing (Cottleta's Settings).
+    screen_anim: screen_anim::ScreenAnim,
     hud_built: Instant,
     hud_touched: Instant,
     hud_view: (f32, f32),
@@ -9196,6 +9199,7 @@ impl Game<'_> {
         } else {
             self.screen
         };
+        let anim_at = self.screen_anim_begin(&mut batch, screen);
         match screen {
             Screen::Paused if self.pause_menu => self.draw_pause_menu(&mut batch),
             // PauseScreen(false): only its title, at the top.
@@ -9240,6 +9244,7 @@ impl Game<'_> {
             Screen::Chat => self.draw_chat_screen(&mut batch),
             Screen::Playing | Screen::Options | Screen::Win => {}
         }
+        self.screen_anim_end(&mut batch, anim_at);
         // ScreenEvent.Render.Post: the open screen has drawn itself and its
         // tooltips, so a native mod draws over it here. Never `Playing`: the
         // prompts, books and sign editors drawn over gameplay keep it, draw
@@ -20008,6 +20013,7 @@ impl<'a> Game<'a> {
             previous: now,
             frame_end: now,
             hud_kept: None,
+            screen_anim: Default::default(),
             hud_built: now,
             hud_touched: now,
             hud_view: (0.0, 0.0),

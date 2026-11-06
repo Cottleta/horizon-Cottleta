@@ -3,78 +3,147 @@
 //! animation off draws its end state at once, exactly as the game does without this.
 use std::time::{Duration, Instant};
 
-/// How an animation moves.
+/// How an animation's progress is eased (the usual smoothing choices).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Style {
     /// No animation: the end state at once.
     #[default]
     Off,
-    /// A short, plain ease out.
-    Subtle,
-    /// A longer, softer ease in and out.
-    Smooth,
-    /// Past the end a little, then back.
-    Bouncy,
+    /// The same pace throughout.
+    Linear,
+    /// Slow at first, then fast.
+    EaseIn,
+    /// Fast at first, then slowing to a stop.
+    EaseOut,
+    /// Slow at both ends.
+    EaseInOut,
 }
 
 impl Style {
-    pub const ALL: [Style; 4] = [Style::Off, Style::Subtle, Style::Smooth, Style::Bouncy];
+    pub const ALL: [Style; 5] = [
+        Style::Off,
+        Style::Linear,
+        Style::EaseIn,
+        Style::EaseOut,
+        Style::EaseInOut,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Style::Off => "Off",
-            Style::Subtle => "Subtle",
-            Style::Smooth => "Smooth",
-            Style::Bouncy => "Bouncy",
+            Style::Linear => "Linear",
+            Style::EaseIn => "Ease In",
+            Style::EaseOut => "Ease Out",
+            Style::EaseInOut => "Ease In-Out",
         }
     }
-    /// The saved name's style; `Off` for anything else.
+    /// The saved name (`name` without spaces, any case); `Off` for anything else.
     pub fn parse(name: &str) -> Self {
+        let key = |s: &str| s.replace([' ', '-'], "").to_lowercase();
         Style::ALL
             .into_iter()
-            .find(|s| s.name().eq_ignore_ascii_case(name))
+            .find(|s| key(s.name()) == key(name))
             .unwrap_or_default()
+    }
+    fn key(self) -> String {
+        self.name().replace([' ', '-'], "").to_lowercase()
     }
     /// The next style, round to the first.
     pub fn next(self) -> Self {
         let i = Style::ALL.iter().position(|s| *s == self).unwrap_or(0);
         Style::ALL[(i + 1) % Style::ALL.len()]
     }
-    /// How long it lasts at speed 1.
-    fn base(self) -> Duration {
-        match self {
-            Style::Off => Duration::ZERO,
-            Style::Subtle => Duration::from_millis(120),
-            Style::Smooth => Duration::from_millis(220),
-            Style::Bouncy => Duration::from_millis(320),
-        }
-    }
     /// How long it lasts at `speed` (1 normal, 2 twice as fast; kept between 0.25 and 4).
     pub fn duration(self, speed: f32) -> Duration {
-        self.base().div_f32(speed.clamp(0.25, 4.0))
+        if self == Style::Off {
+            return Duration::ZERO;
+        }
+        Duration::from_millis(200).div_f32(speed.clamp(0.25, 4.0))
     }
-    /// Progress `t` (0 to 1) eased: 0 at the start, 1 at the end. `Bouncy` passes 1 on the way.
+    /// Progress `t` (0 to 1) eased: 0 at the start, 1 at the end.
     pub fn ease(self, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
         match self {
             Style::Off => 1.0,
-            Style::Subtle => 1.0 - (1.0 - t).powi(2),
-            Style::Smooth => t * t * (3.0 - 2.0 * t),
-            Style::Bouncy => {
-                // easeOutBack.
-                const C1: f32 = 1.70158;
-                const C3: f32 = C1 + 1.0;
-                let u = t - 1.0;
-                1.0 + C3 * u.powi(3) + C1 * u.powi(2)
+            Style::Linear => t,
+            Style::EaseIn => t * t * t,
+            Style::EaseOut => 1.0 - (1.0 - t).powi(3),
+            Style::EaseInOut => {
+                if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+                }
             }
         }
     }
 }
 
-/// One animation's settings: its style and speed.
+/// Where a screen comes from as it opens (and goes as it closes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Motion {
+    /// It fades in where it is.
+    #[default]
+    Fade,
+    FromTop,
+    FromBottom,
+    FromLeft,
+    FromRight,
+    /// It grows from the middle of the screen, and shrinks back into it as it closes.
+    FromMiddle,
+}
+
+impl Motion {
+    pub const ALL: [Motion; 6] = [
+        Motion::Fade,
+        Motion::FromTop,
+        Motion::FromBottom,
+        Motion::FromLeft,
+        Motion::FromRight,
+        Motion::FromMiddle,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Motion::Fade => "Fade",
+            Motion::FromTop => "From Top",
+            Motion::FromBottom => "From Bottom",
+            Motion::FromLeft => "From Left",
+            Motion::FromRight => "From Right",
+            Motion::FromMiddle => "From Middle",
+        }
+    }
+    pub fn parse(name: &str) -> Self {
+        let key = |s: &str| s.replace(' ', "").to_lowercase();
+        Motion::ALL
+            .into_iter()
+            .find(|m| key(m.name()) == key(name))
+            .unwrap_or_default()
+    }
+    pub fn next(self) -> Self {
+        let i = Motion::ALL.iter().position(|m| *m == self).unwrap_or(0);
+        Motion::ALL[(i + 1) % Motion::ALL.len()]
+    }
+    /// At progress `p` (0 hidden, 1 in place), for a screen of `size` (GUI pixels): its offset,
+    /// its scale about the screen's middle and its opacity.
+    pub fn pose(self, p: f32, size: [f32; 2]) -> ([f32; 2], f32, f32) {
+        let away = 1.0 - p;
+        let fade = p.clamp(0.0, 1.0);
+        match self {
+            Motion::Fade => ([0.0, 0.0], 1.0, fade),
+            Motion::FromTop => ([0.0, -away * size[1] * 0.5], 1.0, fade),
+            Motion::FromBottom => ([0.0, away * size[1] * 0.5], 1.0, fade),
+            Motion::FromLeft => ([-away * size[0] * 0.5, 0.0], 1.0, fade),
+            Motion::FromRight => ([away * size[0] * 0.5, 0.0], 1.0, fade),
+            Motion::FromMiddle => ([0.0, 0.0], p.max(0.0), fade),
+        }
+    }
+}
+
+/// One animation's settings: its easing, where it comes from, and its speed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Setting {
     pub style: Style,
+    pub motion: Motion,
     pub speed: f32,
 }
 
@@ -82,22 +151,37 @@ impl Default for Setting {
     fn default() -> Self {
         Self {
             style: Style::Off,
+            motion: Motion::Fade,
             speed: 1.0,
         }
     }
 }
 
 impl Setting {
-    /// The saved form, `style:speed`.
+    /// The saved form, `style:motion:speed`.
     pub fn to_text(self) -> String {
-        format!("{}:{}", self.style.name().to_lowercase(), self.speed)
+        format!(
+            "{}:{}:{}",
+            self.style.key(),
+            self.motion.name().replace(' ', "").to_lowercase(),
+            self.speed
+        )
     }
     /// From the saved form; the default for anything it can't read.
     pub fn parse(text: &str) -> Self {
-        let (style, speed) = text.split_once(':').unwrap_or((text, "1"));
+        let mut parts = text.split(':');
+        let style = Style::parse(parts.next().unwrap_or(""));
+        let motion = Motion::parse(parts.next().unwrap_or(""));
+        let speed = parts
+            .next()
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|s| s.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.25, 4.0);
         Self {
-            style: Style::parse(style),
-            speed: speed.parse::<f32>().ok().filter(|s| s.is_finite()).unwrap_or(1.0).clamp(0.25, 4.0),
+            style,
+            motion,
+            speed,
         }
     }
     pub fn on(self) -> bool {
@@ -158,20 +242,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_style_starts_at_zero_and_ends_at_one() {
+    fn every_style_starts_at_zero_and_ends_at_one_without_overshooting() {
         for style in Style::ALL {
             if style != Style::Off {
                 assert!(style.ease(0.0).abs() < 1e-6, "{style:?}");
             }
             assert!((style.ease(1.0) - 1.0).abs() < 1e-6, "{style:?}");
+            let peak = (0..=100).map(|i| style.ease(i as f32 / 100.0)).fold(0.0, f32::max);
+            assert!(peak <= 1.0 + 1e-6, "{style:?}");
         }
+        assert!(Style::EaseIn.ease(0.25) < Style::Linear.ease(0.25));
+        assert!(Style::EaseOut.ease(0.25) > Style::Linear.ease(0.25));
     }
 
     #[test]
-    fn bouncy_goes_past_the_end_and_the_others_do_not() {
-        let peak = |s: Style| (0..=100).map(|i| s.ease(i as f32 / 100.0)).fold(0.0, f32::max);
-        assert!(peak(Style::Bouncy) > 1.05);
-        assert!(peak(Style::Subtle) <= 1.0 + 1e-6 && peak(Style::Smooth) <= 1.0 + 1e-6);
+    fn from_middle_grows_from_nothing_and_slides_come_from_their_side() {
+        let size = [400.0, 200.0];
+        assert_eq!(Motion::FromMiddle.pose(0.0, size), ([0.0, 0.0], 0.0, 0.0));
+        assert_eq!(Motion::FromMiddle.pose(1.0, size), ([0.0, 0.0], 1.0, 1.0));
+        assert_eq!(Motion::FromLeft.pose(0.0, size).0, [-200.0, 0.0]);
+        assert_eq!(Motion::FromBottom.pose(0.0, size).0, [0.0, 100.0]);
+        for motion in Motion::ALL {
+            assert_eq!(motion.pose(1.0, size), ([0.0, 0.0], 1.0, 1.0), "{motion:?}");
+        }
     }
 
     #[test]
@@ -186,19 +279,19 @@ mod tests {
     #[test]
     fn a_tween_eases_to_its_target_and_turns_from_where_it_is() {
         let start = Instant::now();
-        let smooth = Setting {
-            style: Style::Smooth,
-            speed: 1.0,
+        let linear = Setting {
+            style: Style::Linear,
+            ..Setting::default()
         };
         let mut tween = Tween::at(0.0);
-        tween.go(10.0, smooth, start);
-        let half = start + Style::Smooth.duration(1.0) / 2;
+        tween.go(10.0, linear, start);
+        let half = start + Style::Linear.duration(1.0) / 2;
         assert!((tween.value(half) - 5.0).abs() < 0.01);
         assert!(tween.moving(half));
         // Turned back halfway: from 5, not from 10.
-        tween.go(0.0, smooth, half);
+        tween.go(0.0, linear, half);
         assert!((tween.value(half) - 5.0).abs() < 0.01);
-        let end = half + Style::Smooth.duration(1.0);
+        let end = half + Style::Linear.duration(1.0);
         assert_eq!(tween.value(end), 0.0);
         assert!(!tween.moving(end));
     }
@@ -206,12 +299,13 @@ mod tests {
     #[test]
     fn settings_save_and_read_back_and_bad_text_is_off() {
         let s = Setting {
-            style: Style::Bouncy,
+            style: Style::EaseInOut,
+            motion: Motion::FromMiddle,
             speed: 1.5,
         };
         assert_eq!(Setting::parse(&s.to_text()), s);
         assert_eq!(Setting::parse("nonsense"), Setting::default());
-        assert_eq!(Setting::parse("smooth:99").speed, 4.0);
-        assert_eq!(Style::Smooth.duration(2.0), Duration::from_millis(110));
+        assert_eq!(Setting::parse("easeout:fromleft:99").speed, 4.0);
+        assert_eq!(Style::Linear.duration(2.0), Duration::from_millis(100));
     }
 }

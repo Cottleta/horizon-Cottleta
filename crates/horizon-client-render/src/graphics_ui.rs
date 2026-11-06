@@ -100,6 +100,10 @@ pub enum H {
     AutoSave,
     AutoLoad,
     DynamicHud,
+    /// Cottleta's Settings: the inventory and containers' opening and closing.
+    AnimContainerStyle,
+    AnimContainerMotion,
+    AnimContainerSpeed,
     Sky,
     Fog,
     Weather,
@@ -695,6 +699,26 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         ),
                     ],
                 ),
+                (
+                    "Animations: inventory and containers",
+                    vec![
+                        h(
+                            H::AnimContainerStyle,
+                            None,
+                            "How opening and closing eases. Off: they appear at once, as in vanilla.",
+                        ),
+                        h(
+                            H::AnimContainerMotion,
+                            None,
+                            "Where they come from: a fade, a side, or growing from the middle.",
+                        ),
+                        h(
+                            H::AnimContainerSpeed,
+                            None,
+                            "How fast it plays: 1x is a fifth of a second.",
+                        ),
+                    ],
+                ),
             ],
         ),
     ];
@@ -865,6 +889,7 @@ impl H {
             }),
             H::HdrBlackLevel => Some(g.hdr_black_level as f32 / 100.0),
             H::AutoFps => Some(crate::auto_settings::target_position(g.auto_target_fps)),
+            H::AnimContainerSpeed => Some((g.anim_containers.speed - 0.25) / 3.75),
             H::HdrUiBrightness => Some((g.hdr_ui_brightness as f32 - 25.0) / 75.0),
             _ => None,
         }
@@ -955,6 +980,11 @@ impl H {
             H::AutoSave => Text::literal(lang::get("Save Current Settings")),
             H::AutoLoad => Text::literal(lang::get("Load Saved Settings")),
             H::DynamicHud => labelled("Dynamic HUD", on_off(g.dynamic_hud)),
+            H::AnimContainerStyle => labelled("Easing", g.anim_containers.style.name()),
+            H::AnimContainerMotion => labelled("Direction", g.anim_containers.motion.name()),
+            H::AnimContainerSpeed => {
+                labelled("Speed", format!("{:.2}x", g.anim_containers.speed))
+            }
             H::Sky => labelled("Sky", on_off(g.sky)),
             H::Fog => labelled("Fog", on_off(g.fog)),
             H::Weather => labelled("Weather", on_off(g.weather)),
@@ -1047,6 +1077,9 @@ impl H {
         let g = &mut s.horizon;
         match self {
             H::AutoFps => g.auto_target_fps = crate::auto_settings::target_at(v),
+            H::AnimContainerSpeed => {
+                g.anim_containers.speed = ((0.25 + v.clamp(0.0, 1.0) * 3.75) * 20.0).round() / 20.0;
+            }
             H::ChunkUpdates => g.chunk_updates = (v * 64.0).round() as u32,
             H::EntityCullingPrecheck => g.entity_culling_precheck = (v * 512.0).round() as u32,
             H::UploadBudget => {
@@ -1124,6 +1157,14 @@ impl H {
                 g.cache_copper_golem_statues = !g.cache_copper_golem_statues
             }
             H::DynamicHud => g.dynamic_hud = !g.dynamic_hud,
+            H::AnimContainerStyle => {
+                let a = &mut g.anim_containers;
+                a.style = step(&crate::gui_anim::Style::ALL, a.style, back);
+            }
+            H::AnimContainerMotion => {
+                let a = &mut g.anim_containers;
+                a.motion = step(&crate::gui_anim::Motion::ALL, a.motion, back);
+            }
             H::Sky => g.sky = !g.sky,
             H::Fog => g.fog = !g.fog,
             H::Weather => g.weather = !g.weather,

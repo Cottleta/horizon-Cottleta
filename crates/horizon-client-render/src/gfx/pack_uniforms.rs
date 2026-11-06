@@ -2286,7 +2286,7 @@ mod initial_history_tests {
             block_flicker: 0.0,
             boss_darken: 0.0,
             menu_blur: None,
-            picture: None,
+            pictures: Vec::new(),
             chunk_fade: 0.0,
             post_effects: crate::post_chain::Request::none(),
         }

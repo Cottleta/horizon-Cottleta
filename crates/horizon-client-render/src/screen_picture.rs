@@ -15,11 +15,14 @@ pub struct Draw {
 }
 
 struct Loaded {
+    texture: wgpu::Texture,
     group: wgpu::BindGroup,
     params: wgpu::Buffer,
     size: [u32; 2],
     /// What `params` holds: the visible part's UV rectangle and the alpha.
     last: Option<[f32; 5]>,
+    /// When it was last drawn: a video's next frame is only wanted while it shows.
+    drawn: Option<std::time::Instant>,
 }
 
 /// The pipeline and the uploaded pictures by name.
@@ -136,6 +139,13 @@ impl ScreenPictures {
         size: [u32; 2],
         rgba: &[u8],
     ) {
+        // A video's next frame: the same size, into the same texture.
+        if let Some(picture) = self.pictures.get(name)
+            && picture.size == size
+        {
+            write(queue, &picture.texture, size, rgba);
+            return;
+        }
         let extent = wgpu::Extent3d {
             width: size[0],
             height: size[1],
@@ -151,16 +161,7 @@ impl ScreenPictures {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        queue.write_texture(
-            texture.as_image_copy(),
-            rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * size[0]),
-                rows_per_image: Some(size[1]),
-            },
-            extent,
-        );
+        write(queue, &texture, size, rgba);
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Screen picture"),
             size: 32,
@@ -189,10 +190,12 @@ impl ScreenPictures {
         self.pictures.insert(
             name.to_owned(),
             Loaded {
+                texture,
                 group,
                 params,
                 size,
                 last: None,
+                drawn: None,
             },
         );
     }
@@ -204,6 +207,16 @@ impl ScreenPictures {
 
     pub fn has(&self, name: &str) -> bool {
         self.pictures.contains_key(name)
+    }
+
+    /// The picture `name`'s size in pixels.
+    pub fn size(&self, name: &str) -> Option<[u32; 2]> {
+        self.pictures.get(name).map(|p| p.size)
+    }
+
+    /// When the picture `name` was last drawn.
+    pub fn drawn(&self, name: &str) -> Option<std::time::Instant> {
+        self.pictures.get(name).and_then(|p| p.drawn)
     }
 
     /// Draws `draw`'s picture over `target` (`size` pixels), covering it. Nothing when the
@@ -219,6 +232,7 @@ impl ScreenPictures {
         let Some(picture) = self.pictures.get_mut(&draw.name) else {
             return;
         };
+        picture.drawn = Some(std::time::Instant::now());
         let [x, y, w, h] = draw
             .rect
             .unwrap_or([0.0, 0.0, size[0] as f32, size[1] as f32]);
@@ -255,9 +269,51 @@ impl ScreenPictures {
     }
 }
 
+/// `rgba` (`size`) into all of `texture`.
+fn write(queue: &wgpu::Queue, texture: &wgpu::Texture, size: [u32; 2], rgba: &[u8]) {
+    queue.write_texture(
+        texture.as_image_copy(),
+        rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * size[0]),
+            rows_per_image: Some(size[1]),
+        },
+        wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+/// The largest `picture` shaped rectangle inside `rect` (x, y, w, h), centred: a picture shown
+/// whole, as a title is.
+pub fn contain(picture: [u32; 2], rect: [f32; 4]) -> [f32; 4] {
+    let [x, y, w, h] = rect;
+    let (pw, ph) = (picture[0].max(1) as f32, picture[1].max(1) as f32);
+    let k = (w / pw).min(h / ph);
+    let (cw, ch) = (pw * k, ph * k);
+    [x + (w - cw) / 2.0, y + (h - ch) / 2.0, cw, ch]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::cover;
+    use super::{contain, cover};
+
+    #[test]
+    fn a_contained_picture_fits_whole_and_centred() {
+        // A wide logo in a taller box: full width, centred up and down.
+        assert_eq!(
+            contain([400, 100], [0.0, 0.0, 200.0, 100.0]),
+            [0.0, 25.0, 200.0, 50.0]
+        );
+        // A square in a wide box: full height, centred sideways.
+        assert_eq!(
+            contain([10, 10], [10.0, 0.0, 300.0, 100.0]),
+            [110.0, 0.0, 100.0, 100.0]
+        );
+    }
 
     #[test]
     fn a_picture_covers_the_window_cropping_its_longer_side_evenly() {

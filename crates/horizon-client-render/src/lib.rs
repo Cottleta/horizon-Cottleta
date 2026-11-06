@@ -50,6 +50,7 @@ pub mod graphics_style;
 pub mod graphics_ui;
 pub mod gui_anim;
 pub mod screen_picture;
+pub mod screen_video;
 pub mod hdr_calibration;
 pub mod hud;
 pub mod hud_layout;

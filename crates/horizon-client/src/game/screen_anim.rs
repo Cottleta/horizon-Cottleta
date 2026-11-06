@@ -3,15 +3,18 @@
 use super::{Game, Screen};
 use horizon_client::gui_anim::{Setting, Tween};
 use horizon_client::hud::{Blend, HudBatch, HudVertex};
+use horizon_client::screen_video;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Instant;
 
 /// The player's pictures: the renderer's name for each, and its file's name in `pictures/`.
-const PICTURES: [(&str, &str); 3] = [
+const PICTURES: [(&str, &str); 5] = [
     ("loading", "loading"),
     ("world", "world_loading"),
     ("inventory", "inventory"),
+    ("menu", "menu"),
+    ("title", "title"),
 ];
 
 /// Where the player puts their pictures: `pictures/` in the game folder.
@@ -19,21 +22,59 @@ pub(super) fn pictures_dir() -> PathBuf {
     horizon_client::logging::game_home().join("pictures")
 }
 
-/// The picture file named `stem` in `dir`, in any format the game reads.
+/// The picture or video file named `stem` in `dir`, in any format the game reads.
 fn picture_file(dir: &std::path::Path, stem: &str) -> Option<PathBuf> {
     ["png", "jpg", "jpeg", "webp"]
         .into_iter()
+        .chain(screen_video::FFMPEG_EXTENSIONS)
         .map(|ext| dir.join(format!("{stem}.{ext}")))
         .find(|p| p.is_file())
+}
+
+/// A picture as it arrives from its file.
+enum Arrival {
+    Still([u32; 2], Vec<u8>),
+    Video(mpsc::Receiver<screen_video::Frame>),
+    /// No file, or its setting is off.
+    Gone,
+}
+
+/// The file `stem` in `dir` opened: a still decoded, a video started.
+fn open_picture(dir: &std::path::Path, stem: &str) -> Arrival {
+    let Some(path) = picture_file(dir, stem) else {
+        return Arrival::Gone;
+    };
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if screen_video::FFMPEG_EXTENSIONS.contains(&ext.as_str()) {
+        return screen_video::play_ffmpeg(&path, dir).map_or(Arrival::Gone, Arrival::Video);
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Arrival::Gone;
+    };
+    if ext == "webp" && screen_video::is_animated_webp(&bytes) {
+        return screen_video::play_webp(bytes).map_or(Arrival::Gone, Arrival::Video);
+    }
+    match horizon_client::hud::decode_image_bytes(&bytes) {
+        Ok((w, h, rgba)) => Arrival::Still([w, h], rgba),
+        Err(_) => Arrival::Gone,
+    }
+}
+
+/// A video playing: its frames, and when the next one is due.
+struct Playing {
+    frames: mpsc::Receiver<screen_video::Frame>,
+    next: Option<Instant>,
 }
 
 /// Loading the player's pictures off the frame's thread.
 #[derive(Default)]
 pub(super) struct Pictures {
     /// Which the settings wanted when they were last loaded.
-    wanted: Option<[bool; 3]>,
-    /// Decoded pictures (name, size, pixels), or the name of one to drop.
-    arriving: Option<mpsc::Receiver<(&'static str, Option<([u32; 2], Vec<u8>)>)>>,
+    wanted: Option<[bool; 5]>,
+    /// Opened pictures by name.
+    arriving: Option<mpsc::Receiver<(&'static str, Arrival)>>,
+    /// The videos playing, by name.
+    playing: Vec<(&'static str, Playing)>,
 }
 
 /// The animated screen's state between frames.
@@ -59,12 +100,6 @@ impl Default for MenuAnim {
             key: 0,
             tween: Tween::at(1.0),
         }
-    }
-}
-
-impl MenuAnim {
-    pub(super) fn moving(&self, now: Instant) -> bool {
-        self.tween.moving(now)
     }
 }
 
@@ -110,17 +145,19 @@ pub(super) fn loading_picture(
     })
 }
 
-/// The quads from `from` drawn from a container's own texture (`gui/container/...`, the panel
-/// with its grid of slots) made clear: the first one's vertex and their box in GUI pixels.
-fn take_panel(
+/// The quads from `from` drawn from the sprites `wanted` names (a container's own texture,
+/// `gui/container/...`, the panel with its grid of slots; the title's logo) made clear: the
+/// first one's vertex and their box in GUI pixels.
+fn take_sprites(
     hud: &mut HudBatch,
     atlas: &horizon_client::hud::HudAtlas,
     from: usize,
+    wanted: impl Fn(&str) -> bool,
 ) -> Option<(usize, [f32; 4])> {
     let panels: Vec<[f32; 4]> = atlas
         .sprites
         .iter()
-        .filter(|(name, _)| name.starts_with("gui/container/"))
+        .filter(|(name, _)| wanted(name))
         .map(|(_, r)| [r.u0, r.v0, r.u1, r.v1])
         .collect();
     let from = from.min(hud.vertices.len());
@@ -244,9 +281,17 @@ impl Game<'_> {
     /// and hands the renderer those that arrived.
     pub(super) fn poll_pictures(&mut self, again: bool) {
         let g = &self.settings.horizon;
-        let wanted = [g.picture_loading, g.picture_world, g.picture_inventory];
+        let wanted = [
+            g.picture_loading,
+            g.picture_world,
+            g.picture_inventory,
+            g.picture_menu,
+            g.picture_title,
+        ];
         if again || self.pictures.wanted != Some(wanted) {
             self.pictures.wanted = Some(wanted);
+            // Dropping a video's frames ends its thread (and FFmpeg).
+            self.pictures.playing.clear();
             let (tx, rx) = mpsc::channel();
             self.pictures.arriving = Some(rx);
             let jobs: Vec<_> = PICTURES.iter().zip(wanted).map(|(&(n, f), on)| (n, f, on)).collect();
@@ -255,77 +300,140 @@ impl Game<'_> {
                 .spawn(move || {
                     let dir = pictures_dir();
                     for (name, file, on) in jobs {
-                        let image = on
-                            .then(|| picture_file(&dir, file))
-                            .flatten()
-                            .and_then(|path| std::fs::read(&path).ok())
-                            .and_then(|bytes| horizon_client::hud::decode_image_bytes(&bytes).ok())
-                            .map(|(w, h, rgba)| ([w, h], rgba));
-                        if tx.send((name, image)).is_err() {
+                        let arrival = if on { open_picture(&dir, file) } else { Arrival::Gone };
+                        if tx.send((name, arrival)).is_err() {
                             return;
                         }
                     }
                 })
                 .ok();
         }
-        let Some(rx) = &self.pictures.arriving else {
-            return;
-        };
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        while let Ok((name, image)) = rx.try_recv() {
-            match image {
-                Some((size, rgba)) => renderer.upload_picture(name, size, &rgba),
-                None => renderer.remove_picture(name),
+        if let Some(rx) = &self.pictures.arriving {
+            while let Ok((name, arrival)) = rx.try_recv() {
+                self.pictures.playing.retain(|(n, _)| *n != name);
+                match arrival {
+                    Arrival::Still(size, rgba) => renderer.upload_picture(name, size, &rgba),
+                    Arrival::Video(frames) => {
+                        renderer.remove_picture(name);
+                        self.pictures.playing.push((name, Playing { frames, next: None }));
+                    }
+                    Arrival::Gone => renderer.remove_picture(name),
+                }
             }
         }
-    }
-    /// The picture under this frame's open screen, with the screen's own darkened background
-    /// taken out of `hud`: the inventory's while it (or its closing) shows, the world's while
-    /// one loads.
-    pub(super) fn frame_picture(&self, hud: &mut HudBatch) -> Option<horizon_client::screen_picture::Draw> {
-        let renderer = self.renderer.as_ref()?;
-        let g = &self.settings.horizon;
+        // A video's next frame when it's due, while it shows (and its first one at once).
         let now = Instant::now();
-        let inventory = matches!(self.screen, Screen::Inventory | Screen::Creative);
-        let closing = !inventory && g.anim_containers.on() && self.screen_anim.moving(now);
+        self.pictures.playing.retain_mut(|(name, video)| {
+            let showing = !renderer.has_picture(name)
+                || renderer
+                    .picture_drawn(name)
+                    .is_some_and(|at| now.duration_since(at) < std::time::Duration::from_millis(250));
+            if !showing {
+                // Starts again where it stopped, not racing to catch up.
+                video.next = None;
+                return true;
+            }
+            if video.next.is_some_and(|due| now < due) {
+                return true;
+            }
+            match video.frames.try_recv() {
+                Ok(frame) => {
+                    renderer.upload_picture(name, frame.size, &frame.rgba);
+                    let due = video.next.unwrap_or(now) + frame.shows_for;
+                    video.next = Some(if due < now { now } else { due });
+                    true
+                }
+                Err(mpsc::TryRecvError::Empty) => true,
+                Err(mpsc::TryRecvError::Disconnected) => false,
+            }
+        });
+    }
+    /// This frame's pictures, with what each replaces taken out of `hud`: the world's while
+    /// one loads; else the main menu's background and title; and the inventory's panel while
+    /// it (or its closing) shows.
+    pub(super) fn frame_pictures(&self, hud: &mut HudBatch) -> Vec<horizon_client::screen_picture::Draw> {
+        use horizon_client::screen_picture::{Draw, contain};
+        let mut draws = Vec::new();
+        let Some(renderer) = self.renderer.as_ref() else {
+            return draws;
+        };
+        let g = &self.settings.horizon;
+        if !(g.picture_world || g.picture_inventory || g.picture_menu || g.picture_title) {
+            return draws;
+        }
+        let now = Instant::now();
+        let s = hud.scale;
         // Joining a world (a server's, or single player's own) until the player is in it, and
         // while its terrain loads after a dimension change.
         let joining = self
             .remote
             .as_ref()
             .is_some_and(|r| self.player.is_none() || r.level_load.is_active());
-        if g.picture_world && joining {
-            if !renderer.has_picture("world") {
-                return None;
-            }
+        if g.picture_world && joining && renderer.has_picture("world") {
             clear_backdrops(hud, 0);
-            return Some(horizon_client::screen_picture::Draw {
+            draws.push(Draw {
                 name: "world".to_owned(),
                 alpha: 1.0,
                 at: None,
                 rect: None,
             });
+            return draws;
         }
+        if self.title.is_some() {
+            // Over the panorama, under everything the menu draws.
+            if g.picture_menu && renderer.has_picture("menu") {
+                draws.push(Draw {
+                    name: "menu".to_owned(),
+                    alpha: 1.0,
+                    at: Some(0),
+                    rect: None,
+                });
+            }
+            // In the logo's place (MINECRAFT and the edition under it), shown whole.
+            if g.picture_title
+                && let Some(size) = renderer.picture_size("title")
+                && let Some((first, rect)) = take_sprites(hud, &self.gui.atlas, 0, |name| {
+                    name == "gui/title/minecraft" || name == horizon_client::title_edition::SPRITE
+                })
+            {
+                let rect = contain(size, [rect[0] * s, rect[1] * s, rect[2] * s, rect[3] * s]);
+                draws.push(Draw {
+                    name: "title".to_owned(),
+                    alpha: 1.0,
+                    at: Some(first as u32),
+                    rect: Some(rect),
+                });
+            }
+            return draws;
+        }
+        let inventory = matches!(self.screen, Screen::Inventory | Screen::Creative);
+        let closing = !inventory && g.anim_containers.on() && self.screen_anim.moving(now);
         if !(g.picture_inventory && (inventory || closing) && renderer.has_picture("inventory")) {
-            return None;
+            return draws;
         }
         // In place of the panel's own texture (`gui/container/...`): the dark backdrop around
         // it, the slots' highlights and the items stay.
-        let (first, rect) = take_panel(hud, &self.gui.atlas, hud.blur_at as usize)?;
+        let from = hud.blur_at as usize;
+        let Some((first, rect)) =
+            take_sprites(hud, &self.gui.atlas, from, |name| name.starts_with("gui/container/"))
+        else {
+            return draws;
+        };
         let alpha = if g.anim_containers.on() {
             self.screen_anim.progress(now)
         } else {
             1.0
         };
-        let s = hud.scale;
-        Some(horizon_client::screen_picture::Draw {
+        draws.push(Draw {
             name: "inventory".to_owned(),
             alpha,
             at: Some(first as u32),
             rect: Some([rect[0] * s, rect[1] * s, rect[2] * s, rect[3] * s]),
-        })
+        });
+        draws
     }
     /// Which menu page is open: the screen, the options page and the title screen's mode.
     fn menu_key(&self) -> u64 {

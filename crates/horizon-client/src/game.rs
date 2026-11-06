@@ -16321,7 +16321,7 @@ impl Game<'_> {
 
                     let mut frame = loading_frame(&hud);
 
-                    frame.picture = picture;
+                    frame.pictures = picture.into_iter().collect();
 
                     return renderer.render(&frame);
                 }
@@ -16376,7 +16376,7 @@ impl Game<'_> {
 
                 let mut frame = loading_frame(&hud);
 
-                frame.picture = picture;
+                frame.pictures = picture.into_iter().collect();
 
                 return renderer.render(&frame);
             }
@@ -16408,7 +16408,7 @@ impl Game<'_> {
 
                 let mut frame = loading_frame(&hud);
 
-                frame.picture = picture;
+                frame.pictures = picture.into_iter().collect();
 
                 return renderer.render(&frame);
             }
@@ -16440,7 +16440,7 @@ impl Game<'_> {
 
                 let mut frame = loading_frame(&hud);
 
-                frame.picture = picture;
+                frame.pictures = picture.into_iter().collect();
 
                 return renderer.render(&frame);
             }
@@ -16733,7 +16733,7 @@ impl Game<'_> {
         self.flush_ime(&mut hud);
         self.native_gui_render_post(&mut hud, self.ui.hide_gui, self.focused);
         self.resolve_inline_profiles(&hud.inline_profiles);
-        let picture = self.frame_picture(&mut hud);
+        let pictures = self.frame_pictures(&mut hud);
         self.locator_camera =
             (!title).then_some((camera.to_array(), view_yaw, view_pitch, fov_degrees));
         let requested_post_effects = self.requested_post_effects();
@@ -16989,7 +16989,7 @@ impl Game<'_> {
                 .boss_overlay
                 .darken_amount(self.clock.fraction() as f32),
             menu_blur: self.menu_blur(),
-            picture,
+            pictures,
             post_effects: horizon_client::post_chain::Request {
                 effects: &requested_post_effects,
                 root: &self.options.resources,
@@ -22075,7 +22075,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         chunk_fade: 0.0,
         post_effects: horizon_client::post_chain::Request::none(),
         menu_blur: None,
-        picture: None,
+        pictures: Vec::new(),
     }
 }
 

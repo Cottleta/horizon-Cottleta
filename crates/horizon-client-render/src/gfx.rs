@@ -1011,7 +1011,7 @@ pub struct Frame<'a> {
     pub menu_blur: Option<f32>,
     /// Cottleta's Settings: a picture of the player's over the window, under the open
     /// screen (`HudBatch::blur_at`).
-    pub picture: Option<crate::screen_picture::Draw>,
+    pub pictures: Vec<crate::screen_picture::Draw>,
     /// `Options.chunkSectionFadeInTime`, in seconds: how long a section takes to fade in once
     /// uploaded (0 draws it whole at once).
     pub chunk_fade: f32,
@@ -5070,6 +5070,14 @@ impl Renderer {
     /// Whether the player's picture `name` is uploaded.
     pub fn has_picture(&self, name: &str) -> bool {
         self.pictures.as_ref().is_some_and(|p| p.has(name))
+    }
+    /// The player's picture `name`'s size in pixels.
+    pub fn picture_size(&self, name: &str) -> Option<[u32; 2]> {
+        self.pictures.as_ref()?.size(name)
+    }
+    /// When the player's picture `name` was last drawn.
+    pub fn picture_drawn(&self, name: &str) -> Option<std::time::Instant> {
+        self.pictures.as_ref()?.drawn(name)
     }
     pub fn set_present_mode(&mut self, vsync: bool, mode: crate::graphics::PresentMode) {
         use crate::graphics::PresentMode as P;
@@ -11355,36 +11363,39 @@ impl Renderer {
         } else if let Some(blur) = &mut self.menu_blur {
             blur.release();
         }
-        // The player's picture: at its own HUD vertex (`Draw::at`, the panel it replaces) or under
-        // the open screen (`blur_at`). The HUD up to it is drawn first, the rest after.
+        // The player's pictures: each at its own HUD vertex (`Draw::at`, the part it replaces) or
+        // under the open screen (`blur_at`), in that order. The HUD up to each is drawn first.
         let total = frame.hud.vertices.len() as u32;
-        let picture = frame
-            .picture
-            .as_ref()
-            .filter(|_| self.pictures.is_some());
         let mut drawn = blur_at;
-        if let Some(draw) = picture {
-            let at = draw.at.unwrap_or(frame.hud.blur_at).clamp(drawn, total);
-            if at > drawn {
-                self.hud.draw_range(
-                    encoder,
-                    view_target,
-                    &self.depth,
-                    frame.hud,
-                    [self.config.width, self.config.height],
-                    drawn..at,
-                    timing.as_mut(),
-                );
-                drawn = at;
-            }
-            if let Some(pictures) = self.pictures.as_mut() {
-                pictures.draw(
-                    &self.queue,
-                    encoder,
-                    view_target,
-                    [self.config.width, self.config.height],
-                    draw,
-                );
+        if self.pictures.is_some() && !frame.pictures.is_empty() {
+            let mut order: Vec<_> = frame
+                .pictures
+                .iter()
+                .map(|d| (d.at.unwrap_or(frame.hud.blur_at).clamp(drawn, total), d))
+                .collect();
+            order.sort_by_key(|(at, _)| *at);
+            for (at, draw) in order {
+                if at > drawn {
+                    self.hud.draw_range(
+                        encoder,
+                        view_target,
+                        &self.depth,
+                        frame.hud,
+                        [self.config.width, self.config.height],
+                        drawn..at,
+                        timing.as_mut(),
+                    );
+                    drawn = at;
+                }
+                if let Some(pictures) = self.pictures.as_mut() {
+                    pictures.draw(
+                        &self.queue,
+                        encoder,
+                        view_target,
+                        [self.config.width, self.config.height],
+                        draw,
+                    );
+                }
             }
         }
         self.hud.draw_range(

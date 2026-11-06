@@ -41,6 +41,9 @@ struct Slot {
     state: Arc<AtomicU8>,
 }
 
+/// The shortest time between two timed frames.
+const TIME_EVERY: std::time::Duration = std::time::Duration::from_millis(1);
+
 pub struct GpuTimer {
     queries: wgpu::QuerySet,
     resolve: wgpu::Buffer,
@@ -50,6 +53,8 @@ pub struct GpuTimer {
     next: usize,
     /// When the device was last polled for readbacks.
     polled: std::time::Instant,
+    /// When the last timed frame began: one a millisecond is timed (`TIME_EVERY`).
+    timed: Option<std::time::Instant>,
     period_ns: f32,
     /// Timestamps between commands, or else these passes' boundaries.
     markers: Option<Markers>,
@@ -113,6 +118,7 @@ impl GpuTimer {
             current: None,
             next: 0,
             polled: std::time::Instant::now() - POLL_EVERY,
+            timed: None,
             period_ns: queue.get_timestamp_period(),
             markers: (!device
                 .features()
@@ -154,9 +160,17 @@ impl GpuTimer {
                 }
             }
         }
+        // Each timed frame costs a resolve, a copy and a readback on the frame's thread: at
+        // thousands of frames a second, 3% of the frame rate. One a millisecond tells as much;
+        // below a thousand frames a second every frame is timed, as before.
+        if self.timed.is_some_and(|at| at.elapsed() < TIME_EVERY) {
+            self.current = None;
+            return;
+        }
         let slot = self.next;
         self.current = (self.slots[slot].state.load(Ordering::Acquire) == FREE).then_some(slot);
         let Some(slot) = self.current else { return };
+        self.timed = Some(std::time::Instant::now());
         let index = 2 * slot as u32;
         let Some(markers) = &self.markers else {
             encoder.write_timestamp(&self.queries, index);

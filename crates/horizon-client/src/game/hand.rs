@@ -472,17 +472,9 @@ impl Game<'_> {
     /// Whether an attack would hit an entity rather than the block behind
     /// it: the crosshair's `EntityHitResult`.
     pub(super) fn entity_targeted(&self) -> bool {
-        let before = |d: Option<f64>| d.is_some_and(|d| self.before_block(d));
-        before(self.painting_hit().map(|h| h.1))
-            || before(self.frame_hit().map(|h| h.1))
-            || before(self.armor_stand_hit().map(|h| h.1))
-            || before(self.cushion_hit().map(|h| h.1))
-            || before(self.boat_hit().map(|h| h.1))
-            || before(self.cart_hit().map(|h| h.1))
-            || before(self.interaction_hit().map(|h| h.1))
-            || before(self.dragon_hit().map(|h| h.1))
-            || before(self.mob_hit().map(|h| h.1))
-            || before(self.redirectable_hit().map(|h| h.1))
+        // The local world's dragon (`dragon_hit`) is not among the server's entities.
+        self.crosshair_entity(true).is_some()
+            || self.dragon_hit().is_some_and(|h| self.before_block(h.1))
     }
     /// `LocalPlayer.isHandsBusy`: paddling a boat.
     pub(super) fn hands_busy(&self) -> bool {

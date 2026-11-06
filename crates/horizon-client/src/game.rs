@@ -7335,7 +7335,12 @@ impl Game<'_> {
             // camera entity the pick starts from. EntitySelector.CAN_BE_PICKED
             // is isPickable — `!isRemoved`, not alive: a health-0 fake player
             // still answers a click.
-            if m.removed || Some(m.id) == self.riding || Some(m.id) == self.remote_camera_id() {
+            // EntitySelector.NO_SPECTATORS: a player in spectator mode is never the hit.
+            if m.removed
+                || m.extra.spectator
+                || Some(m.id) == self.riding
+                || Some(m.id) == self.remote_camera_id()
+            {
                 continue;
             }
             if let Some(t) = ray_box(eye, dir, reach, m.bounds())

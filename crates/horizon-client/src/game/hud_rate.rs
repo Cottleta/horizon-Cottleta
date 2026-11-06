@@ -41,6 +41,7 @@ impl Game<'_> {
             && !self.dialog_open()
             && horizon_client::mod_api::mods().is_empty()
             && !self.screen_anim.moving(Instant::now())
+            && !self.hotbar_slide.moving(Instant::now())
     }
     /// A key, a click or the wheel: the next frame shows what it changed.
     pub(super) fn touch_hud(&mut self) {

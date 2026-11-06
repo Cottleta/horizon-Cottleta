@@ -104,6 +104,8 @@ pub enum H {
     AnimContainerStyle,
     AnimContainerMotion,
     AnimContainerSpeed,
+    AnimHotbarStyle,
+    AnimHotbarSpeed,
     Sky,
     Fog,
     Weather,
@@ -719,6 +721,21 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         ),
                     ],
                 ),
+                (
+                    "Animations: hotbar selection",
+                    vec![
+                        h(
+                            H::AnimHotbarStyle,
+                            None,
+                            "How the selection glides to the slot you pick. Off: it jumps, as in vanilla.",
+                        ),
+                        h(
+                            H::AnimHotbarSpeed,
+                            None,
+                            "How fast it plays: 1x is a fifth of a second.",
+                        ),
+                    ],
+                ),
             ],
         ),
     ];
@@ -890,6 +907,7 @@ impl H {
             H::HdrBlackLevel => Some(g.hdr_black_level as f32 / 100.0),
             H::AutoFps => Some(crate::auto_settings::target_position(g.auto_target_fps)),
             H::AnimContainerSpeed => Some((g.anim_containers.speed - 0.25) / 3.75),
+            H::AnimHotbarSpeed => Some((g.anim_hotbar.speed - 0.25) / 3.75),
             H::HdrUiBrightness => Some((g.hdr_ui_brightness as f32 - 25.0) / 75.0),
             _ => None,
         }
@@ -985,6 +1003,8 @@ impl H {
             H::AnimContainerSpeed => {
                 labelled("Speed", format!("{:.2}x", g.anim_containers.speed))
             }
+            H::AnimHotbarStyle => labelled("Easing", g.anim_hotbar.style.name()),
+            H::AnimHotbarSpeed => labelled("Speed", format!("{:.2}x", g.anim_hotbar.speed)),
             H::Sky => labelled("Sky", on_off(g.sky)),
             H::Fog => labelled("Fog", on_off(g.fog)),
             H::Weather => labelled("Weather", on_off(g.weather)),
@@ -1080,6 +1100,9 @@ impl H {
             H::AnimContainerSpeed => {
                 g.anim_containers.speed = ((0.25 + v.clamp(0.0, 1.0) * 3.75) * 20.0).round() / 20.0;
             }
+            H::AnimHotbarSpeed => {
+                g.anim_hotbar.speed = ((0.25 + v.clamp(0.0, 1.0) * 3.75) * 20.0).round() / 20.0;
+            }
             H::ChunkUpdates => g.chunk_updates = (v * 64.0).round() as u32,
             H::EntityCullingPrecheck => g.entity_culling_precheck = (v * 512.0).round() as u32,
             H::UploadBudget => {
@@ -1164,6 +1187,10 @@ impl H {
             H::AnimContainerMotion => {
                 let a = &mut g.anim_containers;
                 a.motion = step(&crate::gui_anim::Motion::ALL, a.motion, back);
+            }
+            H::AnimHotbarStyle => {
+                let a = &mut g.anim_hotbar;
+                a.style = step(&crate::gui_anim::Style::ALL, a.style, back);
             }
             H::Sky => g.sky = !g.sky,
             H::Fog => g.fog = !g.fog,

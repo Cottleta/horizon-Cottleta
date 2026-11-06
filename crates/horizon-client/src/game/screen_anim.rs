@@ -70,6 +70,29 @@ fn pose(vertices: &mut [HudVertex], setting: Setting, p: f32, size: [f32; 2]) {
 }
 
 impl Game<'_> {
+    /// The hotbar's selection box in `draws` moved to where it is gliding (`anim_hotbar`).
+    pub(super) fn slide_hotbar_selection(&mut self, draws: &mut [horizon_client::hud_layout::GuiDraw]) {
+        let setting = self.settings.horizon.anim_hotbar;
+        let now = Instant::now();
+        let target = self.selected as f32;
+        if self.hotbar_slide.target() != target {
+            self.hotbar_slide.go(target, setting, now);
+        }
+        if !setting.on() {
+            return;
+        }
+        let shift = ((self.hotbar_slide.value(now) - target) * 20.0).round() as i32;
+        if shift == 0 {
+            return;
+        }
+        for d in draws {
+            if let horizon_client::hud_layout::GuiDraw::Sprite { sprite, x, .. } = d
+                && sprite == "hud/hotbar_selection"
+            {
+                *x += shift;
+            }
+        }
+    }
     /// Before the open screen draws: notes an opening or closing, and draws a closing one.
     /// The vertex and blend counts it returns are where the open screen's own begin.
     pub(super) fn screen_anim_begin(&mut self, batch: &mut HudBatch, screen: Screen) -> (usize, usize) {

@@ -767,6 +767,8 @@ pub struct Graphics {
     pub dynamic_hud: bool,
     /// Cottleta's Settings: how the inventory and containers open and close (`gui_anim`).
     pub anim_containers: crate::gui_anim::Setting,
+    /// Cottleta's Settings: the hotbar's selection gliding between slots.
+    pub anim_hotbar: crate::gui_anim::Setting,
     /// Auto Settings' frame rate target, 0 until one is picked.
     pub auto_target_fps: u32,
     /// Auto Settings' FPS Target rows are dropped down: not saved.
@@ -850,6 +852,7 @@ impl Default for Graphics {
             far_detail: FarDetail::Full,
             far_shape: FarShape::Blocks,
             anim_containers: Default::default(),
+            anim_hotbar: Default::default(),
             blue_map: crate::bluemap::Settings::default(),
             cave_culling: true,
             gpu_culling: false,
@@ -1003,6 +1006,7 @@ impl Graphics {
                 }
                 "dynamicHud" => g.dynamic_hud = flag(g.dynamic_hud),
                 "animContainers" => g.anim_containers = crate::gui_anim::Setting::parse(value),
+                "animHotbar" => g.anim_hotbar = crate::gui_anim::Setting::parse(value),
                 "autoTargetFps" => g.auto_target_fps = number(g.auto_target_fps),
                 "sky" => g.sky = flag(g.sky),
                 "fog" => g.fog = flag(g.fog),
@@ -1128,6 +1132,7 @@ impl Graphics {
         );
         // This build's own, after the rest: upstream's list above changes often.
         text += &format!("animContainers:{}\n", self.anim_containers.to_text());
+        text += &format!("animHotbar:{}\n", self.anim_hotbar.to_text());
         text += &self.blue_map.serialize();
         text
     }
@@ -1279,6 +1284,7 @@ mod tests {
             far_detail: FarDetail::Reduced,
             far_shape: FarShape::Blocks,
             anim_containers: Default::default(),
+            anim_hotbar: Default::default(),
             blue_map: crate::bluemap::Settings {
                 radius: 40,
                 auto_detect: true,

@@ -2651,6 +2651,8 @@ struct Game<'a> {
     hud_kept: Option<([u32; 2], HudBatch)>,
     /// The inventory and containers' opening and closing (Cottleta's Settings).
     screen_anim: screen_anim::ScreenAnim,
+    /// The hotbar selection's place, in slots, as it glides (Cottleta's Settings).
+    hotbar_slide: horizon_client::gui_anim::Tween,
     hud_built: Instant,
     hud_touched: Instant,
     hud_view: (f32, f32),
@@ -8986,7 +8988,8 @@ impl Game<'_> {
                         offhand_pop: (f32::from(g.hotbar_pop[9]) - partial).max(0.0),
                         attack: (indicator == 2).then_some(strength),
                     };
-                    let draws = hud_layout::hotbar(wi, hi, &inputs);
+                    let mut draws = hud_layout::hotbar(wi, hi, &inputs);
+                    g.slide_hotbar_selection(&mut draws);
                     hud_layout::paint(batch, &g.gui.atlas, &draws);
                     for d in &draws {
                         if let hud_layout::GuiDraw::Item { slot, x, y, .. } = *d {
@@ -20014,6 +20017,7 @@ impl<'a> Game<'a> {
             frame_end: now,
             hud_kept: None,
             screen_anim: Default::default(),
+            hotbar_slide: horizon_client::gui_anim::Tween::at(0.0),
             hud_built: now,
             hud_touched: now,
             hud_view: (0.0, 0.0),

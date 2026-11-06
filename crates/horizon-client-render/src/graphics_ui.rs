@@ -115,7 +115,6 @@ pub enum H {
     PictureWorld,
     PictureInventory,
     PictureMenu,
-    PictureTitle,
     PicturesFolder,
     BackdropContainers,
     BackdropContainersStrength,
@@ -810,11 +809,6 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                             "pictures/menu in place of the main menu's panorama.",
                         ),
                         h(
-                            H::PictureTitle,
-                            None,
-                            "pictures/title in place of the MINECRAFT title.",
-                        ),
-                        h(
                             H::PicturesFolder,
                             None,
                             "Pictures (PNG, JPEG, WebP) or videos (MP4, WebM, GIF; needs FFmpeg).",
@@ -1128,7 +1122,6 @@ impl H {
             H::PictureWorld => labelled("World Loading", on_off(g.picture_world)),
             H::PictureInventory => labelled("Inventory Background", on_off(g.picture_inventory)),
             H::PictureMenu => labelled("Main Menu Background", on_off(g.picture_menu)),
-            H::PictureTitle => labelled("Main Menu Title", on_off(g.picture_title)),
             H::PicturesFolder => Text::literal(lang::get("Open Pictures Folder")),
             H::BackdropContainers => labelled("Containers", g.backdrop_containers.mode.name()),
             H::BackdropContainersStrength => labelled(
@@ -1331,7 +1324,6 @@ impl H {
             H::PictureWorld => g.picture_world = !g.picture_world,
             H::PictureInventory => g.picture_inventory = !g.picture_inventory,
             H::PictureMenu => g.picture_menu = !g.picture_menu,
-            H::PictureTitle => g.picture_title = !g.picture_title,
             H::BackdropContainers => {
                 let b = &mut g.backdrop_containers;
                 b.mode = step(&crate::gui_anim::BackdropMode::ALL, b.mode, back);
@@ -1511,7 +1503,6 @@ impl Item {
             Item::Horizon(H::PictureWorld) => g.picture_world,
             Item::Horizon(H::PictureInventory) => g.picture_inventory,
             Item::Horizon(H::PictureMenu) => g.picture_menu,
-            Item::Horizon(H::PictureTitle) => g.picture_title,
             Item::Horizon(H::GpuCulling) => {
                 g.gpu_culling && crate::graphics::gpu_culling_offer().reason().is_none()
             }

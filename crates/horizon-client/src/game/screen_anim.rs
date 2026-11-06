@@ -9,12 +9,11 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 /// The player's pictures: the renderer's name for each, and its file's name in `pictures/`.
-const PICTURES: [(&str, &str); 5] = [
+const PICTURES: [(&str, &str); 4] = [
     ("loading", "loading"),
     ("world", "world_loading"),
     ("inventory", "inventory"),
     ("menu", "menu"),
-    ("title", "title"),
 ];
 
 /// Where the player puts their pictures: `pictures/` in the game folder.
@@ -70,7 +69,7 @@ struct Playing {
 #[derive(Default)]
 pub(super) struct Pictures {
     /// Which the settings wanted when they were last loaded.
-    wanted: Option<[bool; 5]>,
+    wanted: Option<[bool; 4]>,
     /// Opened pictures by name.
     arriving: Option<mpsc::Receiver<(&'static str, Arrival)>>,
     /// The videos playing, by name.
@@ -146,8 +145,8 @@ pub(super) fn loading_picture(
 }
 
 /// The quads from `from` drawn from the sprites `wanted` names (a container's own texture,
-/// `gui/container/...`, the panel with its grid of slots; the title's logo) made clear: the
-/// first one's vertex and their box in GUI pixels.
+/// `gui/container/...`, the panel with its grid of slots) made clear: the first one's vertex
+/// and their box in GUI pixels.
 fn take_sprites(
     hud: &mut HudBatch,
     atlas: &horizon_client::hud::HudAtlas,
@@ -286,7 +285,6 @@ impl Game<'_> {
             g.picture_world,
             g.picture_inventory,
             g.picture_menu,
-            g.picture_title,
         ];
         if again || self.pictures.wanted != Some(wanted) {
             self.pictures.wanted = Some(wanted);
@@ -352,16 +350,16 @@ impl Game<'_> {
         });
     }
     /// This frame's pictures, with what each replaces taken out of `hud`: the world's while
-    /// one loads; else the main menu's background and title; and the inventory's panel while
+    /// one loads; else the main menu's background; and the inventory's panel while
     /// it (or its closing) shows.
     pub(super) fn frame_pictures(&self, hud: &mut HudBatch) -> Vec<horizon_client::screen_picture::Draw> {
-        use horizon_client::screen_picture::{Draw, contain};
+        use horizon_client::screen_picture::Draw;
         let mut draws = Vec::new();
         let Some(renderer) = self.renderer.as_ref() else {
             return draws;
         };
         let g = &self.settings.horizon;
-        if !(g.picture_world || g.picture_inventory || g.picture_menu || g.picture_title) {
+        if !(g.picture_world || g.picture_inventory || g.picture_menu) {
             return draws;
         }
         let now = Instant::now();
@@ -390,21 +388,6 @@ impl Game<'_> {
                     alpha: 1.0,
                     at: Some(0),
                     rect: None,
-                });
-            }
-            // In the logo's place (MINECRAFT and the edition under it), shown whole.
-            if g.picture_title
-                && let Some(size) = renderer.picture_size("title")
-                && let Some((first, rect)) = take_sprites(hud, &self.gui.atlas, 0, |name| {
-                    name == "gui/title/minecraft" || name == horizon_client::title_edition::SPRITE
-                })
-            {
-                let rect = contain(size, [rect[0] * s, rect[1] * s, rect[2] * s, rect[3] * s]);
-                draws.push(Draw {
-                    name: "title".to_owned(),
-                    alpha: 1.0,
-                    at: Some(first as u32),
-                    rect: Some(rect),
                 });
             }
             return draws;

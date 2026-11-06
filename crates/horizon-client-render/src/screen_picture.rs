@@ -209,11 +209,6 @@ impl ScreenPictures {
         self.pictures.contains_key(name)
     }
 
-    /// The picture `name`'s size in pixels.
-    pub fn size(&self, name: &str) -> Option<[u32; 2]> {
-        self.pictures.get(name).map(|p| p.size)
-    }
-
     /// When the picture `name` was last drawn.
     pub fn drawn(&self, name: &str) -> Option<std::time::Instant> {
         self.pictures.get(name).and_then(|p| p.drawn)
@@ -287,33 +282,9 @@ fn write(queue: &wgpu::Queue, texture: &wgpu::Texture, size: [u32; 2], rgba: &[u
     );
 }
 
-/// The largest `picture` shaped rectangle inside `rect` (x, y, w, h), centred: a picture shown
-/// whole, as a title is.
-pub fn contain(picture: [u32; 2], rect: [f32; 4]) -> [f32; 4] {
-    let [x, y, w, h] = rect;
-    let (pw, ph) = (picture[0].max(1) as f32, picture[1].max(1) as f32);
-    let k = (w / pw).min(h / ph);
-    let (cw, ch) = (pw * k, ph * k);
-    [x + (w - cw) / 2.0, y + (h - ch) / 2.0, cw, ch]
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{contain, cover};
-
-    #[test]
-    fn a_contained_picture_fits_whole_and_centred() {
-        // A wide logo in a taller box: full width, centred up and down.
-        assert_eq!(
-            contain([400, 100], [0.0, 0.0, 200.0, 100.0]),
-            [0.0, 25.0, 200.0, 50.0]
-        );
-        // A square in a wide box: full height, centred sideways.
-        assert_eq!(
-            contain([10, 10], [10.0, 0.0, 300.0, 100.0]),
-            [110.0, 0.0, 100.0, 100.0]
-        );
-    }
+    use super::cover;
 
     #[test]
     fn a_picture_covers_the_window_cropping_its_longer_side_evenly() {

@@ -774,13 +774,12 @@ pub struct Graphics {
     /// Cottleta's Settings: menu pages easing in as they open.
     pub anim_menus: crate::gui_anim::Setting,
     /// Cottleta's Settings: the player's own pictures (`pictures/` in the game folder) as the
-    /// game's loading screen, the world's loading screen, the inventory's background, the main
-    /// menu's background and its title. Each may be a video.
+    /// game's loading screen, the world's loading screen, the inventory's background and the
+    /// main menu's background. Each may be a video.
     pub picture_loading: bool,
     pub picture_world: bool,
     pub picture_inventory: bool,
     pub picture_menu: bool,
-    pub picture_title: bool,
     /// Cottleta's Settings: what containers and the pause menu put over the world behind them.
     pub backdrop_containers: crate::gui_anim::Backdrop,
     pub backdrop_pause: crate::gui_anim::Backdrop,
@@ -874,7 +873,6 @@ impl Default for Graphics {
             picture_world: false,
             picture_inventory: false,
             picture_menu: false,
-            picture_title: false,
             backdrop_containers: Default::default(),
             backdrop_pause: Default::default(),
             blue_map: crate::bluemap::Settings::default(),
@@ -1037,7 +1035,6 @@ impl Graphics {
                 "pictureWorld" => g.picture_world = flag(g.picture_world),
                 "pictureInventory" => g.picture_inventory = flag(g.picture_inventory),
                 "pictureMenu" => g.picture_menu = flag(g.picture_menu),
-                "pictureTitle" => g.picture_title = flag(g.picture_title),
                 "backdropContainers" => g.backdrop_containers = crate::gui_anim::Backdrop::parse(value),
                 "backdropPause" => g.backdrop_pause = crate::gui_anim::Backdrop::parse(value),
                 "autoTargetFps" => g.auto_target_fps = number(g.auto_target_fps),
@@ -1169,12 +1166,11 @@ impl Graphics {
         text += &format!("animButtons:{}\n", self.anim_buttons.to_text());
         text += &format!("animMenus:{}\n", self.anim_menus.to_text());
         text += &format!(
-            "pictureLoading:{}\npictureWorld:{}\npictureInventory:{}\npictureMenu:{}\npictureTitle:{}\n",
+            "pictureLoading:{}\npictureWorld:{}\npictureInventory:{}\npictureMenu:{}\n",
             bool_text(self.picture_loading),
             bool_text(self.picture_world),
             bool_text(self.picture_inventory),
-            bool_text(self.picture_menu),
-            bool_text(self.picture_title)
+            bool_text(self.picture_menu)
         );
         text += &format!(
             "backdropContainers:{}\nbackdropPause:{}\n",
@@ -1339,7 +1335,6 @@ mod tests {
             picture_world: false,
             picture_inventory: false,
             picture_menu: false,
-            picture_title: false,
             backdrop_containers: Default::default(),
             backdrop_pause: Default::default(),
             blue_map: crate::bluemap::Settings {

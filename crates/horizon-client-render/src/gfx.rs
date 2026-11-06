@@ -5071,10 +5071,6 @@ impl Renderer {
     pub fn has_picture(&self, name: &str) -> bool {
         self.pictures.as_ref().is_some_and(|p| p.has(name))
     }
-    /// The player's picture `name`'s size in pixels.
-    pub fn picture_size(&self, name: &str) -> Option<[u32; 2]> {
-        self.pictures.as_ref()?.size(name)
-    }
     /// When the player's picture `name` was last drawn.
     pub fn picture_drawn(&self, name: &str) -> Option<std::time::Instant> {
         self.pictures.as_ref()?.drawn(name)

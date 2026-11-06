@@ -295,6 +295,8 @@
   "Cottleta's Settings...": "Cottleta's Settings...",
   "This build's own settings: picked for this PC, saved ones and extras.": "This build's own settings: picked for this PC, saved ones and extras.",
   "Extras": "Extras",
+  "Animations: buttons": "Animations: buttons",
+  "The highlight fades in and out under the pointer. Off: it switches at once.": "The highlight fades in and out under the pointer. Off: it switches at once.",
   "Animations: hotbar selection": "Animations: hotbar selection",
   "How the selection glides to the slot you pick. Off: it jumps, as in vanilla.": "How the selection glides to the slot you pick. Off: it jumps, as in vanilla.",
   "Animations: inventory and containers": "Animations: inventory and containers",

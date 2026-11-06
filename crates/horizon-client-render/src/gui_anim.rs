@@ -237,6 +237,52 @@ impl Tween {
     }
 }
 
+thread_local! {
+    /// The buttons' hover setting, set by the game each frame (`set_buttons`).
+    static BUTTONS: std::cell::Cell<Setting> = std::cell::Cell::new(Setting {
+        style: Style::Off,
+        motion: Motion::Fade,
+        speed: 1.0,
+    });
+    /// Each button's hover glow by its rectangle (whole GUI pixels), with when it was last
+    /// drawn: buttons have no id that lasts, their place does while a screen is open.
+    static GLOW: std::cell::RefCell<crate::fast_hash::FxHashMap<[i32; 4], (Tween, Instant)>> =
+        std::cell::RefCell::default();
+}
+
+/// The setting [`hover`] eases buttons by, from now on.
+pub fn set_buttons(setting: Setting) {
+    BUTTONS.with(|b| b.set(setting));
+}
+
+/// How highlighted the button at `rect` is drawn (0 plain, 1 highlighted) while the pointer is
+/// over it or not (`hovered`). Off: exactly `hovered`, as vanilla swaps the sprite.
+pub fn hover(rect: [f32; 4], hovered: bool) -> f32 {
+    let setting = BUTTONS.with(std::cell::Cell::get);
+    let target = if hovered { 1.0 } else { 0.0 };
+    if !setting.on() {
+        return target;
+    }
+    let key = rect.map(|v| v.round() as i32);
+    let now = Instant::now();
+    GLOW.with_borrow_mut(|glow| {
+        // Screens come and go: forget buttons not drawn for a second.
+        if glow.len() > 256 {
+            glow.retain(|_, (_, seen)| now.saturating_duration_since(*seen) < Duration::from_secs(1));
+        }
+        let (tween, seen) = glow.entry(key).or_insert_with(|| (Tween::at(target), now));
+        *seen = now;
+        tween.go(target, setting, now);
+        tween.value(now).clamp(0.0, 1.0)
+    })
+}
+
+/// Whether any button is still easing: a screen drawn with it can't be kept.
+pub fn buttons_moving() -> bool {
+    let now = Instant::now();
+    GLOW.with_borrow(|glow| glow.values().any(|(tween, _)| tween.moving(now)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +311,23 @@ mod tests {
         for motion in Motion::ALL {
             assert_eq!(motion.pose(1.0, size), ([0.0, 0.0], 1.0, 1.0), "{motion:?}");
         }
+    }
+
+    #[test]
+    fn a_button_glows_in_and_out_and_off_is_vanilla() {
+        set_buttons(Setting::default());
+        assert_eq!(hover([0.0, 0.0, 200.0, 20.0], true), 1.0);
+        set_buttons(Setting {
+            style: Style::Linear,
+            motion: Motion::Fade,
+            speed: 0.25,
+        });
+        let rect = [10.0, 40.0, 200.0, 20.0];
+        assert_eq!(hover(rect, false), 0.0);
+        let first = hover(rect, true);
+        assert!((0.0..0.5).contains(&first), "{first}");
+        assert!(buttons_moving());
+        set_buttons(Setting::default());
     }
 
     #[test]

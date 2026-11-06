@@ -8852,6 +8852,7 @@ impl Game<'_> {
         batch
     }
     fn hud_layers(&mut self, size: [u32; 2]) -> HudBatch {
+        horizon_client::gui_anim::set_buttons(self.settings.horizon.anim_buttons);
         let mut batch = HudBatch::new(size);
         batch.glint_colour = self.settings.extras.pvp.tweaks.glint_texel();
         // GlobalSettingsUniform's GameTime, for a resource pack's text shader.

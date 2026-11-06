@@ -220,6 +220,24 @@ pub struct LayerRender {
     pub uses_block_light: bool,
     /// Untransformed extents (quad corners or the special model's parts).
     pub extents: Arc<Vec<Vec3>>,
+    /// `matrix` applied to `extents`, as (min, max), worked out once: dropped items ask for
+    /// it every frame (`ItemRenderState::bounding_box`, `posed_bounds`). `None` without extents.
+    pub bounds: Arc<std::sync::OnceLock<Option<(Vec3, Vec3)>>>,
+}
+impl LayerRender {
+    /// `matrix` applied to `extents`, as (min, max).
+    fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        *self.bounds.get_or_init(|| {
+            let mut lo = Vec3::splat(f32::INFINITY);
+            let mut hi = Vec3::splat(f32::NEG_INFINITY);
+            for p in self.extents.iter() {
+                let q = self.matrix.transform_point3(*p);
+                lo = lo.min(q);
+                hi = hi.max(q);
+            }
+            (lo.x <= hi.x).then_some((lo, hi))
+        })
+    }
 }
 /// `ItemStackRenderState`.
 #[derive(Clone, Debug)]
@@ -249,12 +267,9 @@ impl ItemRenderState {
     pub fn bounding_box(&self) -> (Vec3, Vec3) {
         let mut lo = Vec3::splat(f32::INFINITY);
         let mut hi = Vec3::splat(f32::NEG_INFINITY);
-        for layer in &self.layers {
-            for p in layer.extents.iter() {
-                let q = layer.matrix.transform_point3(*p);
-                lo = lo.min(q);
-                hi = hi.max(q);
-            }
+        for (l, h) in self.layers.iter().filter_map(LayerRender::bounds) {
+            lo = lo.min(l);
+            hi = hi.max(h);
         }
         if lo.x > hi.x {
             (Vec3::ZERO, Vec3::ZERO)
@@ -266,13 +281,19 @@ impl ItemRenderState {
     /// Used for dropped-item occlusion because its collision box omits the
     /// render bob, model size, and copies in a stacked item cluster.
     pub fn posed_bounds(&self, poses: &[Mat4]) -> Option<(Vec3, Vec3)> {
+        // Each layer's box under the pose: its eight corners, not every extent. The same box
+        // when the pose only moves it; a little larger when it turns, never smaller.
         let mut lo = Vec3::splat(f32::INFINITY);
         let mut hi = Vec3::splat(f32::NEG_INFINITY);
         for &pose in poses {
-            for layer in &self.layers {
-                let transform = pose * layer.matrix;
-                for &point in layer.extents.iter() {
-                    let point = transform.transform_point3(point);
+            for (l, h) in self.layers.iter().filter_map(LayerRender::bounds) {
+                for i in 0..8 {
+                    let corner = Vec3::new(
+                        if i & 1 == 0 { l.x } else { h.x },
+                        if i & 2 == 0 { l.y } else { h.y },
+                        if i & 4 == 0 { l.z } else { h.z },
+                    );
+                    let point = pose.transform_point3(corner);
                     if !point.is_finite() {
                         return None;
                     }
@@ -681,11 +702,11 @@ pub struct ItemRenderer {
     pub models: ItemModels,
     library: Arc<ModelLibrary>,
     sprites: FileSprites,
-    baked: Mutex<HashMap<String, Arc<BakedItemModel>>>,
+    baked: Mutex<rustc_hash::FxHashMap<String, Arc<BakedItemModel>>>,
     /// Items that resolve alike every time (`ItemModels::resolves_alike`): each display's state,
     /// so what many item displays and armor stands hold isn't worked out each frame.
     alike: Mutex<rustc_hash::FxHashMap<String, Option<Vec<ItemRenderState>>>>,
-    extents: Mutex<HashMap<String, Arc<Vec<Vec3>>>>,
+    extents: Mutex<rustc_hash::FxHashMap<String, Arc<Vec<Vec3>>>>,
     /// GUI items already drawn: the HUD vertices of a static item at a GUI position
     /// (`gui::draw`), which are the same every frame it stays there.
     pub(crate) gui_drawn: Mutex<HashMap<gui::DrawnKey, Arc<[crate::hud::HudVertex]>>>,
@@ -1014,6 +1035,7 @@ impl ItemRenderer {
                     uses_block_light: baked.uses_block_light,
                     particle: sprite_name(&baked.particle.sprite).to_owned(),
                     extents,
+                    bounds: Arc::default(),
                 }
             })
             .collect();
@@ -1286,6 +1308,7 @@ mod tests {
                     Vec3::new(-1.0, -0.5, -0.25),
                     Vec3::new(0.5, 1.0, 0.25),
                 ]),
+                bounds: Arc::default(),
             }],
             oversized_in_gui: false,
             animated: false,

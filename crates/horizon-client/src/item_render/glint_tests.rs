@@ -92,6 +92,7 @@ fn state(sprite: &str, foil: FoilType, display: DisplayContext) -> ItemRenderSta
             particle: sprite.into(),
             uses_block_light: false,
             extents: Arc::new(vec![]),
+            bounds: Arc::default(),
         }],
         oversized_in_gui: false,
         animated: false,

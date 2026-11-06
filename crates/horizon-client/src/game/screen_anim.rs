@@ -208,7 +208,13 @@ impl Game<'_> {
         let now = Instant::now();
         let inventory = matches!(self.screen, Screen::Inventory | Screen::Creative);
         let closing = !inventory && g.anim_containers.on() && self.screen_anim.moving(now);
-        let (name, from, alpha) = if g.picture_world && self.remote.as_ref().is_some_and(|r| r.level_load.is_active()) {
+        // Joining a world (a server's, or single player's own) until the player is in it, and
+        // while its terrain loads after a dimension change.
+        let joining = self
+            .remote
+            .as_ref()
+            .is_some_and(|r| self.player.is_none() || r.level_load.is_active());
+        let (name, from, alpha) = if g.picture_world && joining {
             ("world", 0, 1.0)
         } else if g.picture_inventory && (inventory || closing) {
             let alpha = if g.anim_containers.on() {

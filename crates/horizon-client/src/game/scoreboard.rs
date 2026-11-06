@@ -326,7 +326,8 @@ impl Game<'_> {
                 let tags = self.tags_of(t);
                 for (tag, negated) in &s.tags {
                     let has = if tag.is_empty() {
-                        !tags.is_empty()
+                        // EntitySelectorOptions' empty-name predicate (lambda$bootStrap$43).
+                        tags.is_empty()
                     } else {
                         tags.contains(tag)
                     };
@@ -821,18 +822,41 @@ impl Game<'_> {
             self.flush_skin_slots();
         }
         let key = self.screen == super::Screen::Playing && self.keys.held(Action::Playerlist);
-        // tab_list::visible needs the key: on a server's list of hundreds, no
-        // list is built for the frames it does not show.
-        if !key && self.remote.is_some() {
-            self.remote_tab_hidden();
-            self.tab_list.set_visible(false);
+        let count = self.remote.as_ref().map_or_else(
+            || {
+                1 + self
+                    .lan
+                    .as_ref()
+                    .map_or(0, |h| h.hub.guests.iter().filter(|g| g.placed).count())
+            },
+            |r| r.listed_player_count(),
+        );
+        let has_objective = self.score.board.display_objective(sb::SLOT_LIST).is_some();
+        let shown = tab_list::visible(
+            // `Hud.extractRenderState` draws the list inside `if (!isHidden)`.
+            !self.ui.hide_gui,
+            key,
+            self.has_singleplayer_server(),
+            count,
+            has_objective,
+        );
+        let changed = self.tab_list.set_visible(shown);
+        // On a server's list of hundreds, no list is built for the frames it does not show.
+        if !tab_players_needed(shown, changed) {
             self.tab_frame.painted.forget();
+            if self.remote.is_some() {
+                self.remote_tab_hidden();
+            } else {
+                // World skins still need download polling and atlas residency checks.
+                self.update_remote_skins();
+                self.publish_tab_object_skins();
+            }
             return;
         }
         // Nothing the list shows moves faster than a tick: frames between
         // ticks draw the last layout, whose faces held their slots for the tick.
         let stamp = TickFrame::stamp(self.ticks, batch);
-        if self.tab_frame.painted.replay(batch, &self.gui.atlas, stamp) {
+        if shown && !changed && self.tab_frame.painted.replay(batch, &self.gui.atlas, stamp) {
             self.remote_tab_hidden();
             return;
         }
@@ -857,14 +881,7 @@ impl Game<'_> {
                 (players, true, upside_down)
             }
         };
-        let has_objective = self.score.board.display_objective(sb::SLOT_LIST).is_some();
-        let shown = tab_list::visible(
-            key,
-            self.has_singleplayer_server(),
-            players.len(),
-            has_objective,
-        );
-        if self.tab_list.set_visible(shown) {
+        if changed {
             // PlayerTabOverlay.setVisible: the names, said as the list comes up.
             self.say_system_now(&tab_list::narration(&players, &self.score.board));
         }
@@ -873,11 +890,12 @@ impl Game<'_> {
             return;
         }
         // The faces of the players the list shows.
-        let faces: std::collections::HashSet<u128> =
-            tab_list::sorted_players(&players, &self.score.board)
-                .iter()
-                .map(|p| p.uuid)
-                .collect();
+        let faces: std::collections::HashSet<u128> = self
+            .tab_list
+            .displayed_ids(&players, &self.score.board)
+            .iter()
+            .copied()
+            .collect();
         for p in players.iter_mut().filter(|p| faces.contains(&p.uuid)) {
             p.skin = self.face_skin(p.uuid, &p.skin);
         }
@@ -966,6 +984,25 @@ impl TickFrame {
 #[derive(Default)]
 pub(super) struct TabFrame {
     painted: TickFrame,
+}
+
+fn tab_players_needed(shown: bool, changed: bool) -> bool {
+    shown || changed
+}
+
+#[test]
+fn hidden_tab_skips_players_except_for_visibility_narration() {
+    use horizon_client::tab_list;
+    for count in [1, 150, 1000] {
+        let shown = tab_list::visible(true, false, false, count, false);
+        assert!(!tab_players_needed(shown, false));
+        assert!(
+            tab_players_needed(shown, true),
+            "closing narration needs names"
+        );
+        let shown = tab_list::visible(true, true, false, count, false);
+        assert!(tab_players_needed(shown, false));
+    }
 }
 
 /// The host and guests that have entered the world, rebuilt from live state.
@@ -1079,7 +1116,7 @@ mod tab_list_tests {
         let mut guests = vec![guest(2, "Alex")];
         let players = local_tab_players(me.clone(), &guests);
         assert_eq!(players.as_slice(), std::slice::from_ref(&me));
-        assert!(!tab_list::visible(true, true, players.len(), false));
+        assert!(!tab_list::visible(true, true, true, players.len(), false));
 
         guests[0].placed = true;
         let players = local_tab_players(me.clone(), &guests);
@@ -1087,14 +1124,18 @@ mod tab_list_tests {
         assert_eq!(players[0], me);
         assert_eq!(players[1].uuid, 2);
         assert_eq!(players[1].name, "Alex");
-        assert!(tab_list::visible(true, true, players.len(), false));
-        assert!(!tab_list::visible(false, true, players.len(), false));
+        assert!(tab_list::visible(true, true, true, players.len(), false));
+        assert!(!tab_list::visible(true, false, true, players.len(), false));
 
         guests.clear();
         let players = local_tab_players(me, &guests);
         assert_eq!(players.len(), 1);
-        assert!(!tab_list::visible(true, true, players.len(), false));
-        assert!(tab_list::visible(true, true, players.len(), true));
+        assert!(!tab_list::visible(true, true, true, players.len(), false));
+        assert!(tab_list::visible(true, true, true, players.len(), true));
+        // F1 (`Hud.isHidden`) takes the list away: `extractRenderState` draws
+        // it inside `if (!isHidden)`, the key and the objective aside.
+        assert!(!tab_list::visible(false, true, true, players.len(), true));
+        assert!(!tab_list::visible(false, true, false, 2, false));
     }
 
     #[test]
@@ -1208,3 +1249,6 @@ mod team_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod empty_tag_tests;

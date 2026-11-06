@@ -174,6 +174,13 @@ impl Game<'_> {
                     .map(|(tag, bytes)| json!([tag, mb(bytes.max(0) as u64)]))
                     .collect::<Vec<_>>()
             }),
+            // And how many allocations each made since the start (`heap_census::made`).
+            "allocations_by_tag": horizon_threads::HEAP_CENSUS.then(|| {
+                horizon_threads::heap_census::made()
+                    .into_iter()
+                    .map(|(tag, count)| json!([tag, count]))
+                    .collect::<Vec<_>>()
+            }),
         })
     }
 }

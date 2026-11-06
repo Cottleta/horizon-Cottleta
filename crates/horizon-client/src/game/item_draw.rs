@@ -367,9 +367,11 @@ impl Game<'_> {
                 .as_ref()
                 .is_none_or(|c| c.rules.global.use_glint);
             if !glint.vanilla && (gui || !pack_keeps) {
-                for layer in &mut state.layers {
+                let mut layers = state.layers.to_vec();
+                for layer in &mut layers {
                     layer.foil = horizon_assets::item_model::FoilType::None;
                 }
+                state.layers = layers.into();
             }
             if gui && !glint.is_empty() {
                 state.cit_glint = Some(glint);

@@ -243,7 +243,9 @@ impl LayerRender {
 #[derive(Clone, Debug)]
 pub struct ItemRenderState {
     pub display: DisplayContext,
-    pub layers: Vec<LayerRender>,
+    /// Shared with the copies a state is resolved into each frame: cloning one is a count, not a
+    /// copy of every layer.
+    pub layers: Arc<[LayerRender]>,
     pub oversized_in_gui: bool,
     pub animated: bool,
     /// The OptiFine CIT glint layers the stack draws in the GUI (`cit_glint`).
@@ -313,7 +315,7 @@ impl ItemRenderState {
         pose: Mat4,
         sink: &mut dyn ItemSink,
     ) {
-        for layer in &self.layers {
+        for layer in self.layers.iter() {
             let m = pose * layer.matrix;
             match &layer.geometry {
                 LayerGeometry::Quads(baked) => {
@@ -355,7 +357,7 @@ impl ItemRenderState {
             Direction::Down,
             Direction::North,
         ];
-        for layer in &self.layers {
+        for layer in self.layers.iter() {
             let LayerGeometry::Quads(baked) = &layer.geometry else {
                 return false;
             };
@@ -373,7 +375,7 @@ impl ItemRenderState {
                 return false;
             }
         }
-        for layer in &self.layers {
+        for layer in self.layers.iter() {
             let LayerGeometry::Quads(baked) = &layer.geometry else {
                 continue;
             };
@@ -1309,7 +1311,7 @@ mod tests {
                     Vec3::new(0.5, 1.0, 0.25),
                 ]),
                 bounds: Arc::default(),
-            }],
+            }].into(),
             oversized_in_gui: false,
             animated: false,
             cit_glint: None,
@@ -1529,7 +1531,7 @@ mod tests {
         // Each sprite its own rect, so a run drawn with another's shows.
         let mut sprites: HashMap<String, Rect> = HashMap::new();
         for (_, state) in &states {
-            for layer in &state.layers {
+            for layer in state.layers.iter() {
                 if let LayerGeometry::Quads(baked) = &layer.geometry {
                     for q in &baked.quads {
                         let n = sprites.len() as f32;

@@ -22,6 +22,9 @@ const UNTAGGED: u32 = 0;
 const NONE: u32 = u32::MAX;
 
 static LIVE: [AtomicIsize; TAGS] = [const { AtomicIsize::new(0) }; TAGS];
+/// Allocations and growths made under each tag since the start: what a frame allocates, from
+/// two readings around it.
+static MADE: [AtomicUsize; TAGS] = [const { AtomicUsize::new(0) }; TAGS];
 static NAME_PTR: [AtomicPtr<u8>; TAGS] = [const { AtomicPtr::new(std::ptr::null_mut()) }; TAGS];
 static NAME_LEN: [AtomicUsize; TAGS] = [const { AtomicUsize::new(0) }; TAGS];
 /// The next free slot; slot 0 is [`UNTAGGED`].
@@ -178,6 +181,21 @@ pub fn census() -> Vec<(&'static str, isize)> {
     by_name
 }
 
+/// Allocations made so far by tag, most first.
+pub fn made() -> Vec<(&'static str, usize)> {
+    let mut by_name: Vec<(&'static str, usize)> = Vec::new();
+    for i in 0..NEXT.load(Relaxed).min(TAGS) {
+        let count = MADE[i].load(Relaxed);
+        let name = slot_name(i as u32).unwrap_or("untagged");
+        match by_name.iter_mut().find(|(n, _)| *n == name) {
+            Some(entry) => entry.1 += count,
+            None => by_name.push((name, count)),
+        }
+    }
+    by_name.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    by_name
+}
+
 /// mimalloc with a tag in front of each block (see the module).
 pub struct CensusAllocator;
 
@@ -201,6 +219,7 @@ unsafe impl GlobalAlloc for CensusAllocator {
         }
         let tag = current();
         LIVE[tag as usize].fetch_add(layout.size() as isize, Relaxed);
+        MADE[tag as usize].fetch_add(1, Relaxed);
         // SAFETY: `h` bytes precede the caller's block inside the allocation.
         unsafe {
             let block = base.add(h);
@@ -231,6 +250,7 @@ unsafe impl GlobalAlloc for CensusAllocator {
                 return base;
             }
             LIVE[tag as usize].fetch_add(new_size as isize - layout.size() as isize, Relaxed);
+            MADE[tag as usize].fetch_add(1, Relaxed);
             base.add(h)
         }
     }

@@ -93,7 +93,7 @@ fn state(sprite: &str, foil: FoilType, display: DisplayContext) -> ItemRenderSta
             uses_block_light: false,
             extents: Arc::new(vec![]),
             bounds: Arc::default(),
-        }],
+        }].into(),
         oversized_in_gui: false,
         animated: false,
         cit_glint: None,

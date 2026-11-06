@@ -105,7 +105,45 @@ pub(super) fn loading_picture(
     Some(horizon_client::screen_picture::Draw {
         name: name.to_owned(),
         alpha: 1.0,
+        at: None,
+        rect: None,
     })
+}
+
+/// The quads from `from` drawn from a container's own texture (`gui/container/...`, the panel
+/// with its grid of slots) made clear: the first one's vertex and their box in GUI pixels.
+fn take_panel(
+    hud: &mut HudBatch,
+    atlas: &horizon_client::hud::HudAtlas,
+    from: usize,
+) -> Option<(usize, [f32; 4])> {
+    let panels: Vec<[f32; 4]> = atlas
+        .sprites
+        .iter()
+        .filter(|(name, _)| name.starts_with("gui/container/"))
+        .map(|(_, r)| [r.u0, r.v0, r.u1, r.v1])
+        .collect();
+    let from = from.min(hud.vertices.len());
+    let (mut first, mut lo, mut hi) = (None, [f32::MAX; 2], [f32::MIN; 2]);
+    for (i, quad) in hud.vertices[from..].chunks_mut(6).enumerate() {
+        let n = quad.len() as f32;
+        let uv = quad.iter().fold([0.0f32; 2], |a, v| [a[0] + v.uv[0] / n, a[1] + v.uv[1] / n]);
+        let panel = panels
+            .iter()
+            .any(|r| uv[0] >= r[0] && uv[0] <= r[2] && uv[1] >= r[1] && uv[1] <= r[3]);
+        if !panel {
+            continue;
+        }
+        first.get_or_insert(from + i * 6);
+        for v in quad {
+            for a in 0..2 {
+                lo[a] = lo[a].min(v.pos[a]);
+                hi[a] = hi[a].max(v.pos[a]);
+            }
+            v.color &= 0x00FF_FFFF;
+        }
+    }
+    Some((first?, [lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]]))
 }
 
 /// The quads from `from` that cover the whole screen (a screen's darkened or filled
@@ -214,25 +252,35 @@ impl Game<'_> {
             .remote
             .as_ref()
             .is_some_and(|r| self.player.is_none() || r.level_load.is_active());
-        let (name, from, alpha) = if g.picture_world && joining {
-            ("world", 0, 1.0)
-        } else if g.picture_inventory && (inventory || closing) {
-            let alpha = if g.anim_containers.on() {
-                self.screen_anim.progress(now)
-            } else {
-                1.0
-            };
-            ("inventory", hud.blur_at as usize, alpha)
-        } else {
-            return None;
-        };
-        if !renderer.has_picture(name) {
+        if g.picture_world && joining {
+            if !renderer.has_picture("world") {
+                return None;
+            }
+            clear_backdrops(hud, 0);
+            return Some(horizon_client::screen_picture::Draw {
+                name: "world".to_owned(),
+                alpha: 1.0,
+                at: None,
+                rect: None,
+            });
+        }
+        if !(g.picture_inventory && (inventory || closing) && renderer.has_picture("inventory")) {
             return None;
         }
-        clear_backdrops(hud, from);
+        // In place of the panel's own texture (`gui/container/...`): the dark backdrop around
+        // it, the slots' highlights and the items stay.
+        let (first, rect) = take_panel(hud, &self.gui.atlas, hud.blur_at as usize)?;
+        let alpha = if g.anim_containers.on() {
+            self.screen_anim.progress(now)
+        } else {
+            1.0
+        };
+        let s = hud.scale;
         Some(horizon_client::screen_picture::Draw {
-            name: name.to_owned(),
+            name: "inventory".to_owned(),
             alpha,
+            at: Some(first as u32),
+            rect: Some([rect[0] * s, rect[1] * s, rect[2] * s, rect[3] * s]),
         })
     }
     /// Which menu page is open: the screen, the options page and the title screen's mode.

@@ -3,11 +3,15 @@
 //! between the game's HUD and the open screen (`HudBatch::blur_at`).
 use std::collections::HashMap;
 
-/// A picture to draw this frame: its name, how opaque, and the HUD vertex it goes under.
+/// A picture to draw this frame: its name and how opaque, where it goes in the HUD's order (the
+/// vertex it goes under; None: under the open screen), and the window pixels it fills (None: the
+/// whole window).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Draw {
     pub name: String,
     pub alpha: f32,
+    pub at: Option<u32>,
+    pub rect: Option<[f32; 4]>,
 }
 
 struct Loaded {
@@ -215,7 +219,15 @@ impl ScreenPictures {
         let Some(picture) = self.pictures.get_mut(&draw.name) else {
             return;
         };
-        let [u0, v0, du, dv] = cover(picture.size, size);
+        let [x, y, w, h] = draw
+            .rect
+            .unwrap_or([0.0, 0.0, size[0] as f32, size[1] as f32]);
+        let (x, y) = (x.max(0.0), y.max(0.0));
+        let (w, h) = (w.min(size[0] as f32 - x), h.min(size[1] as f32 - y));
+        if w < 1.0 || h < 1.0 {
+            return;
+        }
+        let [u0, v0, du, dv] = cover(picture.size, [w as u32, h as u32]);
         let params = [u0, v0, du, dv, draw.alpha.clamp(0.0, 1.0)];
         if picture.last != Some(params) {
             let mut bytes = [0f32; 8];
@@ -236,6 +248,7 @@ impl ScreenPictures {
             })],
             ..Default::default()
         });
+        pass.set_viewport(x, y, w, h, 0.0, 1.0);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &picture.group, &[]);
         pass.draw(0..3, 0..1);

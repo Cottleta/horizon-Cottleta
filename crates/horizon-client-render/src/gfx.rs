@@ -11355,41 +11355,45 @@ impl Renderer {
         } else if let Some(blur) = &mut self.menu_blur {
             blur.release();
         }
-        // The player's picture under the screen: after the HUD drawn so far, or over the whole
-        // frame's start when there is no blur (the screen's vertices then still follow it).
-        let picture_at = frame.hud.blur_at.min(frame.hud.vertices.len() as u32);
-        if let (Some(draw), Some(pictures)) = (&frame.picture, self.pictures.as_mut()) {
-            if menu_blur.is_none() && picture_at > 0 {
+        // The player's picture: at its own HUD vertex (`Draw::at`, the panel it replaces) or under
+        // the open screen (`blur_at`). The HUD up to it is drawn first, the rest after.
+        let total = frame.hud.vertices.len() as u32;
+        let picture = frame
+            .picture
+            .as_ref()
+            .filter(|_| self.pictures.is_some());
+        let mut drawn = blur_at;
+        if let Some(draw) = picture {
+            let at = draw.at.unwrap_or(frame.hud.blur_at).clamp(drawn, total);
+            if at > drawn {
                 self.hud.draw_range(
                     encoder,
                     view_target,
                     &self.depth,
                     frame.hud,
                     [self.config.width, self.config.height],
-                    0..picture_at,
+                    drawn..at,
                     timing.as_mut(),
                 );
+                drawn = at;
             }
-            pictures.draw(
-                &self.queue,
-                encoder,
-                view_target,
-                [self.config.width, self.config.height],
-                draw,
-            );
+            if let Some(pictures) = self.pictures.as_mut() {
+                pictures.draw(
+                    &self.queue,
+                    encoder,
+                    view_target,
+                    [self.config.width, self.config.height],
+                    draw,
+                );
+            }
         }
-        let rest_at = if frame.picture.is_some() && self.pictures.is_some() && menu_blur.is_none() {
-            picture_at
-        } else {
-            blur_at
-        };
         self.hud.draw_range(
             encoder,
             view_target,
             &self.depth,
             frame.hud,
             [self.config.width, self.config.height],
-            rest_at..frame.hud.vertices.len() as u32,
+            drawn..total,
             timing.as_mut(),
         );
         if overlay.real {

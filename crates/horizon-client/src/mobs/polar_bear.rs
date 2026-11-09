@@ -120,7 +120,7 @@ pub fn check_and_perform_attack(
     t: &TargetInfo,
     cx: &mut Cx,
 ) {
-    if *until_attack <= 0 && m.within_melee_range(t) && m.sees(cx.w, who) {
+    if *until_attack <= 0 && m.within_melee_range(cx.w, t) && m.sees(cx.w, who) {
         *until_attack = cooldown;
         super::ai::do_hurt_target(m, who, cx);
         set_standing(m, false);
@@ -201,7 +201,7 @@ pub fn forgive_dead_player(m: &mut Mob) {
 fn stop_being_angry(m: &mut Mob) {
     m.ai.last_hurt_by = None;
     m.ai.target = None;
-    m.extra.anger = 0;
+    super::neutral_anger::stop(m);
     m.extra.flag2 = false;
 }
 

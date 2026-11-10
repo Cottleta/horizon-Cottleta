@@ -701,14 +701,34 @@ fn button_with_room(
     }
     crate::widgets::narratable(|| narration([x, y, w, h]).hovered(hover || focused));
     crate::widgets::widget_cursor(hover, active);
+    // Cottleta's Settings may ease the highlight in and out (`gui_anim::hover`).
+    let glow = if active {
+        crate::gui_anim::hover([x, y, w, h], hover || focused)
+    } else {
+        0.0
+    };
     let sprite = if !active {
         "gui/sprites/widget/button_disabled"
-    } else if hover || focused {
+    } else if glow >= 1.0 {
         "gui/sprites/widget/button_highlighted"
     } else {
         "gui/sprites/widget/button"
     };
     nine_slice(batch, atlas, sprite, x, y, w, h, u32::MAX);
+    if active && glow > 0.0 && glow < 1.0 {
+        let alpha = (glow * 255.0).round() as u32;
+        let color = 0x00FF_FFFF | alpha << 24;
+        nine_slice(
+            batch,
+            atlas,
+            "gui/sprites/widget/button_highlighted",
+            x,
+            y,
+            w,
+            h,
+            color,
+        );
+    }
     let color = if active {
         rgba(255, 255, 255, 255)
     } else {

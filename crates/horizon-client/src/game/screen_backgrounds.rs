@@ -112,6 +112,15 @@ impl Game<'_> {
             || self.screen_blur_requested.get();
         let radius = self.settings.menu_blur as f32;
         let mut radius = (blurred && radius >= 1.0).then_some(radius);
+        // Cottleta's Settings may set the containers' and the pause menu's backdrop.
+        if let Some(backdrop) = self.screen_backdrop() {
+            use horizon_client::gui_anim::BackdropMode;
+            match backdrop.mode {
+                BackdropMode::Vanilla => {}
+                BackdropMode::Off | BackdropMode::Fade => radius = None,
+                BackdropMode::Blur => radius = Some(backdrop.blur_radius()),
+            }
+        }
         self.native_menu_background(&mut radius);
         radius.filter(|r| r.is_finite() && (1.0..=64.0).contains(r))
     }

@@ -357,6 +357,12 @@ impl Game<'_> {
             match e {
                 Event::ButtonClick => self.audio.play_button_click(),
                 Event::AutoTest => self.start_auto_test(),
+                Event::OpenPictures => {
+                    let dir = super::screen_anim::pictures_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    super::packs::open_folder(&dir);
+                    self.poll_pictures(true);
+                }
                 Event::Changed => {
                     self.settings.save(&Self::options_path());
                     self.apply_settings();

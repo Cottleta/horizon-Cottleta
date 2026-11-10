@@ -869,6 +869,24 @@ pub struct Graphics {
     pub texture_budget_mib: u32,
     /// The HUD rebuilds 20 times a second until a key, a click or the wheel (`hud_rate`).
     pub dynamic_hud: bool,
+    /// Cottleta's Settings: how the inventory and containers open and close (`gui_anim`).
+    pub anim_containers: crate::gui_anim::Setting,
+    /// Cottleta's Settings: the hotbar's selection gliding between slots.
+    pub anim_hotbar: crate::gui_anim::Setting,
+    /// Cottleta's Settings: buttons easing their highlight in and out.
+    pub anim_buttons: crate::gui_anim::Setting,
+    /// Cottleta's Settings: menu pages easing in as they open.
+    pub anim_menus: crate::gui_anim::Setting,
+    /// Cottleta's Settings: the player's own pictures (`pictures/` in the game folder) as the
+    /// game's loading screen, the world's loading screen, the inventory's background and the
+    /// main menu's background. Each may be a video.
+    pub picture_loading: bool,
+    pub picture_world: bool,
+    pub picture_inventory: bool,
+    pub picture_menu: bool,
+    /// Cottleta's Settings: what containers and the pause menu put over the world behind them.
+    pub backdrop_containers: crate::gui_anim::Backdrop,
+    pub backdrop_pause: crate::gui_anim::Backdrop,
     /// Auto Settings' frame rate target, 0 until one is picked.
     pub auto_target_fps: u32,
     /// Auto Settings' FPS Target rows are dropped down: not saved.
@@ -955,6 +973,16 @@ impl Default for Graphics {
             lod_distance: 0,
             far_detail: FarDetail::Full,
             far_shape: FarShape::Blocks,
+            anim_containers: Default::default(),
+            anim_hotbar: Default::default(),
+            anim_buttons: Default::default(),
+            anim_menus: Default::default(),
+            picture_loading: false,
+            picture_world: false,
+            picture_inventory: false,
+            picture_menu: false,
+            backdrop_containers: Default::default(),
+            backdrop_pause: Default::default(),
             blue_map: crate::bluemap::Settings::default(),
             cave_culling: true,
             gpu_culling: GpuCullingMode::Off,
@@ -1147,6 +1175,18 @@ impl Graphics {
                     g.texture_budget_mib = number(g.texture_budget_mib).min(16384);
                 }
                 "dynamicHud" => g.dynamic_hud = flag(g.dynamic_hud),
+                "animContainers" => g.anim_containers = crate::gui_anim::Setting::parse(value),
+                "animHotbar" => g.anim_hotbar = crate::gui_anim::Setting::parse(value),
+                "animButtons" => g.anim_buttons = crate::gui_anim::Setting::parse(value),
+                "animMenus" => g.anim_menus = crate::gui_anim::Setting::parse(value),
+                "pictureLoading" => g.picture_loading = flag(g.picture_loading),
+                "pictureWorld" => g.picture_world = flag(g.picture_world),
+                "pictureInventory" => g.picture_inventory = flag(g.picture_inventory),
+                "pictureMenu" => g.picture_menu = flag(g.picture_menu),
+                "backdropContainers" => {
+                    g.backdrop_containers = crate::gui_anim::Backdrop::parse(value)
+                }
+                "backdropPause" => g.backdrop_pause = crate::gui_anim::Backdrop::parse(value),
                 "autoTargetFps" => g.auto_target_fps = number(g.auto_target_fps),
                 "sky" => g.sky = flag(g.sky),
                 "fog" => g.fog = flag(g.fog),
@@ -1280,6 +1320,23 @@ impl Graphics {
         if let Some(driver) = &self.hdr_failed_start {
             text += &format!("hdrFailedStart:{driver}\n");
         }
+        // This build's own, after the rest: upstream's list above changes often.
+        text += &format!("animContainers:{}\n", self.anim_containers.to_text());
+        text += &format!("animHotbar:{}\n", self.anim_hotbar.to_text());
+        text += &format!("animButtons:{}\n", self.anim_buttons.to_text());
+        text += &format!("animMenus:{}\n", self.anim_menus.to_text());
+        text += &format!(
+            "pictureLoading:{}\npictureWorld:{}\npictureInventory:{}\npictureMenu:{}\n",
+            bool_text(self.picture_loading),
+            bool_text(self.picture_world),
+            bool_text(self.picture_inventory),
+            bool_text(self.picture_menu)
+        );
+        text += &format!(
+            "backdropContainers:{}\nbackdropPause:{}\n",
+            self.backdrop_containers.to_text(),
+            self.backdrop_pause.to_text()
+        );
         text += &self.blue_map.serialize();
         text
     }
@@ -1399,7 +1456,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hz-first-start-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let _ = fs::remove_file(dir.join(FILE));
-        assert_eq!(Graphics::load(&dir).entity_culling, EntityCullingMode::Synchronous);
+        assert_eq!(
+            Graphics::load(&dir).entity_culling,
+            EntityCullingMode::Synchronous
+        );
         fs::write(dir.join(FILE), "fog:false\n").unwrap();
         assert_eq!(Graphics::load(&dir).entity_culling, EntityCullingMode::Off);
         fs::remove_dir_all(&dir).unwrap();
@@ -1608,6 +1668,16 @@ mod tests {
             lod_distance: 256,
             far_detail: FarDetail::Reduced,
             far_shape: FarShape::Blocks,
+            anim_containers: Default::default(),
+            anim_hotbar: Default::default(),
+            anim_buttons: Default::default(),
+            anim_menus: Default::default(),
+            picture_loading: false,
+            picture_world: false,
+            picture_inventory: false,
+            picture_menu: false,
+            backdrop_containers: Default::default(),
+            backdrop_pause: Default::default(),
             blue_map: crate::bluemap::Settings {
                 radius: 40,
                 auto_detect: true,

@@ -250,6 +250,7 @@ pub(super) fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         chunk_fade: 0.0,
         post_effects: horizon_client::post_chain::Request::none(),
         menu_blur: None,
+        pictures: Vec::new(),
     }
 }
 

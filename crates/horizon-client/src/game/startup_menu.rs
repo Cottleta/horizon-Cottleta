@@ -550,6 +550,11 @@ impl Loading {
                     self.save_menu_settings();
                     self.apply_menu_settings();
                 }
+                Event::OpenPictures => {
+                    let dir = super::screen_anim::pictures_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    super::packs::open_folder(&dir);
+                }
                 // Starts once the game has loaded.
                 Event::AutoTest => {
                     self.menu.options_open = false;
@@ -779,7 +784,9 @@ impl Loading {
             Action::Options => self.open_menu_options(Page::Main),
             Action::AutoSettings => {
                 self.open_menu_options(Page::Graphics);
-                self.menu.options.show_graphics_page(horizon_client::graphics_ui::Page::Auto);
+                self.menu
+                    .options
+                    .show_graphics_page(horizon_client::graphics_ui::Page::Auto);
             }
             Action::Accessibility => self.open_menu_options(Page::Accessibility),
             Action::Language => self.open_menu_options(Page::Language),

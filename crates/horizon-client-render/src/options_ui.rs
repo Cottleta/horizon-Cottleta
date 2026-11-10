@@ -1505,6 +1505,8 @@ pub enum Event {
         entries: Vec<String>,
         chosen: std::collections::BTreeMap<String, horizon_polytone::pack::ConfigValue>,
     },
+    /// Open the player's pictures folder, and load them again (Cottleta's Settings).
+    OpenPictures,
     /// An accepted button press or the release of a slider.
     ButtonClick,
     /// Horizon's own: download the Modrinth hit at this index of the pack

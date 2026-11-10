@@ -7,9 +7,9 @@
 use crate::{
     gfx::EffectiveOutput,
     graphics::{
-        EntityCullingMode, FarDetail, FarShape, FrameGeneration, GpuCullingMode, GraphicsApi, HdrMode,
-        HdrSetup as Setup, LeafCullingMode, Overlay, Pacing, ParticleCullingMode, PresentMode,
-        Preset, Upscaling,
+        EntityCullingMode, FarDetail, FarShape, FrameGeneration, GpuCullingMode, GraphicsApi,
+        HdrMode, HdrSetup as Setup, LeafCullingMode, Overlay, Pacing, ParticleCullingMode,
+        PresentMode, Preset, Upscaling,
     },
     graphics_style::Cost,
     lang,
@@ -48,7 +48,7 @@ impl Page {
     ];
     pub fn name(self) -> &'static str {
         match self {
-            Page::Auto => "Auto Settings",
+            Page::Auto => "Cottleta's Settings",
             Page::General => "General",
             Page::Quality => "Quality",
             Page::Performance => "Performance",
@@ -60,7 +60,7 @@ impl Page {
     /// What the page holds, in the strip while no setting is pointed at.
     pub fn about(self) -> &'static str {
         match self {
-            Page::Auto => "Settings picked for this PC, and your saved ones.",
+            Page::Auto => "This build's own settings: picked for this PC, saved ones and extras.",
             Page::General => "How far you see, the window and the HUD.",
             Page::Quality => "The sky and weather, lighting, textures and the image.",
             Page::Performance => "Chunk loading, culling and power use.",
@@ -105,6 +105,26 @@ pub enum H {
     AutoSave,
     AutoLoad,
     DynamicHud,
+    /// Cottleta's Settings: the inventory and containers' opening and closing.
+    AnimContainerStyle,
+    AnimContainerMotion,
+    AnimContainerSpeed,
+    AnimHotbarStyle,
+    AnimHotbarSpeed,
+    AnimButtonStyle,
+    AnimButtonSpeed,
+    AnimMenuStyle,
+    AnimMenuMotion,
+    AnimMenuSpeed,
+    PictureLoading,
+    PictureWorld,
+    PictureInventory,
+    PictureMenu,
+    PicturesFolder,
+    BackdropContainers,
+    BackdropContainersStrength,
+    BackdropPause,
+    BackdropPauseStrength,
     Sky,
     Fog,
     Weather,
@@ -221,11 +241,6 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                             "Coarse distant terrain in local worlds. Integrated GPUs stop at 128 chunks.",
                         ),
                         h(H::FarDetail, Medium, far),
-                        h(
-                            H::FarShape,
-                            None,
-                            "Slopes join far terrain's cells: no stair steps, softer hills.",
-                        ),
                         h(
                             H::BlueMapAutoDetect,
                             None,
@@ -586,18 +601,11 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                 ),
                 (
                     "Overlay",
-                    vec![
-                        h(
-                            H::Overlay,
-                            None,
-                            "Frame rate and frame times over the game, with a graph.",
-                        ),
-                        h(
-                            H::DynamicHud,
-                            High,
-                            "HUD at 20 FPS until you press a key or click.",
-                        ),
-                    ],
+                    vec![h(
+                        H::Overlay,
+                        None,
+                        "Frame rate and frame times over the game, with a graph.",
+                    )],
                 ),
             ],
         ),
@@ -694,6 +702,146 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                         ),
                         h(H::AutoSave, None, "Keeps the settings as they are now."),
                         h(H::AutoLoad, None, "Goes back to the settings you saved."),
+                    ],
+                ),
+                (
+                    "Extras",
+                    vec![
+                        h(
+                            H::DynamicHud,
+                            High,
+                            "HUD at 20 FPS until you press a key or click.",
+                        ),
+                        h(
+                            H::FarShape,
+                            None,
+                            "Slopes join far terrain's cells: no stair steps, softer hills.",
+                        ),
+                    ],
+                ),
+                (
+                    "Animations: inventory and containers",
+                    vec![
+                        h(
+                            H::AnimContainerStyle,
+                            None,
+                            "How opening and closing eases. Off: they appear at once, as in vanilla.",
+                        ),
+                        h(
+                            H::AnimContainerMotion,
+                            None,
+                            "Where they come from: a fade, a side, or growing from the middle.",
+                        ),
+                        h(
+                            H::AnimContainerSpeed,
+                            None,
+                            "How fast it plays: 1x is a fifth of a second.",
+                        ),
+                    ],
+                ),
+                (
+                    "Animations: hotbar selection",
+                    vec![
+                        h(
+                            H::AnimHotbarStyle,
+                            None,
+                            "How the selection glides to the slot you pick. Off: it jumps, as in vanilla.",
+                        ),
+                        h(
+                            H::AnimHotbarSpeed,
+                            None,
+                            "How fast it plays: 1x is a fifth of a second.",
+                        ),
+                    ],
+                ),
+                (
+                    "Animations: buttons",
+                    vec![
+                        h(
+                            H::AnimButtonStyle,
+                            None,
+                            "The highlight fades in and out under the pointer. Off: it switches at once.",
+                        ),
+                        h(
+                            H::AnimButtonSpeed,
+                            None,
+                            "How fast it plays: 1x is a fifth of a second.",
+                        ),
+                    ],
+                ),
+                (
+                    "Animations: menu pages",
+                    vec![
+                        h(
+                            H::AnimMenuStyle,
+                            None,
+                            "How a menu page eases in as you open it. Off: it appears at once.",
+                        ),
+                        h(
+                            H::AnimMenuMotion,
+                            None,
+                            "Where they come from: a fade, a side, or growing from the middle.",
+                        ),
+                        h(
+                            H::AnimMenuSpeed,
+                            None,
+                            "How fast it plays: 1x is a fifth of a second.",
+                        ),
+                    ],
+                ),
+                (
+                    "Your pictures",
+                    vec![
+                        h(
+                            H::PictureLoading,
+                            None,
+                            "pictures/loading as the game's loading screen.",
+                        ),
+                        h(
+                            H::PictureWorld,
+                            None,
+                            "pictures/world_loading while a world loads.",
+                        ),
+                        h(
+                            H::PictureInventory,
+                            None,
+                            "pictures/inventory in place of the inventory's and containers' panel.",
+                        ),
+                        h(
+                            H::PictureMenu,
+                            None,
+                            "pictures/menu in place of the main menu's panorama.",
+                        ),
+                        h(
+                            H::PicturesFolder,
+                            None,
+                            "Pictures (PNG, JPEG, WebP) or videos (MP4, WebM, GIF; needs FFmpeg).",
+                        ),
+                    ],
+                ),
+                (
+                    "Backdrops",
+                    vec![
+                        h(
+                            H::BackdropContainers,
+                            None,
+                            "Behind the inventory and containers: as vanilla, nothing, darkened or blurred.",
+                        ),
+                        h(
+                            H::BackdropContainersStrength,
+                            None,
+                            "How dark or blurred it is behind them.",
+                        ),
+                        h(
+                            H::BackdropPause,
+                            None,
+                            "Behind the pause menu: as vanilla, nothing, darkened or blurred.",
+                        ),
+                        h(
+                            H::BackdropPauseStrength,
+                            None,
+                            "How dark or blurred it is behind the pause menu.",
+                        ),
                     ],
                 ),
             ],
@@ -880,6 +1028,12 @@ impl H {
             }),
             H::HdrBlackLevel => Some(g.hdr_black_level as f32 / 100.0),
             H::AutoFps => Some(crate::auto_settings::target_position(g.auto_target_fps)),
+            H::AnimContainerSpeed => Some((g.anim_containers.speed - 0.25) / 3.75),
+            H::AnimHotbarSpeed => Some((g.anim_hotbar.speed - 0.25) / 3.75),
+            H::AnimButtonSpeed => Some((g.anim_buttons.speed - 0.25) / 3.75),
+            H::AnimMenuSpeed => Some((g.anim_menus.speed - 0.25) / 3.75),
+            H::BackdropContainersStrength => Some(g.backdrop_containers.strength),
+            H::BackdropPauseStrength => Some(g.backdrop_pause.strength),
             _ => None,
         }
     }
@@ -969,7 +1123,7 @@ impl H {
                 }
                 k => labelled("Upload Budget", lang::tr("%s KiB/frame", &[&k])),
             },
-            H::AutoSettings => Text::literal(lang::get("Auto Settings...")),
+            H::AutoSettings => Text::literal(lang::get("Cottleta's Settings...")),
             H::AutoPerformance => Text::literal(lang::get("Best Performance")),
             H::AutoTarget => Text::literal(lang::get("FPS Target...")),
             H::AutoFps => labelled("Target", format!("{} FPS", crate::auto_settings::target(s))),
@@ -988,6 +1142,31 @@ impl H {
             H::AutoSave => Text::literal(lang::get("Save Current Settings")),
             H::AutoLoad => Text::literal(lang::get("Load Saved Settings")),
             H::DynamicHud => labelled("Dynamic HUD", on_off(g.dynamic_hud)),
+            H::AnimContainerStyle => labelled("Easing", g.anim_containers.style.name()),
+            H::AnimContainerMotion => labelled("Direction", g.anim_containers.motion.name()),
+            H::AnimContainerSpeed => labelled("Speed", format!("{:.2}x", g.anim_containers.speed)),
+            H::AnimHotbarStyle => labelled("Easing", g.anim_hotbar.style.name()),
+            H::AnimHotbarSpeed => labelled("Speed", format!("{:.2}x", g.anim_hotbar.speed)),
+            H::AnimButtonStyle => labelled("Easing", g.anim_buttons.style.name()),
+            H::AnimButtonSpeed => labelled("Speed", format!("{:.2}x", g.anim_buttons.speed)),
+            H::AnimMenuStyle => labelled("Easing", g.anim_menus.style.name()),
+            H::AnimMenuMotion => labelled("Direction", g.anim_menus.motion.name()),
+            H::AnimMenuSpeed => labelled("Speed", format!("{:.2}x", g.anim_menus.speed)),
+            H::PictureLoading => labelled("Loading Screen", on_off(g.picture_loading)),
+            H::PictureWorld => labelled("World Loading", on_off(g.picture_world)),
+            H::PictureInventory => labelled("Inventory Background", on_off(g.picture_inventory)),
+            H::PictureMenu => labelled("Main Menu Background", on_off(g.picture_menu)),
+            H::PicturesFolder => Text::literal(lang::get("Open Pictures Folder")),
+            H::BackdropContainers => labelled("Containers", g.backdrop_containers.mode.name()),
+            H::BackdropContainersStrength => labelled(
+                "Strength",
+                format!("{}%", (g.backdrop_containers.strength * 100.0).round()),
+            ),
+            H::BackdropPause => labelled("Pause Menu", g.backdrop_pause.mode.name()),
+            H::BackdropPauseStrength => labelled(
+                "Strength",
+                format!("{}%", (g.backdrop_pause.strength * 100.0).round()),
+            ),
             H::Sky => labelled("Sky", on_off(g.sky)),
             H::Fog => labelled("Fog", on_off(g.fog)),
             H::Weather => labelled("Weather", on_off(g.weather)),
@@ -1063,6 +1242,24 @@ impl H {
         let g = &mut s.horizon;
         match self {
             H::AutoFps => g.auto_target_fps = crate::auto_settings::target_at(v),
+            H::AnimContainerSpeed => {
+                g.anim_containers.speed = ((0.25 + v.clamp(0.0, 1.0) * 3.75) * 20.0).round() / 20.0;
+            }
+            H::AnimHotbarSpeed => {
+                g.anim_hotbar.speed = ((0.25 + v.clamp(0.0, 1.0) * 3.75) * 20.0).round() / 20.0;
+            }
+            H::AnimButtonSpeed => {
+                g.anim_buttons.speed = ((0.25 + v.clamp(0.0, 1.0) * 3.75) * 20.0).round() / 20.0;
+            }
+            H::AnimMenuSpeed => {
+                g.anim_menus.speed = ((0.25 + v.clamp(0.0, 1.0) * 3.75) * 20.0).round() / 20.0;
+            }
+            H::BackdropContainersStrength => {
+                g.backdrop_containers.strength = (v.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+            }
+            H::BackdropPauseStrength => {
+                g.backdrop_pause.strength = (v.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+            }
             H::ChunkUpdates => g.chunk_updates = (v * 64.0).round() as u32,
             H::EntityCullingPrecheck => g.entity_culling_precheck = (v * 512.0).round() as u32,
             H::UploadBudget => {
@@ -1142,6 +1339,42 @@ impl H {
                 g.cache_copper_golem_statues = !g.cache_copper_golem_statues
             }
             H::DynamicHud => g.dynamic_hud = !g.dynamic_hud,
+            H::PictureLoading => g.picture_loading = !g.picture_loading,
+            H::PictureWorld => g.picture_world = !g.picture_world,
+            H::PictureInventory => g.picture_inventory = !g.picture_inventory,
+            H::PictureMenu => g.picture_menu = !g.picture_menu,
+            H::BackdropContainers => {
+                let b = &mut g.backdrop_containers;
+                b.mode = step(&crate::gui_anim::BackdropMode::ALL, b.mode, back);
+            }
+            H::BackdropPause => {
+                let b = &mut g.backdrop_pause;
+                b.mode = step(&crate::gui_anim::BackdropMode::ALL, b.mode, back);
+            }
+            H::AnimContainerStyle => {
+                let a = &mut g.anim_containers;
+                a.style = step(&crate::gui_anim::Style::ALL, a.style, back);
+            }
+            H::AnimContainerMotion => {
+                let a = &mut g.anim_containers;
+                a.motion = step(&crate::gui_anim::Motion::ALL, a.motion, back);
+            }
+            H::AnimHotbarStyle => {
+                let a = &mut g.anim_hotbar;
+                a.style = step(&crate::gui_anim::Style::ALL, a.style, back);
+            }
+            H::AnimButtonStyle => {
+                let a = &mut g.anim_buttons;
+                a.style = step(&crate::gui_anim::Style::ALL, a.style, back);
+            }
+            H::AnimMenuStyle => {
+                let a = &mut g.anim_menus;
+                a.style = step(&crate::gui_anim::Style::ALL, a.style, back);
+            }
+            H::AnimMenuMotion => {
+                let a = &mut g.anim_menus;
+                a.motion = step(&crate::gui_anim::Motion::ALL, a.motion, back);
+            }
             H::Sky => g.sky = !g.sky,
             H::Fog => g.fog = !g.fog,
             H::Weather => g.weather = !g.weather,
@@ -1290,6 +1523,10 @@ impl Item {
         Some(match self {
             Item::Horizon(H::BlueMapAutoDetect) => g.blue_map.auto_detect,
             Item::Horizon(H::CaveCulling) => g.cave_culling,
+            Item::Horizon(H::PictureLoading) => g.picture_loading,
+            Item::Horizon(H::PictureWorld) => g.picture_world,
+            Item::Horizon(H::PictureInventory) => g.picture_inventory,
+            Item::Horizon(H::PictureMenu) => g.picture_menu,
             Item::Horizon(H::OpaqueIce) => g.opaque_ice,
             Item::Horizon(H::CacheShulkerBoxes) => g.cache_shulker_boxes,
             Item::Horizon(H::CacheSigns) => g.cache_signs,
@@ -1580,6 +1817,51 @@ impl Screen for GraphicsScreen {
                 s.horizon.hdr_peak = 0;
                 s.horizon.hdr_paper_white = 0;
                 vec![Output::Event(Event::Changed)]
+            }
+            Item::Horizon(H::AutoPerformance) => {
+                crate::auto_settings::apply(crate::auto_settings::best_performance(), s);
+                vec![
+                    Output::Event(Event::ButtonClick),
+                    Output::Event(Event::Changed),
+                ]
+            }
+            Item::Horizon(H::AutoTarget) => {
+                s.horizon.auto_target_open = !s.horizon.auto_target_open;
+                vec![Output::Event(Event::ButtonClick)]
+            }
+            Item::Horizon(H::AutoApply) => {
+                let picks = crate::auto_settings::for_target(crate::auto_settings::target(s));
+                crate::auto_settings::apply(picks, s);
+                vec![
+                    Output::Event(Event::ButtonClick),
+                    Output::Event(Event::Changed),
+                ]
+            }
+            Item::Horizon(H::AutoTest) => {
+                vec![
+                    Output::Event(Event::ButtonClick),
+                    Output::Event(Event::AutoTest),
+                ]
+            }
+            Item::Horizon(H::PicturesFolder) => {
+                vec![
+                    Output::Event(Event::ButtonClick),
+                    Output::Event(Event::OpenPictures),
+                ]
+            }
+            Item::Horizon(H::AutoSave) => {
+                crate::auto_settings::save(s);
+                vec![Output::Event(Event::ButtonClick)]
+            }
+            Item::Horizon(H::AutoLoad) => {
+                if crate::auto_settings::load(s) {
+                    vec![
+                        Output::Event(Event::ButtonClick),
+                        Output::Event(Event::Changed),
+                    ]
+                } else {
+                    Vec::new()
+                }
             }
             Item::Horizon(H::HdrCalibrate) => vec![Output::Push(OptionsPage::HdrCalibration)],
             // The list of either kind, as the Shaders page opens it from anywhere.
@@ -2011,8 +2293,6 @@ mod tests {
         assert!(s.extras.dynamic_lights);
         assert_eq!(lights.switch(&s, &NONE), Some(true));
     }
-
-
 
     #[test]
     fn the_wheel_scrolls_and_stops_at_both_ends_without_changing_values() {

@@ -243,9 +243,9 @@ mod stars;
 mod surface_setup;
 use surface_setup::{AdapterChoice, AdapterFailure, open_adapter, pick_adapter, set_up_surface};
 mod off_page;
+mod spare_image;
 pub mod submit;
 mod sunrise_fan;
-mod spare_image;
 mod timing;
 pub mod translucency;
 pub(crate) mod upload;
@@ -1065,6 +1065,9 @@ pub struct Frame<'a> {
     /// `Screen.extractBlurredBackground`: blur the frame by this radius
     /// (`menuBackgroundBlurriness`) before the screen is drawn over it.
     pub menu_blur: Option<f32>,
+    /// Cottleta's Settings: a picture of the player's over the window, under the open
+    /// screen (`HudBatch::blur_at`).
+    pub pictures: Vec<crate::screen_picture::Draw>,
     /// `Options.chunkSectionFadeInTime`, in seconds: how long a section takes to fade in once
     /// uploaded (0 draws it whole at once).
     pub chunk_fade: f32,
@@ -1577,6 +1580,8 @@ pub struct Renderer {
     pub hud: HudRenderer,
     /// Vanilla's menu background blur, made on first use.
     menu_blur: Option<crate::menu_blur::MenuBlur>,
+    /// The player's own pictures (Cottleta's Settings), made on first upload.
+    pictures: Option<crate::screen_picture::ScreenPictures>,
     /// `post_effect` chains, made on first use.
     post_effects: Option<crate::post_chain::PostEffects>,
     /// Where a screenshot's frame is drawn when the swapchain cannot be read back.
@@ -2705,8 +2710,7 @@ fn on_off(on: bool) -> &'static str {
 }
 impl Drop for Renderer {
     /// A frame still on its way to the GPU finishes before the surface goes.
-    fn drop(&mut self) {
-    }
+    fn drop(&mut self) {}
 }
 impl Renderer {
     /// Sections with GPU buffers, for soak tests watching residency.
@@ -5441,6 +5445,7 @@ impl Renderer {
             pack_lava_layers: Vec::new(),
             hud,
             menu_blur: None,
+            pictures: None,
             post_effects: None,
             readback: readback::Readback::default(),
             info,
@@ -5726,6 +5731,28 @@ impl Renderer {
     /// VSync on presents with Fifo, capped to the display's refresh rate in a
     /// window and in fullscreen alike; Horizon's present-mode setting applies
     /// only with VSync off (`window::chosen_present_mode`).
+    /// Keeps `rgba` (`size`) as the player's picture `name` (Cottleta's Settings).
+    pub fn upload_picture(&mut self, name: &str, size: [u32; 2], rgba: &[u8]) {
+        // The HUD's target format: the pictures draw between its parts.
+        let (device, format) = (&self.device, self.output.frame.overlay_format);
+        self.pictures
+            .get_or_insert_with(|| crate::screen_picture::ScreenPictures::new(device, format))
+            .upload(&self.device, &self.queue, name, size, rgba);
+    }
+    /// Forgets the player's picture `name`.
+    pub fn remove_picture(&mut self, name: &str) {
+        if let Some(p) = &mut self.pictures {
+            p.remove(name);
+        }
+    }
+    /// Whether the player's picture `name` is uploaded.
+    pub fn has_picture(&self, name: &str) -> bool {
+        self.pictures.as_ref().is_some_and(|p| p.has(name))
+    }
+    /// When the player's picture `name` was last drawn.
+    pub fn picture_drawn(&self, name: &str) -> Option<std::time::Instant> {
+        self.pictures.as_ref()?.drawn(name)
+    }
     pub fn set_present_mode(&mut self, vsync: bool, mode: crate::graphics::PresentMode) {
         use crate::graphics::PresentMode as P;
         use crate::window::{PresentMode, chosen_present_mode};
@@ -9824,8 +9851,11 @@ impl Renderer {
         // What the entity buffer ends with, after the batch: quads only a native
         // pack's shadow pass draws, and frame generation's made frame's own hand.
         let mut entity_tail = frame.shadow_only.to_vec();
-        let made_hand_vertex = (self.entity_batch.len(frame.additive, frame.hand, frame.see_through)
-            + entity_tail.len()) as i32;
+        let made_hand_vertex =
+            (self
+                .entity_batch
+                .len(frame.additive, frame.hand, frame.see_through)
+                + entity_tail.len()) as i32;
         if fg {
             self.frame_gen
                 .halfway_hand(frame.hand, hand_view, &mut entity_tail);
@@ -9841,7 +9871,9 @@ impl Renderer {
         let additive_quads = (frame.additive.len() / 4) as u32 - self.entity_batch.moved_additive;
         let see_through_quads = (frame.see_through.len() / 4) as u32;
         let shadow_only_quads = (frame.shadow_only.len() / 4) as u32;
-        let entity_vertices = (self.entity_batch.len(frame.additive, frame.hand, frame.see_through)
+        let entity_vertices = (self
+            .entity_batch
+            .len(frame.additive, frame.hand, frame.see_through)
             + entity_tail.len()) as u64;
         // Glowing silhouettes come from the CPU with `parts` (`mobs::gpu_parts::pause`):
         // none are posed past the materials.
@@ -12258,22 +12290,24 @@ impl Renderer {
                 .own_timing
                 .as_mut()
                 .and_then(|t| t.submitted_later(&queue));
-            let after = (culling.is_some() || center.is_some() || timer.is_some() || passes.is_some()).then(|| {
-                Box::new(move || {
-                    if let Some(read) = passes {
-                        read();
-                    }
-                    if let Some(read) = culling {
-                        read();
-                    }
-                    if let Some(read) = center {
-                        read();
-                    }
-                    if let Some(read) = timer {
-                        read();
-                    }
-                }) as submit::AfterSubmit
-            });
+            let after =
+                (culling.is_some() || center.is_some() || timer.is_some() || passes.is_some())
+                    .then(|| {
+                        Box::new(move || {
+                            if let Some(read) = passes {
+                                read();
+                            }
+                            if let Some(read) = culling {
+                                read();
+                            }
+                            if let Some(read) = center {
+                                read();
+                            }
+                            if let Some(read) = timer {
+                                read();
+                            }
+                        }) as submit::AfterSubmit
+                    });
             let job = submit::Job {
                 encoder,
                 surface: surface_frame,
@@ -12785,6 +12819,42 @@ impl Renderer {
         } else if let Some(blur) = &mut self.menu_blur {
             blur.release();
         }
+        // The player's pictures: each at its own HUD vertex (`Draw::at`, the part it replaces) or
+        // under the open screen (`blur_at`), in that order. The HUD up to each is drawn first.
+        let total = frame.hud.vertices.len() as u32;
+        let mut drawn = blur_at;
+        if self.pictures.is_some() && !frame.pictures.is_empty() {
+            let mut order: Vec<_> = frame
+                .pictures
+                .iter()
+                .map(|d| (d.at.unwrap_or(frame.hud.blur_at).clamp(drawn, total), d))
+                .collect();
+            order.sort_by_key(|(at, _)| *at);
+            for (at, draw) in order {
+                if at > drawn {
+                    self.hud.draw_range(
+                        encoder,
+                        hud_target,
+                        coverage.as_ref(),
+                        &self.depth,
+                        frame.hud,
+                        [self.config.width, self.config.height],
+                        drawn..at,
+                        timing.as_mut(),
+                    );
+                    drawn = at;
+                }
+                if let Some(pictures) = self.pictures.as_mut() {
+                    pictures.draw(
+                        &self.queue,
+                        encoder,
+                        hud_target,
+                        [self.config.width, self.config.height],
+                        draw,
+                    );
+                }
+            }
+        }
         self.hud.draw_range(
             encoder,
             hud_target,
@@ -12792,7 +12862,7 @@ impl Renderer {
             &self.depth,
             frame.hud,
             [self.config.width, self.config.height],
-            blur_at..frame.hud.vertices.len() as u32,
+            drawn..total,
             timing.as_mut(),
         );
         if overlay.real {

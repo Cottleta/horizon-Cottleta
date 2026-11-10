@@ -3515,22 +3515,35 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             }
             let is_focused = self.focused_button == Some(b.id);
             let hover = b.enabled && (inside || is_focused);
+            // Cottleta's Settings may ease the highlight in and out (`gui_anim::hover`).
+            let glow = if b.enabled {
+                crate::gui_anim::hover([b.x, b.y, b.w, 20.0], hover)
+            } else {
+                0.0
+            };
             let sprite = if !b.enabled {
                 "gui/sprites/widget/button_disabled"
-            } else if hover {
+            } else if glow >= 1.0 {
                 "gui/sprites/widget/button_highlighted"
             } else {
                 "gui/sprites/widget/button"
             };
             // Nine-slice approximation: left and right halves of the 200-wide sprite.
-            if let Some(r) = atlas.sprites.get(sprite).copied() {
-                let half = b.w / 2.0;
-                let mut left = r;
-                left.u1 = r.u0 + (r.u1 - r.u0) * (half / r.w as f32);
-                batch.rect_uv(b.x, b.y, half, 20.0, left, u32::MAX);
-                let mut right = r;
-                right.u0 = r.u1 - (r.u1 - r.u0) * (half / r.w as f32);
-                batch.rect_uv(b.x + half, b.y, half, 20.0, right, u32::MAX);
+            let halves = |batch: &mut HudBatch, sprite: &str, color: u32| {
+                if let Some(r) = atlas.sprites.get(sprite).copied() {
+                    let half = b.w / 2.0;
+                    let mut left = r;
+                    left.u1 = r.u0 + (r.u1 - r.u0) * (half / r.w as f32);
+                    batch.rect_uv(b.x, b.y, half, 20.0, left, color);
+                    let mut right = r;
+                    right.u0 = r.u1 - (r.u1 - r.u0) * (half / r.w as f32);
+                    batch.rect_uv(b.x + half, b.y, half, 20.0, right, color);
+                }
+            };
+            halves(batch, sprite, u32::MAX);
+            if b.enabled && glow > 0.0 && glow < 1.0 {
+                let alpha = (glow * 255.0).round() as u32;
+                halves(batch, "gui/sprites/widget/button_highlighted", 0x00FF_FFFF | alpha << 24);
             }
             let color = if b.enabled {
                 u32::MAX

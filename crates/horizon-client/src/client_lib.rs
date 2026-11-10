@@ -16,7 +16,7 @@ pub use horizon_client_render::{
     bluemap_detect, border_render, breaking, brewing, camera, chat, chunk, chunk_map, cit,
     cit_armor, cit_assets, cit_glint, client_resources, clouds, collisions, command_block,
     containers, controller_ui, crash, custom_sky, datapack, dynamic_light, effects, environment,
-    extras, fast_hash, fluid_render, fog, font, gfx, graphics, graphics_style, graphics_ui,
+    extras, fast_hash, fluid_render, fog, font, gfx, graphics, graphics_style, graphics_ui, gui_anim,
     hdr_calibration, hud, hud_kit, hud_layout, hud_overlays, inventory_effects, java_text,
     jigsaw_block, json_folder, level_loading, light, lod, logging, menu_blur, mesher, minimap,
     mipmap, mod_browser, mod_list, model_library, models, multiline_edit, native_emissive,
@@ -25,7 +25,7 @@ pub use horizon_client_render::{
     polytone_creative_tabs, polytone_post, post_chain, potent_sulfur, preedit, providers, pvp,
     pvp_hud, random_source, screen_draw, screen_effects, sculk, section_mask, server_terrain,
     settings, shader_options, shader_pack_list, signs, skins, social, sound_engine, sound_events,
-    sound_preview, spans, split_layout, split_map, split_profiles, sprites, streaming,
+    screen_picture, screen_video, sound_preview, spans, split_layout, split_map, split_profiles, sprites, streaming,
     structure_block, tab_list, terrain_model, test_block, test_instance_block, testgen,
     title_edition, trims, ui, vault, weather, widgets, world, worldborder, zip,
 };

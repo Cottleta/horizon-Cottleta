@@ -164,6 +164,7 @@ mod frames;
 #[cfg(feature = "friends")]
 mod friends;
 mod held_items;
+mod screen_anim;
 #[cfg(test)]
 mod setblock_order_tests;
 // Without Play with Friends: nothing shared, no Friends button (game/friends_off.rs).
@@ -181,9 +182,9 @@ mod glowing;
 mod golems;
 mod growth;
 mod hand;
-mod hud_rate;
 mod headless;
 mod hud_editor;
+mod hud_rate;
 mod hud_room;
 mod ime;
 mod initial_spawn;
@@ -2373,6 +2374,14 @@ struct Game<'a> {
     frame_end: Instant,
     /// The HUD the next frames may draw again (`hud_rate`), with the size it is for.
     hud_kept: Option<([u32; 2], HudBatch)>,
+    /// The inventory and containers' opening and closing (Cottleta's Settings).
+    screen_anim: screen_anim::ScreenAnim,
+    /// Menu pages easing in (Cottleta's Settings).
+    menu_anim: screen_anim::MenuAnim,
+    /// The player's pictures loading (Cottleta's Settings).
+    pictures: screen_anim::Pictures,
+    /// The hotbar selection's place, in slots, as it glides (Cottleta's Settings).
+    hotbar_slide: horizon_client::gui_anim::Tween,
     hud_built: Instant,
     hud_touched: Instant,
     hud_view: (f32, f32),
@@ -5886,6 +5895,7 @@ impl Game<'_> {
     }
     fn hud_layers(&mut self, size: [u32; 2]) -> HudBatch {
         self.input_hud_begin();
+        horizon_client::gui_anim::set_buttons(self.settings.horizon.anim_buttons);
         let mut batch = HudBatch::new(size);
         batch.glint_colour = self.settings.extras.pvp.tweaks.glint_texel();
         // GlobalSettingsUniform's GameTime, for a resource pack's text shader.
@@ -5910,7 +5920,9 @@ impl Game<'_> {
                 self.flush_skin_slots();
                 self.update_remote_skins();
             }
+            let menu_at = self.menu_anim_begin(&batch);
             self.draw_options(&mut batch);
+            self.menu_anim_end(&mut batch, menu_at);
             self.fire_screen_render_post(&mut batch);
             self.draw_split_hud(&mut batch, true);
             return batch;
@@ -5948,6 +5960,7 @@ impl Game<'_> {
             // TitleScreen.extractRenderState, then ToastManager over it: vanilla
             // draws the toast manager on every screen, so a pack download or a
             // resource-reload failure still shows on the title (#4428).
+            let menu_at = self.menu_anim_begin(&batch);
             if let Some(title) = &self.title {
                 title.draw_with_items(
                     &self.gui.atlas,
@@ -5958,6 +5971,7 @@ impl Game<'_> {
                     self.settings.file.bool("hideServerAddress"),
                 );
             }
+            self.menu_anim_end(&mut batch, menu_at);
             // ScreenEvent.Render.Post over the title's own screens: a mod draws
             // over them here (a pack browser over Create New World, say), and the
             // toasts still come after, as over any screen.
@@ -6047,7 +6061,8 @@ impl Game<'_> {
                         offhand_pop: (f32::from(g.hotbar_pop[9]) - partial).max(0.0),
                         attack: (indicator == 2).then_some(strength),
                     };
-                    let draws = hud_layout::hotbar(wi, hi, &inputs);
+                    let mut draws = hud_layout::hotbar(wi, hi, &inputs);
+                    g.slide_hotbar_selection(&mut draws);
                     hud_layout::paint(batch, &g.gui.atlas, &draws);
                     for d in &draws {
                         if let hud_layout::GuiDraw::Item { slot, x, y, .. } = *d {
@@ -6259,6 +6274,8 @@ impl Game<'_> {
         } else {
             self.screen
         };
+        let anim_at = self.screen_anim_begin(&mut batch, screen);
+        self.backdrop_before(&mut batch, screen);
         match screen {
             Screen::Paused if self.pause_menu => self.draw_pause_menu(&mut batch),
             // PauseScreen(false): only its title, at the top.
@@ -6309,6 +6326,8 @@ impl Game<'_> {
             Screen::Chat => self.draw_chat_screen(&mut batch),
             Screen::Playing | Screen::Options | Screen::Win => {}
         }
+        self.backdrop_after(&mut batch, anim_at.0, screen);
+        self.screen_anim_end(&mut batch, anim_at);
         // ScreenEvent.Render.Post: the open screen has drawn itself and its
         // tooltips, so a native mod draws over it here. Never `Playing`: the
         // prompts, books and sign editors drawn over gameplay keep it, draw
@@ -9177,6 +9196,8 @@ impl Game<'_> {
         self.world.modified = modified;
     }
     fn render(&mut self) -> Result<bool> {
+        // The player's pictures (Cottleta's Settings) arrive from their thread.
+        self.poll_pictures(false);
         if self.screenshot_sequence.is_some() {
             return self.render_sequence_frame();
         }
@@ -9229,7 +9250,15 @@ impl Game<'_> {
                     );
                     pr.lap("pr_loading");
                     drop(prepare);
-                    return renderer.render(&loading_frame(&hud));
+                    let picture = screen_anim::loading_picture(
+                        self.settings.horizon.picture_world,
+                        "world",
+                        renderer,
+                        &mut hud,
+                    );
+                    let mut frame = loading_frame(&hud);
+                    frame.pictures = picture.into_iter().collect();
+                    return renderer.render(&frame);
                 }
                 return Ok(false);
             }
@@ -9270,7 +9299,15 @@ impl Game<'_> {
                 );
                 pr.lap("pr_loading");
                 drop(prepare);
-                return renderer.render(&loading_frame(&hud));
+                let picture = screen_anim::loading_picture(
+                    self.settings.horizon.picture_world,
+                    "world",
+                    renderer,
+                    &mut hud,
+                );
+                let mut frame = loading_frame(&hud);
+                frame.pictures = picture.into_iter().collect();
+                return renderer.render(&frame);
             }
             return Ok(false);
         }
@@ -9288,7 +9325,15 @@ impl Game<'_> {
                 );
                 pr.lap("pr_loading");
                 drop(prepare);
-                return renderer.render(&loading_frame(&hud));
+                let picture = screen_anim::loading_picture(
+                    self.settings.horizon.picture_loading,
+                    "loading",
+                    renderer,
+                    &mut hud,
+                );
+                let mut frame = loading_frame(&hud);
+                frame.pictures = picture.into_iter().collect();
+                return renderer.render(&frame);
             }
             return Ok(false);
         }
@@ -9306,7 +9351,15 @@ impl Game<'_> {
                 );
                 pr.lap("pr_loading");
                 drop(prepare);
-                return renderer.render(&loading_frame(&hud));
+                let picture = screen_anim::loading_picture(
+                    self.settings.horizon.picture_loading,
+                    "loading",
+                    renderer,
+                    &mut hud,
+                );
+                let mut frame = loading_frame(&hud);
+                frame.pictures = picture.into_iter().collect();
+                return renderer.render(&frame);
             }
             return Ok(false);
         }
@@ -9706,6 +9759,7 @@ impl Game<'_> {
         self.native_gui_render_post(&mut hud, self.ui.hide_gui, self.focused);
         self.resolve_inline_profiles(&hud.inline_profiles);
         pr.lap("pr_hud");
+        let pictures = self.frame_pictures(&mut hud);
         self.locator_camera =
             (!title).then_some((camera.to_array(), view_yaw, view_pitch, fov_degrees));
         let mut requested_post_effects = self.requested_post_effects();
@@ -10016,6 +10070,7 @@ impl Game<'_> {
                 .boss_overlay
                 .darken_amount(self.clock.fraction() as f32),
             menu_blur: self.menu_blur(),
+            pictures,
             post_effects: horizon_client::post_chain::Request {
                 effects: &requested_post_effects,
                 root: &self.options.resources,
@@ -11627,7 +11682,8 @@ impl Game<'_> {
                                 }
                             };
                             let gpu_time = r.gpu_times.last().copied();
-                            self.frame_graph.record(ms(elapsed), ms(cpu), gpu_time, steps);
+                            self.frame_graph
+                                .record(ms(elapsed), ms(cpu), gpu_time, steps);
                             if let Some(gpu) = gpu_time {
                                 self.gpu_utilization =
                                     f64::from(gpu) * 100.0 / f64::from(ms(cpu).max(0.001));
@@ -12028,6 +12084,10 @@ impl<'a> Game<'a> {
             previous: now,
             frame_end: now,
             hud_kept: None,
+            screen_anim: Default::default(),
+            menu_anim: Default::default(),
+            pictures: Default::default(),
+            hotbar_slide: horizon_client::gui_anim::Tween::at(0.0),
             hud_built: now,
             hud_touched: now,
             hud_view: (0.0, 0.0),

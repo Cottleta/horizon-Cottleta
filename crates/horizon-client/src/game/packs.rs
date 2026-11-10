@@ -422,6 +422,7 @@ impl Game<'_> {
         self.options.resources = root.clone();
         self.pack = pack;
         self.gui = gui;
+        self.armor_layer_cache.get_mut().clear();
         // The GPU item meshes were made from the old item models and sprite rects.
         horizon_client::mobs::gpu_parts::forget();
         // The new atlas's skin and map slots are blank: players and maps

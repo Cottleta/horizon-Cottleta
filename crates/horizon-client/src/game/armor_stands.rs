@@ -202,6 +202,21 @@ impl ArmorStandAssets {
         TrimTexture::resolve(&self.trims, overrides, material, pattern, kind)
     }
 }
+/// What a worn armour piece draws apart from its stack's glint, dye, CIT rule and trim:
+/// its equipment asset, whether the item glints, and each of its layers' texture, sprite,
+/// undyed colour and emissive overlay.
+pub(super) struct ArmorLayerSet {
+    asset: String,
+    kind: &'static str,
+    item_glint: bool,
+    layers: Vec<(String, Option<[f32; 4]>, Option<u32>, Option<[f32; 4]>)>,
+}
+/// By item, then by (slot, server patch address and length), with the patch's bytes.
+pub(super) type ArmorLayerCache = rustc_hash::FxHashMap<
+    String,
+    rustc_hash::FxHashMap<(usize, usize, usize), (Box<[u8]>, Option<std::rc::Rc<ArmorLayerSet>>)>,
+>;
+
 impl Game<'_> {
     /// OptiFine CIT: the winning armour or elytra rule (`kind`) of the worn `stack`. No lookup
     /// without CIT rules.
@@ -261,40 +276,18 @@ impl Game<'_> {
         worn: [Option<(&str, Option<&ItemStack>)>; 4],
     ) -> Vec<(&Part, [f32; 4], u32, u32, bool)> {
         let assets = &self.armor_stand_assets;
-        let emissive = self
-            .res
-            .mob_data()
-            .emissive
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut out = Vec::new();
-        for (item, (layer, slot)) in worn.into_iter().zip([
-            ("helmet", "head"),
-            ("chestplate", "chest"),
-            ("leggings", "legs"),
-            ("boots", "feet"),
-        ]) {
+        for (slot, (item, layer)) in worn
+            .into_iter()
+            .zip(["helmet", "chestplate", "leggings", "boots"])
+            .enumerate()
+        {
             let Some((item, stack)) = item else {
                 continue;
             };
-            // HumanoidArmorLayer.renderArmorPiece: the stack's own
-            // `equippable`, drawn when it has an asset and is worn in its slot.
-            let equippable = match stack {
-                Some(s) => horizon_client::item_sync::equippable(s, self.res.items()),
-                None => horizon_client::item_sync::item_equippable(item, self.res.items()),
-            };
-            let Some(asset) = equippable
-                .filter(|e| e.slot == slot)
-                .and_then(|e| e.asset_id)
-            else {
-                continue;
-            };
-            let kind = if layer == "leggings" {
-                "humanoid_leggings"
-            } else {
-                "humanoid"
-            };
-            let Some(layers) = assets.equipment.get(&asset).and_then(|k| k.get(kind)) else {
+            // What the piece draws apart from its glint, dye, CIT rule and
+            // trim: the same until its item or server patch changes.
+            let Some(set) = self.armor_layer_set(item, stack, slot) else {
                 continue;
             };
             let Some(part) = assets.player.get(layer) else {
@@ -302,14 +295,7 @@ impl Game<'_> {
             };
             // EquipmentLayerRenderer.renderLayers: NO_OVERLAY, the armour
             // glint on the first layer and on the trim when `stack.hasFoil()`.
-            let item_glint = self
-                .res
-                .items()
-                .enchantments
-                .props
-                .get(item)
-                .is_some_and(|p| p.glint);
-            let overlay = if stack.is_some_and(|s| s.has_foil(item_glint)) {
+            let overlay = if stack.is_some_and(|s| s.has_foil(set.item_glint)) {
                 horizon_client::mobs::render::ARMOR_GLINT
             } else {
                 0
@@ -317,28 +303,131 @@ impl Game<'_> {
             // Every layer of the asset, the leather overlay too, then the
             // trim layer over the armour.
             let cit = stack.and_then(|s| self.cit_worn_rule(Kind::Armor, s));
-            for (i, (texture, undyed)) in layers.iter().enumerate() {
-                let Some(uv) = self.armor_layer_rect(cit, &asset, kind, texture) else {
+            for (i, (texture, plain, undyed, glow)) in set.layers.iter().enumerate() {
+                let rect = match cit {
+                    Some(_) => self.armor_layer_rect(cit, &set.asset, set.kind, texture),
+                    None => *plain,
+                };
+                let Some(uv) = rect else {
                     continue;
                 };
                 let color = layer_color(*undyed, stack);
                 out.push((part, uv, color, if i == 0 { overlay } else { 0 }, false));
                 // The layer's OptiFine emissive overlay, full bright without the glint.
-                if let Some(g) = emissive
-                    .overlay(texture)
-                    .and_then(|e| self.gui.atlas.sprites.get(e))
-                {
-                    out.push((part, [g.u0, g.v0, g.u1, g.v1], color, 0, true));
+                if let Some(g) = glow {
+                    out.push((part, *g, color, 0, true));
                 }
             }
             if let Some(r) = stack
-                .and_then(|s| assets.trim_texture(&asset, kind, s))
+                .and_then(|s| assets.trim_texture(&set.asset, set.kind, s))
                 .and_then(|t| self.gui.atlas.sprites.get(&t.sprite()))
             {
                 out.push((part, [r.u0, r.v0, r.u1, r.v1], 0xFFFF_FFFF, overlay, false));
             }
         }
         out
+    }
+    /// What `armor_layers` draws for `item` worn in `slot` (0 head .. 3 feet)
+    /// as `stack`, apart from the stack's glint, dye, CIT rule and trim; None
+    /// when it draws nothing there. Kept by item, slot and the server's patch
+    /// (its bytes checked on every hit) until the resources reload; a stack
+    /// with saved `equippable` components is resolved every time.
+    fn armor_layer_set(
+        &self,
+        item: &str,
+        stack: Option<&ItemStack>,
+        slot: usize,
+    ) -> Option<std::rc::Rc<ArmorLayerSet>> {
+        let data = stack.and_then(ItemStack::data);
+        if data.is_some_and(|d| {
+            d.other("minecraft:equippable").is_some() || d.other("!minecraft:equippable").is_some()
+        }) {
+            return self.resolve_armor_layer_set(item, stack, slot).map(std::rc::Rc::new);
+        }
+        let patch = data.and_then(|d| d.wire.patch()).unwrap_or(&[]);
+        let key = (slot, patch.as_ptr() as usize, patch.len());
+        if let Some(kept) = self.armor_layer_cache.borrow().get(item).and_then(|m| {
+            m.get(&key)
+                .filter(|(bytes, _)| **bytes == *patch)
+                .map(|(_, set)| set.clone())
+        }) {
+            return kept;
+        }
+        let set = self
+            .resolve_armor_layer_set(item, stack, slot)
+            .map(std::rc::Rc::new);
+        let mut cache = self.armor_layer_cache.borrow_mut();
+        if cache.len() >= 1024 {
+            cache.clear();
+        }
+        let by_patch = cache.entry(item.to_owned()).or_default();
+        if by_patch.len() >= 256 {
+            by_patch.clear();
+        }
+        by_patch.insert(key, (patch.into(), set.clone()));
+        set
+    }
+    fn resolve_armor_layer_set(
+        &self,
+        item: &str,
+        stack: Option<&ItemStack>,
+        slot: usize,
+    ) -> Option<ArmorLayerSet> {
+        let (layer, slot_name) = [
+            ("helmet", "head"),
+            ("chestplate", "chest"),
+            ("leggings", "legs"),
+            ("boots", "feet"),
+        ][slot];
+        let assets = &self.armor_stand_assets;
+        // HumanoidArmorLayer.renderArmorPiece: the stack's own
+        // `equippable`, drawn when it has an asset and is worn in its slot.
+        let equippable = match stack {
+            Some(s) => horizon_client::item_sync::equippable(s, self.res.items()),
+            None => horizon_client::item_sync::item_equippable(item, self.res.items()),
+        };
+        let asset = equippable
+            .filter(|e| e.slot == slot_name)
+            .and_then(|e| e.asset_id)?;
+        let kind = if layer == "leggings" {
+            "humanoid_leggings"
+        } else {
+            "humanoid"
+        };
+        let emissive = self
+            .res
+            .mob_data()
+            .emissive
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rect = |r: &horizon_client::hud::Rect| [r.u0, r.v0, r.u1, r.v1];
+        let layers = assets
+            .equipment
+            .get(&asset)?
+            .get(kind)?
+            .iter()
+            .map(|(texture, undyed)| {
+                let sprite = self.armor_layer_rect(None, &asset, kind, texture);
+                let glow = emissive
+                    .overlay(texture)
+                    .and_then(|e| self.gui.atlas.sprites.get(e))
+                    .map(rect);
+                (texture.clone(), sprite, *undyed, glow)
+            })
+            .collect();
+        let item_glint = self
+            .res
+            .items()
+            .enchantments
+            .props
+            .get(item)
+            .is_some_and(|p| p.glint);
+        Some(ArmorLayerSet {
+            asset,
+            kind,
+            item_glint,
+            layers,
+        })
     }
     /// `PalettedTextureManager.getOrPrepare` for the trims drawn this frame
     /// (the player's armour and the armour stands'): each generated texture

@@ -2673,8 +2673,9 @@ struct Game<'a> {
     /// Entities of types Horizon does not simulate.
     others: Vec<commands::OtherEntity>,
     armor_stand_assets: armor_stands::ArmorStandAssets,
-    /// Worn armour layers resolved by item (game/armor_stands.rs), cleared when
-    /// the atlas or items change.
+    /// Worn armour layers resolved by item, slot and server patch
+    /// (game/armor_stands.rs), cleared when the resources reload.
+    armor_layer_cache: std::cell::RefCell<armor_stands::ArmorLayerCache>,
     /// `WaypointStyleManager`.
     waypoint_styles: horizon_client::locator_bar::WaypointStyles,
     /// `ClientWaypointManager`: the locator bar's waypoints.
@@ -12196,6 +12197,7 @@ impl<'a> Game<'a> {
             cushions: Vec::new(),
             others: Vec::new(),
             armor_stand_assets: prepared.armor_stand_assets,
+            armor_layer_cache: Default::default(),
             waypoint_styles: prepared.waypoint_styles,
             waypoints: Default::default(),
             locator_camera: None,

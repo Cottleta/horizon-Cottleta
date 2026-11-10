@@ -171,19 +171,50 @@ pub fn equippable(stack: &ItemStack, items: &crate::items::Items) -> Option<Equi
             camera_overlay: string("camera_overlay").map(namespaced),
         });
     }
-    let Some((added, removed)) = data
-        .wire
-        .patch()
-        .and_then(|p| horizon_protocol::item::WirePatch::decode(p).ok())
-    else {
+    let Some(patch) = data.wire.patch() else {
         return out;
     };
-    if removed.contains(&component::EQUIPPABLE) {
-        out = None;
+    match patch_equippable(patch) {
+        Some(set) => set,
+        None => out,
     }
+}
+
+/// What a server patch does to `equippable`: None when it leaves it alone,
+/// else the value it sets (None when it removes it). Worn armour asks every
+/// frame and the whole patch (enchantments, trims...) has to be read to find
+/// it, so answers are kept per patch: the patch buffer is shared and stays
+/// put while the stack lives, and its bytes are compared on every hit, so a
+/// reused address never answers for other bytes.
+fn patch_equippable(patch: &[u8]) -> Option<Option<Equippable>> {
+    type Cache = rustc_hash::FxHashMap<(usize, usize), (Box<[u8]>, Option<Option<Equippable>>)>;
+    thread_local! {
+        static CACHE: std::cell::RefCell<Cache> = std::cell::RefCell::default();
+    }
+    let key = (patch.as_ptr() as usize, patch.len());
+    if let Some(hit) = CACHE.with_borrow(|c| {
+        c.get(&key)
+            .filter(|(bytes, _)| **bytes == *patch)
+            .map(|(_, v)| v.clone())
+    }) {
+        return hit;
+    }
+    let value = decode_patch_equippable(patch);
+    CACHE.with_borrow_mut(|c| {
+        if c.len() >= 4096 {
+            c.clear();
+        }
+        c.insert(key, (patch.into(), value.clone()));
+    });
+    value
+}
+
+fn decode_patch_equippable(patch: &[u8]) -> Option<Option<Equippable>> {
+    let (added, removed) = horizon_protocol::item::WirePatch::decode(patch).ok()?;
+    let mut out = removed.contains(&component::EQUIPPABLE).then_some(None);
     for (kind, c) in &added {
         if let (component::EQUIPPABLE, Component::Raw(bytes)) = (*kind, c) {
-            out = decode_equippable(bytes);
+            out = Some(decode_equippable(bytes));
         }
     }
     out

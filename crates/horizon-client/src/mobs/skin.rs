@@ -116,12 +116,7 @@ impl Rotations {
         if slot.as_ref().is_none_or(|rotation| rotation.key != key) {
             *slot = Some(Rotation {
                 key,
-                matrix: glam::Mat4::from_quat(glam::Quat::from_euler(
-                    glam::EulerRot::ZYX,
-                    p[5],
-                    p[4],
-                    p[3],
-                )),
+                matrix: super::render::rotation_zyx(p[5], p[4], p[3]),
                 normal: ModelNormals::rotation(p[3], p[4], p[5]),
             });
         }

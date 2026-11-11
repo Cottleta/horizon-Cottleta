@@ -688,9 +688,13 @@ fn connect_tcp(
 /// Whether joining servers of older releases is on (roadmap `older-servers`): off by default while the
 /// adapter is incomplete; `HORIZON_OLDER_SERVERS=1` turns it on.
 ///
-/// Our builds turn it on by default; `HORIZON_OLDER_SERVERS=0` turns it off.
+/// Our builds turn it on by default; `HORIZON_OLDER_SERVERS=0` turns it off. Tests keep upstream's
+/// default (off), as their fake servers answer a login, not the status ping that picks the release.
 pub fn older_servers_enabled() -> bool {
-    std::env::var_os("HORIZON_OLDER_SERVERS").is_none_or(|v| v != "0")
+    match std::env::var_os("HORIZON_OLDER_SERVERS") {
+        Some(v) => v != "0",
+        None => !cfg!(test),
+    }
 }
 
 /// The older release a server speaks, by its status ping, when Horizon can translate it; `None` for the

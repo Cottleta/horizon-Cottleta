@@ -1286,11 +1286,10 @@ mod body_pose_tests {
         for name in BODY_PARTS {
             assert_eq!(p.has(name), matches!(name, "head" | "right_arm"), "{name}");
         }
-        // Posing nothing leaves the poses, their version too.
-        let version = p.version();
+        // Posing nothing leaves the poses. (`Poses::version` no longer tracks changes: it
+        // names every call anew, since the skin path that reused matrices by it is off.)
         body_pose(&raise, 30.0, at_rest, &mut p);
-        assert_eq!(p.version(), version);
-        assert_eq!(p.get("right_arm")[5], 1.5);
+        assert_eq!(p.read("right_arm")[5], 1.5);
     }
 }
 

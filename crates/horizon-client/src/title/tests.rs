@@ -18,10 +18,10 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(root.join("saves")).unwrap();
-        Self {
-            title: Title::new(root.join("saves"), &root),
-            root,
-        }
+        let mut title = Title::new(root.join("saves"), &root);
+        // The ban warning's box lives in the real game home: a tick there must not skip it here.
+        title.skip_ban_warning = false;
+        Self { title, root }
     }
     fn world(&self, folder: &str, name: &str) {
         crate::save::write_dat(

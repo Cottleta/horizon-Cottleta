@@ -6663,7 +6663,7 @@ impl Game<'_> {
         laps.lap("eg_fire_items");
         for stand in &self.armor_stands {
             if stand.fire_ticks > 0 && !stand.marker {
-                let scale = if stand.small { 0.5 } else { 1.0 };
+                let scale = if stand.small { 0.5 } else { 1.0 } * stand.scale;
                 let at = stand.render_position(alpha);
                 if !fire_visible([at.x, at.y, at.z], 0.5 * scale, 1.975 * scale) {
                     continue;

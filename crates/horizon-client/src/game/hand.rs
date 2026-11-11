@@ -241,6 +241,23 @@ impl Game<'_> {
     pub(super) fn pick_tick_targets(&mut self) {
         self.tick_hit = Some(self.pick());
         self.tick_mob = None;
+        // GameRenderer.pick: the entity ray runs to the block hit (out to the larger range), and
+        // filterHitResult turns an entity past the entity range into a miss. An entity between
+        // the crosshair and a block in reach but out of reach itself hides that block: the
+        // click neither uses nor mines it.
+        if matches!(self.tick_hit, Some(Some(_))) && self.block_reach > self.entity_reach {
+            let reach = self.entity_reach;
+            self.entity_reach = self.block_reach;
+            let far = [true, false]
+                .into_iter()
+                .filter_map(|attacking| self.crosshair_entity(attacking))
+                .map(|p| p.distance)
+                .reduce(f64::min);
+            self.entity_reach = reach;
+            if far.is_some_and(|d| d > reach) {
+                self.tick_hit = Some(None);
+            }
+        }
         let mob = match self.active_attack_range() {
             Some(range) => self.attack_range_pick(&range),
             None => None,

@@ -124,6 +124,7 @@ impl Game<'_> {
         self.keys.clear();
         self.screen = Screen::Options;
         horizon_client::auto_settings::set_can_test(self.title.is_some());
+        horizon_client::auto_settings::set_can_profile(self.title.is_none());
         self.options_from_title = from_title;
         let minecart_improvements = self.minecart_improvements();
         let mods_live = self.mods_live_now();
@@ -357,6 +358,12 @@ impl Game<'_> {
             match e {
                 Event::ButtonClick => self.audio.play_button_click(),
                 Event::AutoTest => self.start_auto_test(),
+                Event::Profile => self.start_profile(),
+                Event::OpenProfiles => {
+                    let dir = super::profiler::profiles_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    super::packs::open_folder(&dir);
+                }
                 Event::OpenPictures => {
                     let dir = super::screen_anim::pictures_dir();
                     let _ = std::fs::create_dir_all(&dir);

@@ -104,6 +104,8 @@ pub enum H {
     AutoTest,
     AutoSave,
     AutoLoad,
+    Profile,
+    ProfilesFolder,
     DynamicHud,
     /// Cottleta's Settings: the inventory and containers' opening and closing.
     AnimContainerStyle,
@@ -705,6 +707,21 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                     ],
                 ),
                 (
+                    "Profiler",
+                    vec![
+                        h(
+                            H::Profile,
+                            None,
+                            "Records 30 seconds of play: FPS, lows and what each frame spends its time on.",
+                        ),
+                        h(
+                            H::ProfilesFolder,
+                            None,
+                            "The saved reports: a summary to read, and every frame as CSV.",
+                        ),
+                    ],
+                ),
+                (
                     "Extras",
                     vec![
                         h(
@@ -1141,6 +1158,17 @@ impl H {
             }),
             H::AutoSave => Text::literal(lang::get("Save Current Settings")),
             H::AutoLoad => Text::literal(lang::get("Load Saved Settings")),
+            H::Profile => Text::literal(
+                match (
+                    crate::auto_settings::profile_left(),
+                    crate::auto_settings::last_profile_fps(),
+                ) {
+                    (Some(left), _) => lang::tr("Profiling (%s s left)", &[&left]),
+                    (None, Some(fps)) => format!("{} ({} FPS)", lang::get("Profile Again"), fps),
+                    (None, None) => lang::get("Profile 30 Seconds"),
+                },
+            ),
+            H::ProfilesFolder => Text::literal(lang::get("Open Profiles Folder")),
             H::DynamicHud => labelled("Dynamic HUD", on_off(g.dynamic_hud)),
             H::AnimContainerStyle => labelled("Easing", g.anim_containers.style.name()),
             H::AnimContainerMotion => labelled("Direction", g.anim_containers.motion.name()),
@@ -1489,6 +1517,12 @@ impl Item {
             }
             Item::Horizon(H::AutoTest) if !crate::auto_settings::can_test() => {
                 Some("Leave the world first.")
+            }
+            Item::Horizon(H::Profile) if crate::auto_settings::profile_left().is_some() => {
+                Some("Profiling now.")
+            }
+            Item::Horizon(H::Profile) if !crate::auto_settings::can_profile() => {
+                Some("Join a world first.")
             }
             Item::Horizon(H::AutoLoad) if !crate::auto_settings::saved_exists() => {
                 Some("No settings saved yet.")
@@ -1847,6 +1881,18 @@ impl Screen for GraphicsScreen {
                 vec![
                     Output::Event(Event::ButtonClick),
                     Output::Event(Event::OpenPictures),
+                ]
+            }
+            Item::Horizon(H::Profile) => {
+                vec![
+                    Output::Event(Event::ButtonClick),
+                    Output::Event(Event::Profile),
+                ]
+            }
+            Item::Horizon(H::ProfilesFolder) => {
+                vec![
+                    Output::Event(Event::ButtonClick),
+                    Output::Event(Event::OpenProfiles),
                 ]
             }
             Item::Horizon(H::AutoSave) => {

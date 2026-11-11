@@ -1507,6 +1507,10 @@ pub enum Event {
     },
     /// Open the player's pictures folder, and load them again (Cottleta's Settings).
     OpenPictures,
+    /// Record 30 seconds of play and save a report (Cottleta's Settings).
+    Profile,
+    /// Open the folder the profiles are saved in.
+    OpenProfiles,
     /// An accepted button press or the release of a slider.
     ButtonClick,
     /// Horizon's own: download the Modrinth hit at this index of the pack

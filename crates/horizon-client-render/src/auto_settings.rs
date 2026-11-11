@@ -320,6 +320,41 @@ pub fn can_test() -> bool {
     CAN_TEST.load(Ordering::Relaxed)
 }
 
+/// Cottleta's profiler (Settings): a world is open to profile.
+static CAN_PROFILE: AtomicBool = AtomicBool::new(false);
+/// Seconds left of the profile running now, 0 when none runs.
+static PROFILE_LEFT: AtomicU32 = AtomicU32::new(0);
+/// The last profile's average FPS this run, 0 before the first.
+static PROFILE_FPS: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_can_profile(can: bool) {
+    CAN_PROFILE.store(can, Ordering::Relaxed);
+}
+
+pub fn can_profile() -> bool {
+    CAN_PROFILE.load(Ordering::Relaxed)
+}
+
+pub fn set_profile_left(seconds: u32) {
+    PROFILE_LEFT.store(seconds, Ordering::Relaxed);
+}
+
+/// Seconds left of the running profile, if one runs.
+pub fn profile_left() -> Option<u32> {
+    Some(PROFILE_LEFT.load(Ordering::Relaxed)).filter(|&s| s > 0)
+}
+
+pub fn note_profile_fps(fps: f64) {
+    PROFILE_FPS.store(
+        fps.round().clamp(1.0, f64::from(u32::MAX)) as u32,
+        Ordering::Relaxed,
+    );
+}
+
+pub fn last_profile_fps() -> Option<u32> {
+    Some(PROFILE_FPS.load(Ordering::Relaxed)).filter(|&f| f > 0)
+}
+
 fn test_backup() -> PathBuf {
     crate::logging::game_home()
         .join("auto-test-backup")

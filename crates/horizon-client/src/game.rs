@@ -164,6 +164,7 @@ mod frames;
 #[cfg(feature = "friends")]
 mod friends;
 mod held_items;
+mod profiler;
 mod screen_anim;
 #[cfg(test)]
 mod setblock_order_tests;
@@ -2332,6 +2333,8 @@ struct Game<'a> {
     gpu_passes: bool,
     /// Whether this thread timed its spans before `frame-detail` turned that on.
     frame_detail_spans_were_on: bool,
+    /// Cottleta's profiler: 30 seconds of play from the Settings button.
+    profiler: profiler::Profiler,
     screen: Screen,
     observed_screen: Option<native_hooks::ObservedScreen>,
     window: Option<Arc<Window>>,
@@ -11816,6 +11819,7 @@ impl Game<'_> {
                             r.follow_frame_rate(elapsed);
                         }
                         self.frame_stats.record(elapsed.as_secs_f32() * 1000.0);
+                        self.tick_profile();
                         self.debug_charts.frame_times.log(elapsed.as_nanos() as i64);
                         if self.frames == 0 {
                             // The launcher times Play to this line (launcher/src/perf.rs).
@@ -12060,6 +12064,7 @@ impl<'a> Game<'a> {
             debug: false,
             gpu_passes: false,
             frame_detail_spans_were_on: false,
+            profiler: profiler::Profiler::default(),
             screen: Screen::Playing,
             observed_screen: None,
             window: None,

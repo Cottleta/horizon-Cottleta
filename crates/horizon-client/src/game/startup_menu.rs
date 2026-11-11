@@ -534,6 +534,7 @@ impl Loading {
 
     fn open_menu_options(&mut self, page: Page) {
         horizon_client::auto_settings::set_can_test(true);
+        horizon_client::auto_settings::set_can_profile(false);
         self.menu.options.open_at(false, page);
         self.menu.options.languages = horizon_client::lang::available(&[&self.menu.root]);
         self.menu.options.pack_infos = packs::pack_infos(&self.vanilla_root, &[]);
@@ -552,6 +553,13 @@ impl Loading {
                 }
                 Event::OpenPictures => {
                     let dir = super::screen_anim::pictures_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    super::packs::open_folder(&dir);
+                }
+                // Its button needs a world: the title has none.
+                Event::Profile => {}
+                Event::OpenProfiles => {
+                    let dir = super::profiler::profiles_dir();
                     let _ = std::fs::create_dir_all(&dir);
                     super::packs::open_folder(&dir);
                 }

@@ -3033,6 +3033,23 @@ mod armor_stand_light_tests {
         ArmorStand::new(1, Vec3::new(x, y, z), 0.0)
     }
 
+    /// `LivingEntity.getDimensions`: a server's `minecraft:scale` sizes the stand's box, the
+    /// one clicks pick and the one drawn, on top of `Small`; a marker has none.
+    #[test]
+    fn scale_sizes_the_box() {
+        let mut a = stand(0.0, 0.0, 0.0);
+        a.scale = 0.5;
+        assert_eq!(a.box_size(), (0.25, 0.9875));
+        let b = a.bounds();
+        assert!((b.max_position().y - f64::from(1.975_f32) * 0.5).abs() < 1e-9);
+        assert!((b.max_position().x - 0.125).abs() < 1e-9);
+        a.scale = 2.0;
+        a.small = true;
+        assert_eq!(a.box_size(), (0.5, 1.975));
+        a.marker = true;
+        assert_eq!(a.box_size(), (0.0, 0.0));
+    }
+
     /// `ArmorStand.getLightProbePosition` for a stand that is not a marker is
     /// `Entity.getEyePosition`: `EntityType.ARMOR_STAND` declares
     /// `eyeHeight(1.7775)`, and a small stand (`isBaby()`) is the same type

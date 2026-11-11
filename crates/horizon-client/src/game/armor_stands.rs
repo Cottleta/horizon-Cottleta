@@ -344,7 +344,9 @@ impl Game<'_> {
         if data.is_some_and(|d| {
             d.other("minecraft:equippable").is_some() || d.other("!minecraft:equippable").is_some()
         }) {
-            return self.resolve_armor_layer_set(item, stack, slot).map(std::rc::Rc::new);
+            return self
+                .resolve_armor_layer_set(item, stack, slot)
+                .map(std::rc::Rc::new);
         }
         let patch = data.and_then(|d| d.wire.patch()).unwrap_or(&[]);
         if let Some(kept) = self
@@ -1457,11 +1459,8 @@ impl Game<'_> {
             // ArmorStand.shouldRenderAtSqrDistance: 256 times the box's mean
             // edge (4 for a marker's empty box), whatever the entity distance.
             // LivingEntityRenderer grows the culling box by 0.5 for a dragon head.
-            let (width, height) = match (a.marker, a.small) {
-                (true, _) => (0.0, 0.0),
-                (false, true) => (0.25, 0.9875),
-                (false, false) => (0.5, 1.975),
-            };
+            let (width, height) = a.box_size();
+            let (width, height) = (f64::from(width), f64::from(height));
             let edge = (width + height + width) / 3.0 * 4.0;
             // 26.3 compares the size with RenderSystem.DEFAULT_DEPTH_CLEAR_VALUE,
             // which is 0.0 (reverse Z; the bytecode is `dconst_0`): an empty
@@ -1499,7 +1498,9 @@ impl Game<'_> {
             } else {
                 0.0
             };
+            // LivingEntityRenderer.submit scales by `state.scale` before setupRotations.
             let base = glam::Mat4::from_translation(p.as_vec3())
+                * glam::Mat4::from_scale(glam::Vec3::splat(a.scale))
                 * glam::Mat4::from_rotation_y(
                     (180.0 - a.render_yaw(alpha as f32) + wobble).to_radians(),
                 )
@@ -2095,11 +2096,7 @@ impl Game<'_> {
 }
 /// `ArmorStand.getBbWidth` and `getBbHeight`: a marker has no box, a small stand is half size.
 fn stand_box(a: &ArmorStand) -> (f32, f32) {
-    match (a.marker, a.small) {
-        (true, _) => (0.0, 0.0),
-        (false, true) => (0.25, 0.9875),
-        (false, false) => (0.5, 1.975),
-    }
+    a.box_size()
 }
 /// `AbstractSkullBlock.getType` of a skull item.
 pub(super) fn skull_kind(item: &str) -> Option<&'static str> {

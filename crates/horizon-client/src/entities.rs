@@ -2463,6 +2463,15 @@ impl ArmorStand {
             Vec3::new(p.x + w, p.y + h, p.z + w),
         )
     }
+    /// `getBbWidth` and `getBbHeight`: none for a marker, half for a small stand, times its
+    /// `minecraft:scale` as `bounds` (a server's scaled stand draws, culls and tags at that size).
+    pub fn box_size(&self) -> (f32, f32) {
+        if self.marker {
+            return (0.0, 0.0);
+        }
+        let s = if self.small { 0.5 } else { 1.0 } * self.scale;
+        (0.5 * s, 1.975 * s)
+    }
     /// Leather boots on its feet: it walks on powder snow (`PowderSnowBlock.canEntityWalkOnPowderSnow`).
     fn feet_are_leather_boots(&self) -> bool {
         self.equipment[2]

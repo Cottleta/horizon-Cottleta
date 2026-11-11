@@ -183,20 +183,15 @@ pub fn equippable(stack: &ItemStack, items: &crate::items::Items) -> Option<Equi
 /// What a server patch does to `equippable`: None when it leaves it alone,
 /// else the value it sets (None when it removes it). Worn armour asks every
 /// frame and the whole patch (enchantments, trims...) has to be read to find
-/// it, so answers are kept per patch: the patch buffer is shared and stays
-/// put while the stack lives, and its bytes are compared on every hit, so a
-/// reused address never answers for other bytes.
+/// it, so answers are kept per patch bytes: every player's copy of the same
+/// piece has its own buffer, so keying by address would give a crowd one
+/// entry per stack and keep clearing the cache.
 fn patch_equippable(patch: &[u8]) -> Option<Option<Equippable>> {
-    type Cache = rustc_hash::FxHashMap<(usize, usize), (Box<[u8]>, Option<Option<Equippable>>)>;
+    type Cache = rustc_hash::FxHashMap<Box<[u8]>, Option<Option<Equippable>>>;
     thread_local! {
         static CACHE: std::cell::RefCell<Cache> = std::cell::RefCell::default();
     }
-    let key = (patch.as_ptr() as usize, patch.len());
-    if let Some(hit) = CACHE.with_borrow(|c| {
-        c.get(&key)
-            .filter(|(bytes, _)| **bytes == *patch)
-            .map(|(_, v)| v.clone())
-    }) {
+    if let Some(hit) = CACHE.with_borrow(|c| c.get(patch).cloned()) {
         return hit;
     }
     let value = decode_patch_equippable(patch);
@@ -204,7 +199,7 @@ fn patch_equippable(patch: &[u8]) -> Option<Option<Equippable>> {
         if c.len() >= 4096 {
             c.clear();
         }
-        c.insert(key, (patch.into(), value.clone()));
+        c.insert(patch.into(), value.clone());
     });
     value
 }

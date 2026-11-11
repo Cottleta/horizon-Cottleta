@@ -211,10 +211,12 @@ pub(super) struct ArmorLayerSet {
     item_glint: bool,
     layers: Vec<(String, Option<[f32; 4]>, Option<u32>, Option<[f32; 4]>)>,
 }
-/// By item, then by (slot, server patch address and length), with the patch's bytes.
+/// By item, then by slot, then by the server patch's bytes: every player's copy of the
+/// same piece has its own patch buffer, so keying by address would give a crowd one
+/// entry per player and keep clearing the cache.
 pub(super) type ArmorLayerCache = rustc_hash::FxHashMap<
     String,
-    rustc_hash::FxHashMap<(usize, usize, usize), (Box<[u8]>, Option<std::rc::Rc<ArmorLayerSet>>)>,
+    [rustc_hash::FxHashMap<Box<[u8]>, Option<std::rc::Rc<ArmorLayerSet>>>; 4],
 >;
 
 impl Game<'_> {
@@ -329,8 +331,8 @@ impl Game<'_> {
     }
     /// What `armor_layers` draws for `item` worn in `slot` (0 head .. 3 feet)
     /// as `stack`, apart from the stack's glint, dye, CIT rule and trim; None
-    /// when it draws nothing there. Kept by item, slot and the server's patch
-    /// (its bytes checked on every hit) until the resources reload; a stack
+    /// when it draws nothing there. Kept by item, slot and the server patch's
+    /// bytes until the resources reload; a stack
     /// with saved `equippable` components is resolved every time.
     fn armor_layer_set(
         &self,
@@ -345,12 +347,12 @@ impl Game<'_> {
             return self.resolve_armor_layer_set(item, stack, slot).map(std::rc::Rc::new);
         }
         let patch = data.and_then(|d| d.wire.patch()).unwrap_or(&[]);
-        let key = (slot, patch.as_ptr() as usize, patch.len());
-        if let Some(kept) = self.armor_layer_cache.borrow().get(item).and_then(|m| {
-            m.get(&key)
-                .filter(|(bytes, _)| **bytes == *patch)
-                .map(|(_, set)| set.clone())
-        }) {
+        if let Some(kept) = self
+            .armor_layer_cache
+            .borrow()
+            .get(item)
+            .and_then(|m| m[slot].get(patch).cloned())
+        {
             return kept;
         }
         let set = self
@@ -360,11 +362,11 @@ impl Game<'_> {
         if cache.len() >= 1024 {
             cache.clear();
         }
-        let by_patch = cache.entry(item.to_owned()).or_default();
+        let by_patch = &mut cache.entry(item.to_owned()).or_default()[slot];
         if by_patch.len() >= 256 {
             by_patch.clear();
         }
-        by_patch.insert(key, (patch.into(), set.clone()));
+        by_patch.insert(patch.into(), set.clone());
         set
     }
     fn resolve_armor_layer_set(

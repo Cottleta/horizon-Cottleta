@@ -52,7 +52,29 @@ pub(super) struct EntityPick {
     pub kind: PickKind,
 }
 
+impl EntityPick {
+    /// The pick as one of the objects [`Game::remote_object_hit`] knows.
+    pub(super) fn object_hit(&self) -> ObjectHit {
+        ObjectHit {
+            id: self.id,
+            distance: self.distance,
+            location: self.location,
+        }
+    }
+}
+
 impl Game<'_> {
+    /// `MultiPlayerGameMode.interact` on `pick`: the click goes to the server whatever
+    /// comes of it, carrying the hand and where the view met the entity.
+    pub(super) fn send_interact(&mut self, pick: &EntityPick, hand: i32, secondary: bool) {
+        self.send(S::Interact(play::Interact {
+            id: pick.id,
+            hand,
+            location: pick.location,
+            secondary,
+        }));
+    }
+
     /// `GameRenderer.pick`'s entity: the nearest entity vanilla can pick
     /// (`EntitySelector.CAN_BE_PICKED`) along the view within reach and before the block
     /// aimed at, of every kind at once. Attacks and uses both go to it, so a click reaches

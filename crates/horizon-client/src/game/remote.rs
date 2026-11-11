@@ -3288,11 +3288,7 @@ impl Game<'_> {
             value("minecraft:movement_speed"),
             value("minecraft:jump_strength"),
         );
-        // An armor stand is living too: its scale sizes its box.
-        if let Some(stand) = self.armor_stands.iter_mut().find(|a| a.id == id as u32) {
-            if let Some(scale) = scale {
-                stand.scale = scale as f32;
-            }
+        if self.armor_stand_attributes(id as u32, scale) {
             return;
         }
         let Some(m) = self.mob_index.get_mut(&mut self.mobs, id as u32) else {
@@ -8060,11 +8056,7 @@ impl Game<'_> {
         // A boat, minecart, item frame, armor stand or painting: the server uses it
         // (AbstractBoat.interact boards it).
         if pick.kind == super::remote_vehicles::PickKind::Object {
-            let hit = super::remote_vehicles::ObjectHit {
-                id: pick.id,
-                distance: pick.distance,
-                location: pick.location,
-            };
+            let hit = pick.object_hit();
             // Interaction.interact answers SUCCESS when it responds and
             // CONSUME otherwise: both end the click (nothing behind the box
             // is used), but only SUCCESS swings; the packet carries the hand.
@@ -8159,14 +8151,8 @@ impl Game<'_> {
             return true;
         }
         if let super::remote_vehicles::PickKind::Mob(i) = pick.kind {
-            let location = pick.location;
-            let id = self.mobs[i].id as i32;
-            self.send(S::Interact(play::Interact {
-                id,
-                hand: hand_id(hand),
-                location,
-                secondary: sneaking,
-            }));
+            let id = pick.id;
+            self.send_interact(&pick, hand_id(hand), sneaking);
             // Player.interactOn: another player passes, and so does a mob
             // the held item means nothing to: the item is used instead.
             let player = self
@@ -8184,15 +8170,8 @@ impl Game<'_> {
             }
             return false;
         }
-        // Any other pickable entity (a wind charge, a falling block, an End crystal...):
-        // `MultiPlayerGameMode.interact` sends the click whatever comes of it, and
-        // `Entity.interact` passes, so the hand's item is used after it.
-        self.send(S::Interact(play::Interact {
-            id: pick.id,
-            hand: hand_id(hand),
-            location: pick.location,
-            secondary: sneaking,
-        }));
+        // Any other pickable entity: `Entity.interact` passes, so the item is used after it.
+        self.send_interact(&pick, hand_id(hand), sneaking);
         false
     }
 

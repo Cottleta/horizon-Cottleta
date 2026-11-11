@@ -410,6 +410,18 @@ impl Game<'_> {
             &mut self.map_patches,
         );
     }
+    /// An armor stand is living too: its `minecraft:scale` attribute sizes its box and its
+    /// model. False when `id` is no armor stand.
+    pub(super) fn armor_stand_attributes(&mut self, id: u32, scale: Option<f64>) -> bool {
+        let Some(stand) = self.armor_stands.iter_mut().find(|a| a.id == id) else {
+            return false;
+        };
+        if let Some(scale) = scale {
+            stand.scale = scale as f32;
+        }
+        true
+    }
+
     /// `ArmorStandItem.useOn`.
     /// `ArmorStandItem.useOn` up to its `FAIL`s, which a client checks too:
     /// not on a bottom face, and nothing in the new stand's box. The block it
